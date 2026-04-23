@@ -1,0 +1,33 @@
+% Diagram: Hierarchical tree with 3 levels.
+% Uses the `forest` package, which produces cleaner trees than raw TikZ.
+% Adjust node labels and depth to fit your taxonomy.
+\documentclass[border=4pt]{standalone}
+\usepackage{forest}
+\begin{document}
+\begin{forest}
+  for tree={
+    grow=south,
+    parent anchor=south,
+    child anchor=north,
+    align=center,
+    minimum width=2.6cm,
+    minimum height=0.7cm,
+    draw, rounded corners,
+    l sep=8mm,
+    s sep=6mm,
+    font=\small,
+    edge={-latex, thick}
+  }
+  [Root
+    [Branch A
+      [Leaf A1]
+      [Leaf A2]
+    ]
+    [Branch B
+      [Leaf B1]
+      [Leaf B2]
+      [Leaf B3]
+    ]
+  ]
+\end{forest}
+\end{document}

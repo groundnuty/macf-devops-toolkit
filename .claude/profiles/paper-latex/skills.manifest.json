@@ -1,0 +1,10 @@
+{
+  "skills": [
+    {
+      "name": "tikz",
+      "source": "local",
+      "adapted_from": "https://github.com/scunning1975/MixtapeTools/blob/main/.claude/skills/tikz/SKILL.md",
+      "attribution": "Adapted from Scott Cunningham's MixtapeTools — use freely with attribution"
+    }
+  ]
+}

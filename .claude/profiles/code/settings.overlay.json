@@ -1,0 +1,18 @@
+{
+  "enabledPlugins": {
+    "context7@external-plugins": true
+  },
+  "sandbox": {
+    "excludedCommands": [
+      "helm:*",
+      "kubectl:*",
+      "kustomize:*",
+      "terraform:*",
+      "docker:*",
+      "podman:*",
+      "aws:*",
+      "gcloud:*",
+      "az:*"
+    ]
+  }
+}

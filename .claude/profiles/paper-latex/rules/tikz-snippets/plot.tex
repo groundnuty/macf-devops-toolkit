@@ -1,0 +1,27 @@
+% Diagram: 2D function plot using pgfplots.
+% Replaces hand-rolled TikZ axes with battle-tested pgfplots output.
+% Pin compat level to a known version for reproducibility.
+\documentclass[border=4pt]{standalone}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\begin{document}
+\begin{tikzpicture}
+  \begin{axis}[
+      width=9cm, height=6cm,
+      xlabel={$x$},
+      ylabel={$f(x)$},
+      xmin=-2\pi, xmax=2\pi,
+      ymin=-1.5, ymax=1.5,
+      grid=major,
+      legend pos=north east,
+      legend style={font=\small},
+      every axis label/.style={font=\small},
+      tick label style={font=\small}
+    ]
+    \addplot[blue, thick, domain=-2*pi:2*pi, samples=100] {sin(deg(x))};
+    \addlegendentry{$\sin x$}
+    \addplot[red, thick, dashed, domain=-2*pi:2*pi, samples=100] {cos(deg(x))};
+    \addlegendentry{$\cos x$}
+  \end{axis}
+\end{tikzpicture}
+\end{document}
