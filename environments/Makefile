@@ -154,6 +154,11 @@ argocd-bootstrap:  ## Install argocd + argocd-apps (app-of-apps) — one-time
 	@echo "--- waiting for argocd-application-controller + repo-server"
 	@$(DEVBOX_RUN) kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout=5m
 	@$(DEVBOX_RUN) kubectl -n argocd rollout status deployment/argocd-repo-server --timeout=5m
+	@echo "--- ensuring argocd-applications namespace exists (where Application CRs land)"
+	@# `application.namespaces=argocd-applications` in values/argocd.yaml scopes argocd to
+	@# this namespace. helm's --create-namespace only creates the chart's *release* namespace,
+	@# so we pre-create the Applications namespace explicitly.
+	@$(DEVBOX_RUN) kubectl create namespace argocd-applications --dry-run=client -o yaml | $(DEVBOX_RUN) kubectl apply -f -
 	@echo "--- installing argocd-apps $(ARGOCD_APPS_VERSION) (app-of-apps root)"
 	@$(DEVBOX_RUN) helm upgrade -i \
 	  --namespace argocd-apps --create-namespace \
