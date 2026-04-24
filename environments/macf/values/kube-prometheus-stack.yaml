@@ -29,6 +29,16 @@ grafana:
     enabled: true
     storageClassName: local-path  # k3s default
     size: 5Gi
+  # Disable the `init-chown-data` init container. It tries to chown the entire
+  # /var/lib/grafana tree as root+CAP_CHOWN, which races with the live Grafana
+  # writing PDF/CSV/PNG caches (drwx--S--- subdirs owned by 472). Symptom: new
+  # Grafana rollouts go Init:Error on `chown: /var/lib/grafana/{png,csv,pdf}:
+  # Permission denied` and the new pod never becomes Ready. Relying on
+  # fsGroup (default 472 in chart's podSecurityContext) + the
+  # `fsGroupChangePolicy: OnRootMismatch` kubelet default (k8s >= 1.23) means
+  # kubelet handles volume ownership at mount time with no race. Refs #7.
+  initChownData:
+    enabled: false
   sidecar:
     # Default ON; listed here for clarity. This sidecar watches for ConfigMaps
     # labeled `grafana_datasource: "1"` and registers them as datasources.
