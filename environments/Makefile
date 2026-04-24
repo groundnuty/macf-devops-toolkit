@@ -101,10 +101,14 @@ doctor:  ## Check docker, devbox, volume mount, tool availability
 .PHONY: registry
 registry:  ## Create persistent k3d registry backed by $(REGISTRY_DATA)
 	@mkdir -p $(REGISTRY_DATA)
+	@# k3d registry create does NOT support --config (only k3d cluster create does).
+	@# Flags passed directly; persistent volume mount is the load-bearing bit.
 	@if $(DEVBOX_RUN) k3d registry list 2>/dev/null | grep -q "^k3d-$(REGISTRY_NAME) "; then \
 	  echo "k3d-$(REGISTRY_NAME) registry already exists"; \
 	else \
-	  $(DEVBOX_RUN) k3d registry create --config k3d/registry.yaml; \
+	  $(DEVBOX_RUN) k3d registry create $(REGISTRY_NAME) \
+	    --port 5001 \
+	    --volume $(REGISTRY_DATA):/var/lib/registry ; \
 	fi
 
 .PHONY: cluster
@@ -181,11 +185,14 @@ nuke: cluster-down registry-down  ## Teardown: cluster + registry + $(REGISTRY_D
 pf-grafana:  ## Grafana at http://127.0.0.1:3000
 	$(DEVBOX_RUN) kubectl -n monitoring port-forward svc/kube-prom-stack-grafana 3000:80
 
-pf-tempo:  ## Tempo HTTP 3200 + OTLP 4317/4318
-	$(DEVBOX_RUN) kubectl -n tempo port-forward svc/tempo 3200:3200 4317:4317 4318:4318
+pf-tempo:  ## Tempo — local :13200/:14317/:14318 → cluster :3200/:4317/:4318
+	@# High host ports to avoid collision with the existing compose stack
+	@# (macf-obs-*) which binds :3200/:4317/:4318. hack/smoke.sh expects these.
+	$(DEVBOX_RUN) kubectl -n tempo port-forward svc/tempo 13200:3200 14317:4317 14318:4318
 
-pf-collector:  ## Collector OTLP 4317/4318
-	$(DEVBOX_RUN) kubectl -n otel port-forward svc/central-collector 4317:4317 4318:4318
+pf-collector:  ## Collector — local :14317/:14318 → cluster :4317/:4318
+	@# Same port-collision rationale as pf-tempo.
+	$(DEVBOX_RUN) kubectl -n otel port-forward svc/central-collector 14317:4317 14318:4318
 
 pf-argocd:  ## ArgoCD UI at http://127.0.0.1:8080
 	$(DEVBOX_RUN) kubectl -n argocd port-forward svc/argocd-server 8080:80
@@ -201,6 +208,10 @@ grafana-password:  ## Print the Grafana admin password
 .PHONY: argocd-password
 argocd-password:  ## Print the ArgoCD admin password (from initial-admin-secret)
 	@$(DEVBOX_RUN) kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d && echo
+
+.PHONY: smoke
+smoke:  ## OTLP round-trip test (needs `make pf-collector` + `make pf-tempo` in other terminals)
+	@bash hack/smoke.sh
 
 .PHONY: env-test
 env-test:  ## Debug — print inherited vars

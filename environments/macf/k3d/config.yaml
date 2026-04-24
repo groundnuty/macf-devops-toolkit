@@ -40,19 +40,30 @@ volumes:
     nodeFilters:
       - all
 
-ports:
-  - port: 127.0.0.1:6443:6443
-    nodeFilters:
-      - server:0
-
+# Kubernetes API server exposure. k3d's `exposeAPI` is the correct surface
+# for this — the generic `ports:` stanza maps ports on the load balancer
+# but doesn't update the generated kubeconfig (we observed kubeconfig still
+# pointing at k3d's auto-assigned random port despite the port-forward).
+# `exposeAPI.hostPort` is what k3d writes into the kubeconfig's server URL.
 options:
-  k3d:
-    wait: true
-    timeout: 2m
   kubeconfig:
     updateDefaultKubeconfig: true
     switchCurrentContext: true
+  k3d:
+    wait: true
+    timeout: 2m
   k3s:
     extraArgs:
       # Keep Traefik; kept for completeness — no ingress used in the spike.
       []
+
+# Placeholder for any non-API port-forwards (Traefik :80/:443 if we ever use
+# ingress). Empty for the spike.
+ports: []
+
+# Expose the Kubernetes API on localhost:6443 only.
+# (k3d v1alpha5 schema: field is `kubeAPI`, not `exposeAPI`.)
+kubeAPI:
+  host: "127.0.0.1"
+  hostIP: "127.0.0.1"
+  hostPort: "6443"
