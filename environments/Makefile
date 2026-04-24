@@ -225,9 +225,9 @@ argocd-password:  ## Print the ArgoCD admin password (from initial-admin-secret)
 smoke:  ## OTLP round-trip test (needs `make pf-collector` + `make pf-tempo` in other terminals)
 	@bash hack/smoke.sh
 
-.PHONY: langfuse-secrets
-langfuse-secrets:  ## Generate random Langfuse secrets + kubectl-apply to langfuse ns (idempotent per run)
-	@bash hack/langfuse-secrets.sh
+.PHONY: langfuse-bootstrap
+langfuse-bootstrap:  ## Generate ALL Langfuse secrets (subchart auth + headless-init + Collector api-keys) + restart pods. ONE-SHOT.
+	@bash hack/langfuse-bootstrap.sh
 
 .PHONY: env-test
 env-test:  ## Debug — print inherited vars

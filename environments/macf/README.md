@@ -36,18 +36,25 @@ Individual targets: `cluster-up`, `cluster-down`, `registry-up`, `registry-down`
 
 ### Langfuse (phase 2)
 
-Langfuse needs 7 secrets (3 app-layer + 4 subchart auth) that aren't shipped in Git. Generate them once at first install:
+One-shot autonomous bootstrap — no UI signup, no manual key copying:
 
 ```
-make langfuse-secrets     # generates + kubectl-applies 5 Secret resources to ns/langfuse
+make langfuse-bootstrap   # generates 6 Secrets, restarts pods, prints admin login
 ```
 
-This creates `langfuse-secrets` (salt / encryptionKey / nextauth) plus `langfuse-postgresql`, `langfuse-redis`, `langfuse-clickhouse`, `langfuse-s3`. Re-running **rotates** the secrets, which will invalidate the existing PVC data (Postgres/ClickHouse will reject the new passwords). Run once per fresh install.
+What it does:
+- Generates random subchart-auth passwords (Postgres, ClickHouse, Valkey, MinIO) — hex-only, URL-safe.
+- Generates app-layer secrets (salt, encryptionKey, nextauth).
+- Generates a public+secret API-key pair (`pk-lf-...` / `sk-lf-...`) and stores in BOTH:
+  - `langfuse-init` Secret (ns/langfuse) — picked up by langfuse-web's [headless-init env vars](https://langfuse.com/self-hosting/headless-initialization) on first boot, creating the org/project/user/keys with our values
+  - `langfuse-api-keys` Secret (ns/otel) — Collector's `otlphttp/langfuse` exporter reads it for basic-auth
+- Restarts langfuse-web (so init env vars take effect) + central-collector (so it picks up real keys).
+- Prints the admin email/password for the Langfuse UI (login at `make pf-langfuse` → http://127.0.0.1:3001).
 
-After secrets are in place, argocd reconciles the `langfuse-app` (sync-wave 2) and stands up 7 pods (postgresql, clickhouse, clickhouse-zookeeper, redis, minio, langfuse-web, langfuse-worker). First install takes ~2-3 min — mostly Prisma migrating 390+ schemas.
+Re-running **rotates ALL secrets** — destroys existing Postgres/ClickHouse data. Run once per fresh install unless intentional rotation.
 
 ```
-make pf-langfuse          # http://127.0.0.1:3001 (Langfuse UI)
+make pf-langfuse          # http://127.0.0.1:3001 (Langfuse UI; login from bootstrap output)
 ```
 
 ## Bootstrap flow (one-time)
@@ -78,9 +85,9 @@ From that point on, `git commit && git push` is the deploy command. No more `hel
 | `values/opentelemetry-operator.yaml` | otel-operator values (contrib image default, cert-manager webhooks) |
 | `manifests/otel-collector/` | `OpenTelemetryCollector` CR + RBAC — applied by `apps/otel-collector-app.yaml` |
 | `manifests/tempo-datasource/` | Grafana-datasource ConfigMap — applied by `apps/tempo-datasource-app.yaml` |
-| `manifests/langfuse/secrets.yaml.example` | Secret template for the 7 Langfuse secrets — `hack/langfuse-secrets.sh` renders the actual values |
-| `hack/smoke.sh` | OTLP round-trip smoke test (POST span → Collector → Tempo) |
-| `hack/langfuse-secrets.sh` | Generate + apply the 5 Langfuse Secret objects with random hex passwords |
+| `manifests/langfuse/secrets.yaml.example` | Secret template for the Langfuse secrets — `hack/langfuse-bootstrap.sh` renders + applies the actual values |
+| `hack/smoke.sh` | OTLP round-trip smoke test (POST span → Collector → Tempo + Langfuse) |
+| `hack/langfuse-bootstrap.sh` | One-shot autonomous Langfuse bootstrap (`make langfuse-bootstrap`) — generates all 6 secrets + restarts pods |
 
 ## Sync-wave topology
 
