@@ -1,0 +1,45 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: langfuse
+  namespace: argocd-applications
+  annotations:
+    # Sync-wave 2: after otel-collector (wave 1), so Langfuse lands with the
+    # Collector already routing. If the Collector's otlphttp/langfuse exporter
+    # is added to `otel-collector.yaml` in a follow-up, it references
+    # `langfuse-web.langfuse.svc.cluster.local:3000` — which only resolves
+    # after this wave reconciles.
+    argocd.argoproj.io/sync-wave: "2"
+    # Bitnami subcharts (postgresql, clickhouse, valkey/redis, minio) produce a
+    # LOT of extraneous resources — helm hooks, rollout ReplicaSets, init Jobs,
+    # etc. Same rationale as kube-prometheus-stack in PR #8 — `IgnoreExtraneous`
+    # keeps the Application's sync-status clean without pruning helm-hook
+    # infrastructure that the subcharts need.
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  sources:
+    - repoURL: https://langfuse.github.io/langfuse-k8s
+      chart: langfuse
+      targetRevision: 1.5.27
+      helm:
+        releaseName: langfuse
+        valueFiles:
+          - $values/environments/macf/values/langfuse.yaml
+    - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: langfuse
+  # Chart creates a ton of Bitnami subchart resources; most are boilerplate
+  # and drift on rev rollouts. IgnoreExtraneous keeps the status clean.
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

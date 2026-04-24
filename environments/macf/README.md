@@ -1,8 +1,8 @@
 # `environments/macf/` — MACF observability stack on k3d + ArgoCD
 
-**Status:** scaffold for issue [#1](https://github.com/groundnuty/macf-devops-toolkit/issues/1) (phase 1 of the observability-stack cutover). Live-cluster validation pending.
+**Status:** phase-1 live ([#1](https://github.com/groundnuty/macf-devops-toolkit/issues/1)) + phase-2 scaffold ([#2](https://github.com/groundnuty/macf-devops-toolkit/issues/2)).
 
-**Scope:** k3d single-node cluster + ArgoCD reconciling four helm charts — `cert-manager`, `kube-prometheus-stack`, `grafana-community/tempo` (monolithic), `opentelemetry-operator` — plus a central `OpenTelemetryCollector` CR fanning OTLP → Tempo + Prometheus `:8889`. Langfuse is **phase 2** ([#2](https://github.com/groundnuty/macf-devops-toolkit/issues/2)) and is **not** deployed here.
+**Scope:** k3d single-node cluster + ArgoCD reconciling five helm charts — `cert-manager`, `kube-prometheus-stack`, `grafana-community/tempo` (monolithic), `opentelemetry-operator`, `langfuse-k8s` — plus a central `OpenTelemetryCollector` CR fanning OTLP → Tempo + Prometheus `:8889`, and the Langfuse application for LLM observability.
 
 **Canonical design + rationale:** [`../../design/DR-001-argocd-gitops-for-observability-spike.md`](../../design/DR-001-argocd-gitops-for-observability-spike.md).
 **Version verification evidence:** [`../../research/2026-04-24-chart-version-verification.md`](../../research/2026-04-24-chart-version-verification.md).
@@ -32,7 +32,23 @@ make sync                # force argocd hard-refresh on every app
 make nuke                # teardown: cluster + registry + /mnt/volume1 data
 ```
 
-Individual targets: `cluster-up`, `cluster-down`, `registry-up`, `registry-down`, `argocd-bootstrap`, `pf-grafana`, `pf-tempo`, `pf-collector`, `grafana-password`, `lint`, `env-test`, `help`.
+Individual targets: `cluster-up`, `cluster-down`, `registry-up`, `registry-down`, `argocd-bootstrap`, `pf-grafana`, `pf-tempo`, `pf-collector`, `pf-langfuse`, `grafana-password`, `langfuse-secrets`, `smoke`, `lint`, `env-test`, `help`.
+
+### Langfuse (phase 2)
+
+Langfuse needs 7 secrets (3 app-layer + 4 subchart auth) that aren't shipped in Git. Generate them once at first install:
+
+```
+make langfuse-secrets     # generates + kubectl-applies 5 Secret resources to ns/langfuse
+```
+
+This creates `langfuse-secrets` (salt / encryptionKey / nextauth) plus `langfuse-postgresql`, `langfuse-redis`, `langfuse-clickhouse`, `langfuse-s3`. Re-running **rotates** the secrets, which will invalidate the existing PVC data (Postgres/ClickHouse will reject the new passwords). Run once per fresh install.
+
+After secrets are in place, argocd reconciles the `langfuse-app` (sync-wave 2) and stands up 7 pods (postgresql, clickhouse, clickhouse-zookeeper, redis, minio, langfuse-web, langfuse-worker). First install takes ~2-3 min — mostly Prisma migrating 390+ schemas.
+
+```
+make pf-langfuse          # http://127.0.0.1:3001 (Langfuse UI)
+```
 
 ## Bootstrap flow (one-time)
 
@@ -55,12 +71,16 @@ From that point on, `git commit && git push` is the deploy command. No more `hel
 | `apps/*.yaml` | ArgoCD `Application` CRs, one per helm chart or manifest bundle |
 | `values/argocd.yaml` | bootstrap values for the ArgoCD chart itself |
 | `values/argocd-apps.yaml` | `projects:` + root `root-app` pointing at `apps/` recursively |
+| `values/langfuse.yaml` | Langfuse helm values (single-node dev sizing; probes tuned for first-install migrations) |
 | `values/cert-manager.yaml` | cert-manager helm values (installCRDs=true) |
 | `values/kube-prometheus-stack.yaml` | kube-prom-stack values (4 k3s toggles, local-path PVCs, Grafana v12) |
 | `values/tempo.yaml` | Tempo monolithic values (OTLP 4317/4318, local-path PVC) |
 | `values/opentelemetry-operator.yaml` | otel-operator values (contrib image default, cert-manager webhooks) |
 | `manifests/otel-collector/` | `OpenTelemetryCollector` CR + RBAC — applied by `apps/otel-collector-app.yaml` |
 | `manifests/tempo-datasource/` | Grafana-datasource ConfigMap — applied by `apps/tempo-datasource-app.yaml` |
+| `manifests/langfuse/secrets.yaml.example` | Secret template for the 7 Langfuse secrets — `hack/langfuse-secrets.sh` renders the actual values |
+| `hack/smoke.sh` | OTLP round-trip smoke test (POST span → Collector → Tempo) |
+| `hack/langfuse-secrets.sh` | Generate + apply the 5 Langfuse Secret objects with random hex passwords |
 
 ## Sync-wave topology
 

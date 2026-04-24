@@ -206,6 +206,9 @@ pf-collector:  ## Collector OTLP — local :14317/:14318 → cluster :4317/:4318
 pf-argocd:  ## ArgoCD UI at http://127.0.0.1:8080
 	$(DEVBOX_RUN) kubectl -n argocd port-forward svc/argocd-server 8080:80
 
+pf-langfuse:  ## Langfuse UI at http://127.0.0.1:3001 (chart default :3000 → local :3001 to avoid Grafana collision)
+	$(DEVBOX_RUN) kubectl -n langfuse port-forward svc/langfuse-web 3001:3000
+
 # ################################################################################
 ##@ Utilities
 # ################################################################################
@@ -221,6 +224,10 @@ argocd-password:  ## Print the ArgoCD admin password (from initial-admin-secret)
 .PHONY: smoke
 smoke:  ## OTLP round-trip test (needs `make pf-collector` + `make pf-tempo` in other terminals)
 	@bash hack/smoke.sh
+
+.PHONY: langfuse-secrets
+langfuse-secrets:  ## Generate random Langfuse secrets + kubectl-apply to langfuse ns (idempotent per run)
+	@bash hack/langfuse-secrets.sh
 
 .PHONY: env-test
 env-test:  ## Debug — print inherited vars
