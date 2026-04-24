@@ -56,5 +56,14 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
+# TEMPORARY: wrap claude in `sg docker -c` so claude + its Bash-tool children
+# inherit the docker gid. Needed because this host's long-running tmux server
+# predates the `ubuntu`→`docker` group addition (/etc/group mtime 2026-04-14),
+# so panes spawned by the server lack the supplementary group. Without this,
+# `docker ps` / `docker compose` / k3s's containerd-shim interactions fail
+# with "permission denied while trying to connect to the docker API". Remove
+# this wrapper after a fresh tmux server (`tmux kill-server` + relaunch from
+# a new login shell) picks up the docker group natively. Same pattern +
+# rationale as in groundnuty/macf-science-agent:claude.sh.
 tmux new-session -s "$SESSION" -c "$DIR" \
-  "GH_TOKEN=$GH_TOKEN claude --permission-mode acceptEdits -c || GH_TOKEN=$GH_TOKEN claude --permission-mode acceptEdits"
+  "sg docker -c 'GH_TOKEN=$GH_TOKEN claude --permission-mode acceptEdits -c || GH_TOKEN=$GH_TOKEN claude --permission-mode acceptEdits'"
