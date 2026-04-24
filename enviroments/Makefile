@@ -196,6 +196,10 @@ pf-argocd:  ## ArgoCD UI at http://127.0.0.1:8080
 grafana-password:  ## Print the Grafana admin password
 	@$(DEVBOX_RUN) kubectl -n monitoring get secret kube-prom-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d && echo
 
+.PHONY: argocd-password
+argocd-password:  ## Print the ArgoCD admin password (from initial-admin-secret)
+	@$(DEVBOX_RUN) kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d && echo
+
 .PHONY: env-test
 env-test:  ## Debug — print inherited vars
 	@echo "ENVIRONMENT=$(ENVIRONMENT)"

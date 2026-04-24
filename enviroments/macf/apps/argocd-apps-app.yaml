@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-apps
+  namespace: argocd-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  sources:
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argocd-apps
+      targetRevision: 2.0.4
+      helm:
+        releaseName: argocd-apps
+        valueFiles:
+          - $values/enviroments/macf/values/argocd-apps.yaml
+    - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd-apps
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

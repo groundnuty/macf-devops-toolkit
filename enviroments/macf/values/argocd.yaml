@@ -1,0 +1,30 @@
+# argo-cd chart values — bootstrap config for the MACF devops cluster.
+# Chart version pinned in ../apps/argocd-app.yaml (Makefile reads via yq).
+#
+# Minimal setup for a single-user dev cluster:
+# - plain-HTTP argocd-server reachable via `make pf-argocd`
+# - auto-generated admin password (retrieved via `make argocd-password`)
+# - no notifications / SSO / remote-cluster registration
+# - Applications live in argocd-applications ns (survives argocd reinstalls)
+
+configs:
+  params:
+    # Application CRs scoped to this namespace to protect against cascading
+    # deletes during an argocd chart reinstall.
+    application.namespaces: "argocd-applications"
+    # Plain HTTP (Traefik / cert-manager TLS can layer on later if needed).
+    server.insecure: "true"
+    admin.enabled: "true"
+
+  cm:
+    # Allow kustomize to build inline helm charts (same as spice default).
+    kustomize.buildOptions: "--enable-helm"
+    # Short loop for a dev cluster.
+    timeout.reconciliation: 30s
+
+notifications:
+  enabled: false
+
+server:
+  extraArgs:
+    - --insecure

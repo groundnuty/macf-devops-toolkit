@@ -1,123 +1,133 @@
-# `ops/k8s/` — MACF observability stack on k3s
+# `enviroments/macf/` — MACF observability stack on k3d + ArgoCD
 
-**Status:** scaffold for issue #1 (phase 1 of observability-stack cutover). Acceptance criteria not yet validated against a live cluster. Iteration PRs will follow.
+**Status:** scaffold for issue [#1](https://github.com/groundnuty/macf-devops-toolkit/issues/1) (phase 1 of the observability-stack cutover). Live-cluster validation pending.
 
-**Scope:** k3s single-node + 4 helm charts operational end-to-end (`cert-manager`, `kube-prometheus-stack`, `grafana-community/tempo`, `opentelemetry-operator`) + one `OpenTelemetryCollector` CR fanning OTLP → Tempo + Prometheus. Langfuse is **phase 2** (issue #2) and is **not** deployed here.
+**Scope:** k3d single-node cluster + ArgoCD reconciling four helm charts — `cert-manager`, `kube-prometheus-stack`, `grafana-community/tempo` (monolithic), `opentelemetry-operator` — plus a central `OpenTelemetryCollector` CR fanning OTLP → Tempo + Prometheus `:8889`. Langfuse is **phase 2** ([#2](https://github.com/groundnuty/macf-devops-toolkit/issues/2)) and is **not** deployed here.
 
-## Version matrix (verified 2026-04-24)
+**Canonical design + rationale:** [`../../design/DR-001-argocd-gitops-for-observability-spike.md`](../../design/DR-001-argocd-gitops-for-observability-spike.md).
+**Version verification evidence:** [`../../research/2026-04-24-chart-version-verification.md`](../../research/2026-04-24-chart-version-verification.md).
 
-| Component | Pinned | Released | Source |
-|---|---|---|---|
-| k3s | `v1.35.3+k3s1` | 2026-03-28 | [k3s-io/k3s releases](https://github.com/k3s-io/k3s/releases) |
-| cert-manager | `v1.20.2` (chart + app) | 2026-04-11 | [cert-manager releases](https://github.com/cert-manager/cert-manager/releases) |
-| kube-prometheus-stack | `84.0.0` | 2026-04-23 | [prometheus-community/helm-charts](https://github.com/prometheus-community/helm-charts/releases) — **major bump: Grafana v11→v12** |
-| grafana-community/tempo (monolithic) | `2.0.0` (app `2.10.1`) | 2026 | [grafana-community/helm-charts](https://github.com/grafana-community/helm-charts) |
-| opentelemetry-operator (chart) | `0.110.0` (operator `v0.148.0`) | 2026-04-16 | [opentelemetry-helm-charts](https://github.com/open-telemetry/opentelemetry-helm-charts) |
+Layout mirrors [`groundnuty/onedata/spice-deployments`](~/repos/onedata/spice-deployments) almost verbatim.
 
-**Delta from `groundnuty/macf-science-agent:research/2026-04-23-helm-vs-compose-maturity-for-recommended-stack.md`:**
+## Operator interface: `make`
 
-- kube-prometheus-stack bumped 83.7.0 → 84.0.0 (Grafana v12). Major bump; watch for dashboard-plugin regressions on first install.
-- **Tempo monolithic chart moved** from `grafana/helm-charts` to `grafana-community/helm-charts` (completed 2026-01-30). The research doc said the monolithic chart was "staying in `grafana/helm-charts`" — that's outdated. Helm repo is now `https://grafana-community.github.io/helm-charts`.
-- Tempo chart jumped to 2.0.0 — values schema changed vs. 1.24.x cited in the doc.
-
-## Install order
-
-Webhooks in kube-prometheus-stack and opentelemetry-operator require cert-manager CRDs + webhook cert to be reconciled first. `scripts/install.sh` encodes the order.
+All casual operations go through `make <target>` from this directory. Inside a devbox shell:
 
 ```
-1. k3s (system service)
-2. cert-manager      (CRDs + webhook; wait Ready)
-3. kube-prometheus-stack  (Grafana + Prometheus + Alertmanager; wait Ready)
-4. grafana-community/tempo  (StatefulSet; wait Ready)
-5. opentelemetry-operator  (operator Deployment + CRDs; wait Ready)
-6. manifests/tempo-grafana-datasource.yaml  (ConfigMap; Grafana sidecar picks up)
-7. manifests/otel-collector.yaml  (namespace + RBAC + OpenTelemetryCollector CR)
+cd enviroments/macf
+devbox install
+devbox shell
+make help
 ```
 
-### k3s bootstrap
+### Common flows
 
 ```
-curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.35.3+k3s1 sh -
-sudo chmod 644 /etc/rancher/k3s/k3s.yaml
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-kubectl get nodes  # expect Ready
+make doctor              # preflight: docker, devbox, /mnt/volume1, tool versions
+make all                 # = make cluster + make argocd-bootstrap
+make argocd-password     # retrieve the generated admin password
+make pf-argocd           # port-forward argocd UI to http://127.0.0.1:8080
+make status              # kubectl get app -A
+make sync                # force argocd hard-refresh on every app
+make nuke                # teardown: cluster + registry + /mnt/volume1 data
 ```
 
-k3s ships `local-path` as the default StorageClass and Traefik as the built-in ingress controller. No Helm Traefik override needed.
+Individual targets: `cluster-up`, `cluster-down`, `registry-up`, `registry-down`, `argocd-bootstrap`, `pf-grafana`, `pf-tempo`, `pf-collector`, `grafana-password`, `lint`, `env-test`, `help`.
 
-### Helm repo setup
+## Bootstrap flow (one-time)
 
-```
-helm repo add jetstack https://charts.jetstack.io
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add grafana-community https://grafana-community.github.io/helm-charts
-helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
-helm repo update
-```
+The very first `make all` does two imperative things — after that, everything reconciles from Git:
 
-### Installation
+1. **k3d cluster + persistent registry** via `k3d cluster create --config k3d/config.yaml`. Registry persists on `/mnt/volume1/k3d-registry-data`; cluster PVCs on `/mnt/volume1/k3d-storage`.
+2. **ArgoCD + ArgoCD-Apps** via `helm upgrade -i`. Once the `argocd-apps` root reconciles, it walks `apps/*-app.yaml` and creates Application CRs for every chart + manifest in this directory.
 
-```
-bash scripts/install.sh
-```
+From that point on, `git commit && git push` is the deploy command. No more `helm install` from the operator side.
 
-Idempotent; safe to re-run if a step fails mid-way. Each `helm upgrade --install` with `--wait` blocks until the release is ready.
-
-## Access
-
-Port-forward (no ingress in this phase):
-
-```
-# Grafana (default admin password retrieved from Secret)
-kubectl -n monitoring port-forward svc/kube-prom-stack-grafana 3000:80
-kubectl -n monitoring get secret kube-prom-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d
-
-# Tempo (for curl/grpcurl smoke tests against the OTLP receivers)
-kubectl -n tempo port-forward svc/tempo 3200:3200 4317:4317 4318:4318
-
-# OpenTelemetry Collector (OTLP ingress for test spans)
-kubectl -n otel port-forward svc/central-collector 4317:4317 4318:4318
-```
-
-Open Grafana at `http://127.0.0.1:3000`, Explore → Tempo datasource → run a trace search.
-
-## Round-trip smoke test
-
-Send a test span via `grpcurl` (or any OTLP-aware tool) to the Collector's `:4317`, confirm it lands in Tempo via Grafana Explore. **Pending: live-cluster validation in a follow-up PR. Exact curl/grpcurl command to be pasted into that PR's description.**
-
-## Uninstall / teardown
-
-```
-bash scripts/uninstall.sh
-```
-
-Order is reverse of install. If a helm uninstall hangs (CRD finalizers), the script has `kubectl delete --grace-period=0 --force` escape hatches documented inline.
-
-Full cluster reset (nuclear option):
-
-```
-sudo /usr/local/bin/k3s-uninstall.sh
-sudo rm -rf /var/lib/rancher/k3s /etc/rancher/k3s
-```
-
-Persistent state between spike attempts has bitten previous observability rollouts (see `groundnuty/macf-science-agent:research/2026-04-23-helm-vs-compose-maturity-for-recommended-stack.md` §8 note 3). Reset to a clean cluster if debugging in circles.
-
-## Known gotchas
-
-- **kube-prometheus-stack 4 k3s disables.** `kubeScheduler`, `kubeControllerManager`, `kubeProxy`, `kubeEtcd` — all `enabled: false`. k3s collapses these into a single binary that doesn't expose `/metrics` on standard ports. Alternative (not taken): `--kube-*-arg='bind-address=0.0.0.0'` at k3s install time. For a single-node spike, disable is simpler.
-- **Grafana sidecar datasource label.** The kube-prom-stack Grafana deployment watches for ConfigMaps labeled `grafana_datasource: "1"`. `manifests/tempo-grafana-datasource.yaml` carries that label; the Tempo chart does not ship one of its own.
-- **`k8sattributes` processor requires cluster-wide RBAC.** The OpenTelemetry Collector's ServiceAccount needs `get/watch/list` on pods, namespaces, nodes, replicasets, deployments. `manifests/otel-collector.yaml` includes the ClusterRole + binding.
-- **Tempo chart schema delta.** Version 2.0.0 (grafana-community) has a different values schema than 1.24.x (the old grafana/ path). The `tempo.storage.trace.backend: local` form is used here; older tutorials may still cite `storage.trace.backend` without the `tempo.` prefix — doesn't apply to 2.0.0.
-
-## Files
+## Directory map
 
 | Path | Purpose |
 |---|---|
-| `values/cert-manager.yaml` | cert-manager values (CRD install enabled) |
-| `values/kube-prometheus-stack.yaml` | Grafana + Prometheus + Alertmanager; 4 k3s toggles; local-path PVCs |
-| `values/tempo.yaml` | Tempo monolithic values; local-path PVC; OTLP receivers on 4317/4318 |
-| `values/opentelemetry-operator.yaml` | Operator values; contrib collector image |
-| `manifests/tempo-grafana-datasource.yaml` | ConfigMap for Grafana sidecar to auto-wire Tempo datasource |
-| `manifests/otel-collector.yaml` | Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding, `OpenTelemetryCollector` CR |
-| `scripts/install.sh` | Install orchestrator (idempotent) |
-| `scripts/uninstall.sh` | Teardown orchestrator |
+| `Makefile` | thin wrapper — `include ../Makefile` |
+| `devbox.json` | pinned toolchain (`helm`, `kubectl`, `k3d`, `grpcurl`, `yq-go`, `jq`) |
+| `k3d/version.yaml` | k3s image tag read by Makefile (source of truth) |
+| `k3d/config.yaml` | k3d cluster declarative config (1 server, 0 agents, volume mounts) |
+| `k3d/registry.yaml` | k3d registry declarative config (persistent on `/mnt/volume1`) |
+| `apps/*.yaml` | ArgoCD `Application` CRs, one per helm chart or manifest bundle |
+| `values/argocd.yaml` | bootstrap values for the ArgoCD chart itself |
+| `values/argocd-apps.yaml` | `projects:` + root `root-app` pointing at `apps/` recursively |
+| `values/cert-manager.yaml` | cert-manager helm values (installCRDs=true) |
+| `values/kube-prometheus-stack.yaml` | kube-prom-stack values (4 k3s toggles, local-path PVCs, Grafana v12) |
+| `values/tempo.yaml` | Tempo monolithic values (OTLP 4317/4318, local-path PVC) |
+| `values/opentelemetry-operator.yaml` | otel-operator values (contrib image default, cert-manager webhooks) |
+| `manifests/otel-collector/` | `OpenTelemetryCollector` CR + RBAC — applied by `apps/otel-collector-app.yaml` |
+| `manifests/tempo-datasource/` | Grafana-datasource ConfigMap — applied by `apps/tempo-datasource-app.yaml` |
+
+## Sync-wave topology
+
+| Wave | Applications | Why this wave |
+|---|---|---|
+| `-1` | `cert-manager` | CRDs + webhook required before any chart with a cert-manager-backed admission webhook reconciles |
+| `0`  | `argocd`, `argocd-apps`, `kube-prometheus-stack`, `tempo`, `otel-operator` | core infra; argocd self-manages after bootstrap, others install their CRDs so wave-1 dependents have something to point at |
+| `1`  | `otel-collector`, `tempo-datasource` | Collector CR needs `OpenTelemetryCollector` CRD (from otel-operator); Grafana datasource ConfigMap is picked up by kube-prom's Grafana sidecar |
+
+## Access
+
+All services reached via `kubectl port-forward` (no ingress in the spike). Each has a Makefile target:
+
+```
+make pf-grafana          # http://127.0.0.1:3000
+make pf-tempo            # http://127.0.0.1:3200 + OTLP 4317/4318
+make pf-collector        # Collector OTLP 4317/4318
+make pf-argocd           # http://127.0.0.1:8080
+make grafana-password    # print Grafana admin password
+make argocd-password     # print ArgoCD admin password
+```
+
+## Version matrix (verified 2026-04-24)
+
+Full provenance: [`../../research/2026-04-24-chart-version-verification.md`](../../research/2026-04-24-chart-version-verification.md).
+
+| Component | Pin | Released |
+|---|---|---|
+| `rancher/k3s` (in k3d) | `v1.35.3-k3s1` | 2026-03-28 |
+| `argo-cd` chart | `9.5.4` | 2026-04-22 |
+| `argocd-apps` chart | `2.0.4` | 2026-01-12 |
+| `cert-manager` chart | `v1.20.2` | 2026-04-11 |
+| `kube-prometheus-stack` chart | `84.0.0` | 2026-04-23 — ships Grafana v12 |
+| `grafana-community/tempo` chart | `2.0.0` (app 2.10.1) | migrated from `grafana/helm-charts` on 2026-01-30 |
+| `opentelemetry-operator` chart | `0.110.0` (operator v0.148.0) | 2026-04-16 |
+
+Version pins live in `apps/*-app.yaml` as `targetRevision`; Makefile extracts ArgoCD's own versions via `yq` so `make argocd-bootstrap` knows what chart version to install. Bumps are one-liner PRs.
+
+## Known gotchas
+
+- **Docker permission-denied in stale-tmux sessions.** If `make doctor` reports "docker inaccessible," the current tmux predates the `ubuntu`→`docker` group membership. Workaround: wrap any docker-touching command with `sg docker -c "..."`. Permanent fix: `tmux kill-server` + relaunch. See [`../../memory/reference_docker_sg_workaround_stale_tmux.md`](../../memory/reference_docker_sg_workaround_stale_tmux.md) (local memory, not in git).
+- **k3s vs k3d image tag format.** `version.yaml:k3s_image` uses `rancher/k3s:vX.Y.Z-k3s1` (Docker tag, `-`). The k3s GitHub release tags are `vX.Y.Z+k3s1` (`+`). The `+` is invalid in an OCI image tag — always use `-` when composing the k3d image.
+- **Registry lifecycle is independent of cluster.** `k3d cluster delete` does NOT remove `k3d-macf-mirror`. That's intentional — the registry is the persistent image cache. To blow it away, `make registry-down` (or `make nuke`).
+- **4 k3s control-plane scrape targets disabled** in `values/kube-prometheus-stack.yaml` (kubeScheduler/kubeControllerManager/kubeProxy/kubeEtcd). k3s collapses these into a single binary that doesn't expose `/metrics` on standard ports. Alternative not taken: `--kube-*-arg='bind-address=0.0.0.0'` at cluster start.
+- **Tempo chart repo migration.** Use `grafana-community/tempo`, not `grafana/tempo`. The old `grafana/helm-charts/charts/tempo` is a README redirect since 2026-01-30.
+- **Grafana v11 → v12 in kube-prom 84.0.0.** First install may surface dashboard-plugin regressions; no explicit BREAKING CHANGE markers in release notes. See Grafana 12 upgrade guide: https://grafana.com/docs/grafana/latest/upgrade-guide/upgrade-v12.0/
+- **`OpenTelemetryCollector` CR is `opentelemetry.io/v1beta1`.** Training data + some older docs show `v1alpha1` — that's still accepted but `v1beta1` is the storage version in operator v0.148.0+.
+- **`k8sattributes` processor needs cluster-wide RBAC.** ClusterRole + Binding shipped alongside the Collector CR in `manifests/otel-collector/otel-collector.yaml` — don't strip on a values cleanup pass.
+
+## Round-trip smoke test
+
+Pending live-cluster validation. Target form (recorded here so the follow-up PR reproduces it):
+
+```
+# From inside enviroments/macf, in a devbox shell with the cluster up + argocd reconciled:
+make pf-collector &                                                    # terminal 1
+grpcurl -plaintext -d '...otel-protobuf-request-body...' 127.0.0.1:4317 \
+    opentelemetry.proto.collector.trace.v1.TraceService/Export         # terminal 2
+make pf-grafana                                                         # browse to :3000, Explore → Tempo → query by traceId
+```
+
+Literal tool output will land in the follow-up PR description per `verify-before-claim.md`.
+
+## Teardown
+
+```
+make nuke                 # uninstall stack + delete cluster + delete registry + wipe /mnt/volume1 data
+```
+
+k3d is container-wrapped — there's no systemd service to uninstall and no host packages to remove. The VM is back to "k3d binary exists" state.
