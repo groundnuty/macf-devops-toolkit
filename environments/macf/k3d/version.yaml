@@ -1,0 +1,10 @@
+# k3d + k3s image pins for this environment.
+# Read by ../Makefile via yq at invocation time — bump and the Makefile
+# picks it up on next `make`.
+#
+# Note: Docker image tags use '-' in the suffix (rancher/k3s:vX.Y.Z-k3s1),
+# whereas the k3s GitHub release tags use '+' (vX.Y.Z+k3s1). Map accordingly.
+#
+# Provenance: ../../research/2026-04-24-chart-version-verification.md §3.
+
+k3s_image: rancher/k3s:v1.35.3-k3s1

@@ -1,0 +1,44 @@
+# argocd-apps chart values — the app-of-apps root.
+# Defines:
+#  - Projects (logical permissions grouping; everything here is `operations`)
+#  - Root Application that reconciles everything under apps/ recursively.
+#
+# Any new environments/macf/apps/*-app.yaml committed to main is auto-registered
+# — no helm upgrade needed for application additions, only for chart-itself
+# bumps.
+
+projects:
+  operations:
+    namespace: argocd
+    description: Cluster operations — argocd, cert-manager, tempo, otel, kube-prom
+    sourceRepos:
+      - '*'
+    destinations:
+      - namespace: '*'
+        server: https://kubernetes.default.svc
+    clusterResourceWhitelist:
+      - group: '*'
+        kind: '*'
+    sourceNamespaces:
+      - "*"
+
+applications:
+  root-app:
+    namespace: argocd-applications
+    project: operations
+    sources:
+      - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+        targetRevision: HEAD
+        path: environments/macf/apps
+        directory:
+          recurse: true
+    destination:
+      namespace: argocd-applications
+      server: https://kubernetes.default.svc
+    syncPolicy:
+      automated:
+        prune: true
+        selfHeal: true
+      syncOptions:
+        - CreateNamespace=true
+        - ServerSideApply=true

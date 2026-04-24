@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tempo-datasource
+  namespace: argocd-applications
+  annotations:
+    # Wave 1: Grafana's sidecar (kube-prom wave 0) discovers this ConfigMap
+    # on reconciliation; it needs to exist *after* the monitoring namespace
+    # + Grafana deployment are present.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/tempo-datasource
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tempo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
