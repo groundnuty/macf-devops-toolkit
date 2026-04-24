@@ -99,7 +99,16 @@
       "nix:*",
       "git:*",
       "gpg:*",
-      "gpg-agent:*"
+      "gpg-agent:*",
+      "helm:*",
+      "kubectl:*",
+      "kustomize:*",
+      "terraform:*",
+      "docker:*",
+      "podman:*",
+      "aws:*",
+      "gcloud:*",
+      "az:*"
     ],
     "network": {
       "allowedDomains": [
@@ -152,9 +161,21 @@
     "hookify@claude-plugins-official": true,
     "claude-code-setup@claude-plugins-official": true,
     "feature-dev@claude-plugins-official": true,
-    "elements-of-style@superpowers-marketplace": true
+    "elements-of-style@superpowers-marketplace": true,
+    "context7@external-plugins": true
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/scripts/check-gh-token.sh"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
