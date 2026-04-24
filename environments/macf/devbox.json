@@ -10,10 +10,5 @@
   ],
   "env": {
     "KUBECONFIG": "${HOME}/.kube/config"
-  },
-  "shell": {
-    "init_hook": [
-      "echo 'devbox shell ready — run `make help` for the operational interface'"
-    ]
   }
 }
