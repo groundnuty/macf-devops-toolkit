@@ -1,0 +1,36 @@
+# cert-manager helm values
+# Chart + app: v1.20.2 released 2026-04-11
+#   https://github.com/cert-manager/cert-manager/releases/tag/v1.20.2
+# Purpose: provides webhook TLS certs for kube-prometheus-stack and
+# opentelemetry-operator. Both charts ship admission webhooks that fail
+# if cert-manager isn't reconciled first.
+
+installCRDs: true
+
+# Conservative resource floor for a single-node k3s dev cluster.
+# Cert-manager is low-QPS; these defaults have headroom.
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+webhook:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+cainjector:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi

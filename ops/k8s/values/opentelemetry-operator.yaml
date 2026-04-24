@@ -1,0 +1,19 @@
+# opentelemetry-operator helm values
+# Chart: 0.110.0 (operator appVersion v0.148.0) released 2026-04-16
+#   https://github.com/open-telemetry/opentelemetry-helm-charts/tree/main/charts/opentelemetry-operator
+# Operator ships `OpenTelemetryCollector` + `Instrumentation` CRDs.
+# We only use OpenTelemetryCollector in this phase — no auto-instrumentation.
+
+# Default collector image for OpenTelemetryCollector CRs that don't pin one
+# explicitly. Contrib image is required because our central collector uses
+# k8sattributes + other contrib-only processors/exporters.
+manager:
+  collectorImage:
+    repository: otel/opentelemetry-collector-contrib
+    # Leave tag unset — operator ships a tested default matching appVersion.
+
+# Operator webhook depends on cert-manager; cert-manager is installed first
+# (see scripts/install.sh).
+admissionWebhooks:
+  certManager:
+    enabled: true

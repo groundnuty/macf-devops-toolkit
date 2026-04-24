@@ -1,0 +1,67 @@
+# kube-prometheus-stack helm values
+# Chart: 84.0.0 released 2026-04-23 (Grafana v11 -> v12 major bump)
+#   https://github.com/prometheus-community/helm-charts/releases/tag/kube-prometheus-stack-84.0.0
+# Bundles Prometheus + Grafana + Alertmanager + node-exporter + kube-state-metrics
+# plus ~50 preset dashboards and alert rules.
+
+# --- k3s single-node control-plane disables -----------------------------------
+# k3s collapses these components into a single binary that does not expose
+# /metrics on standard ports. Alternative is --kube-*-arg='bind-address=0.0.0.0'
+# at k3s install time; for a spike we disable the panels instead.
+kubeScheduler:         {enabled: false}
+kubeControllerManager: {enabled: false}
+kubeProxy:             {enabled: false}
+kubeEtcd:              {enabled: false}
+
+# --- Grafana ------------------------------------------------------------------
+grafana:
+  # v12 default in 84.0.0. If a dashboard plugin breaks after install,
+  # Grafana 12 migration notes: https://grafana.com/docs/grafana/latest/upgrade-guide/upgrade-v12.0/
+  enabled: true
+  # Random admin password is generated into `kube-prom-stack-grafana` Secret.
+  # Retrieve via:
+  #   kubectl -n monitoring get secret kube-prom-stack-grafana \
+  #     -o jsonpath='{.data.admin-password}' | base64 -d
+  adminPassword: ""
+  service:
+    type: ClusterIP
+  persistence:
+    enabled: true
+    storageClassName: local-path  # k3s default
+    size: 5Gi
+  sidecar:
+    # Default ON; listed here for clarity. This sidecar watches for ConfigMaps
+    # labeled `grafana_datasource: "1"` and registers them as datasources.
+    # Our Tempo datasource ConfigMap (manifests/tempo-grafana-datasource.yaml)
+    # uses this label.
+    datasources:
+      enabled: true
+      label: grafana_datasource
+      labelValue: "1"
+      searchNamespace: ALL  # Tempo ConfigMap lives in `tempo` ns, not `monitoring`
+    dashboards:
+      enabled: true
+      searchNamespace: ALL
+
+# --- Prometheus ---------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    retention: 7d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 20Gi
+
+# --- Alertmanager -------------------------------------------------------------
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          resources:
+            requests:
+              storage: 2Gi

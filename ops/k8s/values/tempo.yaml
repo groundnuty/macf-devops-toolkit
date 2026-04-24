@@ -1,0 +1,48 @@
+# grafana-community/tempo (monolithic) helm values
+# Chart: 2.0.0 (app Tempo 2.10.1)
+#   Repo: grafana-community/helm-charts
+#   URL:  https://grafana-community.github.io/helm-charts
+# NOTE: This chart moved from grafana/helm-charts to grafana-community/helm-charts
+# after 2026-01-30. The research doc (2026-04-23) incorrectly said the monolithic
+# chart was staying in grafana/helm-charts; verified against the upstream
+# README.md redirect on 2026-04-24.
+
+replicas: 1
+
+tempo:
+  retention: 72h  # 3-day trace retention on the spike cluster
+
+  # Receivers — chart default already binds OTLP on 4317 (gRPC) + 4318 (HTTP).
+  # Listed explicitly here so the values file is self-documenting.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  # Storage — local filesystem via k3s local-path provisioner. No S3/GCS.
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  # Disable the built-in metrics generator for the spike. Prometheus already
+  # scrapes k8s infra via kube-prometheus-stack; trace-derived metrics add
+  # scope we don't need yet.
+  metricsGenerator:
+    enabled: false
+
+# Persistence — PVC backed by local-path (k3s default StorageClass).
+persistence:
+  enabled: true
+  storageClassName: local-path
+  size: 10Gi
+
+# ServiceMonitor so kube-prometheus-stack scrapes Tempo's own metrics.
+serviceMonitor:
+  enabled: true
