@@ -1,30 +1,30 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: tempo
+  name: cert-manager
   namespace: argocd-applications
   annotations:
-    argocd.argoproj.io/sync-wave: "0"
+    # Wave -1: cert-manager CRDs + webhook must exist before kube-prometheus-stack
+    # and opentelemetry-operator reconcile (both have cert-manager-backed webhooks).
+    argocd.argoproj.io/sync-wave: "-1"
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: operations
   sources:
-    # NOTE: grafana-community (not grafana). Monolithic chart migrated from
-    # grafana/helm-charts on 2026-01-30. See ../../../research/2026-04-24-chart-version-verification.md §1.
-    - repoURL: https://grafana-community.github.io/helm-charts
-      chart: tempo
-      targetRevision: 2.0.0
+    - repoURL: https://charts.jetstack.io
+      chart: cert-manager
+      targetRevision: v1.20.2
       helm:
-        releaseName: tempo
+        releaseName: cert-manager
         valueFiles:
-          - $values/enviroments/macf/values/tempo.yaml
+          - $values/environments/macf/values/cert-manager.yaml
     - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
       targetRevision: HEAD
       ref: values
   destination:
     server: https://kubernetes.default.svc
-    namespace: tempo
+    namespace: cert-manager
   syncPolicy:
     automated:
       prune: true

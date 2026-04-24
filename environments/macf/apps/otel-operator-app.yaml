@@ -16,7 +16,7 @@ spec:
       helm:
         releaseName: otel-operator
         valueFiles:
-          - $values/enviroments/macf/values/opentelemetry-operator.yaml
+          - $values/environments/macf/values/opentelemetry-operator.yaml
     - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
       targetRevision: HEAD
       ref: values

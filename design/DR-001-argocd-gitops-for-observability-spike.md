@@ -47,21 +47,21 @@ Created once via `k3d registry create`, referenced via `--registry-use` on clust
 
 Concretely:
 
-    enviroments/macf/
+    environments/macf/
       apps/            # Argo CD Application YAMLs (one per chart)
       values/          # helm values referenced via $values ref in Applications
       manifests/       # raw k8s manifests applied alongside (Tempo datasource CM, Collector CR)
       k3d/             # declarative k3d config — version.yaml, config.yaml, registry.yaml
       Makefile         # env-facing, includes ../Makefile
       devbox.json      # helm, kubectl, k3d, grpcurl, yq-go, jq pinned
-    enviroments/
+    environments/
       Makefile         # shared targets: k3d-install, argocd-bootstrap, lint, smoke
 
-PR #3's `ops/k8s/` contents migrate into `enviroments/macf/` via `git mv`. No content changes to the helm values files or manifests — only path moves plus the new `apps/`, `k3d/`, `Makefile`, `devbox.json` additions.
+PR #3's `ops/k8s/` contents migrate into `environments/macf/` via `git mv`. No content changes to the helm values files or manifests — only path moves plus the new `apps/`, `k3d/`, `Makefile`, `devbox.json` additions.
 
 ### 5. devbox + Makefile is the operational interface
 
-Tool installation on the VM is limited to what cannot be container-wrapped: at present just the `docker` daemon itself. Everything else — `helm`, `kubectl`, `k3d`, `grpcurl`, `yq-go`, `jq` — is a devbox package pinned in `enviroments/macf/devbox.json`. All operator actions flow through `make <target>` in `enviroments/macf/`.
+Tool installation on the VM is limited to what cannot be container-wrapped: at present just the `docker` daemon itself. Everything else — `helm`, `kubectl`, `k3d`, `grpcurl`, `yq-go`, `jq` — is a devbox package pinned in `environments/macf/devbox.json`. All operator actions flow through `make <target>` in `environments/macf/`.
 
 Targets include: `doctor`, `cluster-up` (= `registry-up` + `k3d cluster create`), `argocd-bootstrap`, `sync`, `status`, `cluster-down`, `registry-down`, `nuke`, `pf-grafana`, `pf-tempo`, `pf-collector`, `grafana-password`, `lint`.
 
@@ -80,7 +80,7 @@ Targets include: `doctor`, `cluster-up` (= `registry-up` + `k3d cluster create`)
 - **Flux CD over Argo CD.** Technically lighter (4 controllers vs Argo's 5-6) and CLI-native, which fits the devbox+Makefile aesthetic. Rejected because the operator is Argo-fluent and spice-deployments is already the canonical template. Teaching-new-tool overhead not justified for a paper-scale workload.
 - **Bare-metal k3s.** Would give direct shared containerd image cache (no registry hop) and matches spice-deployments' own cluster choice. Rejected *for this spike* because the operator explicitly wants to try k3d. Reversible — if k3d breaks, the pivot is a small change in `Makefile` plus replacing `k3d/config.yaml` with `k3s/config.yaml`. Apps/, values/, manifests/ layouts are unchanged.
 - **Tier A (compose, no Kubernetes).** Simpler, zero image-isolation overhead, documented in the helm-vs-compose research doc §7 as a legitimate answer. Rejected because it loses the Operator/CRD surface (no `OpenTelemetryCollector` CR, no `ServiceMonitor`, no curated Grafana dashboards bundle) that makes helm meaningfully easier than compose for 3 of the 4 charts.
-- **Flat `ops/k8s/` layout (no `enviroments/<env>/` nesting).** Slightly cheaper for the single-env case. Rejected because the env-folder pattern matches spice verbatim (future muscle-memory transfer), makes multi-env evolution zero-friction if ever needed, and avoids a "semantic-mirror-but-differently-rooted" mismatch that would subtly drift from spice over time.
+- **Flat `ops/k8s/` layout (no `environments/<env>/` nesting).** Slightly cheaper for the single-env case. Rejected because the env-folder pattern matches spice verbatim (future muscle-memory transfer), makes multi-env evolution zero-friction if ever needed, and avoids a "semantic-mirror-but-differently-rooted" mismatch that would subtly drift from spice over time.
 - **`helm install` from the Makefile (not GitOps).** Faster to ship, no Argo dependency. Rejected because it skips the commit-friendly workflow the operator asked for — drift between on-cluster state and git state becomes invisible, rollback is a manual `helm rollback`, and there's no audit trail beyond shell history.
 - **Deploy-key for git access.** More secure in principle. Rejected because the repo is public; no access-control benefit from the key, only setup cost.
 
@@ -106,7 +106,7 @@ Targets include: `doctor`, `cluster-up` (= `registry-up` + `k3d cluster create`)
 - **AC #3** (helm install grafana/tempo): same, via `apps/tempo-app.yaml` pointing at `grafana-community/tempo` chart 2.0.0.
 - **AC #4** (opentelemetry-operator + OpenTelemetryCollector CR): `apps/otel-operator-app.yaml` for the operator helm chart; `manifests/otel/` contains the `OpenTelemetryCollector` CR, applied by an `apps/otel-collector-app.yaml` with sync-wave 1 (after the operator's CRDs reconcile).
 - **AC #5** (round-trip OTLP smoke test): covered by `make smoke` Makefile target, producing the literal tool output for the follow-up PR body per `verify-before-claim.md`.
-- **AC #6** (`ops/k8s/` directory + README runbook): moved to `enviroments/macf/` per this DR; runbook updates point to `make help` as the primary entry.
+- **AC #6** (`ops/k8s/` directory + README runbook): moved to `environments/macf/` per this DR; runbook updates point to `make help` as the primary entry.
 - **AC #7** (teardown reversible): `make nuke` (alias for `make uninstall && make cluster-down && make registry-down`). Documented in the runbook.
 
 ## References

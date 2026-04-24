@@ -1,4 +1,4 @@
-# `enviroments/macf/` — MACF observability stack on k3d + ArgoCD
+# `environments/macf/` — MACF observability stack on k3d + ArgoCD
 
 **Status:** scaffold for issue [#1](https://github.com/groundnuty/macf-devops-toolkit/issues/1) (phase 1 of the observability-stack cutover). Live-cluster validation pending.
 
@@ -14,7 +14,7 @@ Layout mirrors [`groundnuty/onedata/spice-deployments`](~/repos/onedata/spice-de
 All casual operations go through `make <target>` from this directory. Inside a devbox shell:
 
 ```
-cd enviroments/macf
+cd environments/macf
 devbox install
 devbox shell
 make help
@@ -115,7 +115,7 @@ Version pins live in `apps/*-app.yaml` as `targetRevision`; Makefile extracts Ar
 Pending live-cluster validation. Target form (recorded here so the follow-up PR reproduces it):
 
 ```
-# From inside enviroments/macf, in a devbox shell with the cluster up + argocd reconciled:
+# From inside environments/macf, in a devbox shell with the cluster up + argocd reconciled:
 make pf-collector &                                                    # terminal 1
 grpcurl -plaintext -d '...otel-protobuf-request-body...' 127.0.0.1:4317 \
     opentelemetry.proto.collector.trace.v1.TraceService/Export         # terminal 2

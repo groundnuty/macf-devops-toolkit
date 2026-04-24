@@ -3,7 +3,7 @@
 #  - Projects (logical permissions grouping; everything here is `operations`)
 #  - Root Application that reconciles everything under apps/ recursively.
 #
-# Any new enviroments/macf/apps/*-app.yaml committed to main is auto-registered
+# Any new environments/macf/apps/*-app.yaml committed to main is auto-registered
 # — no helm upgrade needed for application additions, only for chart-itself
 # bumps.
 
@@ -29,7 +29,7 @@ applications:
     sources:
       - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
         targetRevision: HEAD
-        path: enviroments/macf/apps
+        path: environments/macf/apps
         directory:
           recurse: true
     destination:

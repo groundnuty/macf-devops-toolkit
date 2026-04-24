@@ -16,7 +16,7 @@ spec:
       helm:
         releaseName: argocd
         valueFiles:
-          - $values/enviroments/macf/values/argocd.yaml
+          - $values/environments/macf/values/argocd.yaml
     - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
       targetRevision: HEAD
       ref: values

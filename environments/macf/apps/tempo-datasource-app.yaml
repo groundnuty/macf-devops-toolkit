@@ -15,7 +15,7 @@ spec:
   source:
     repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
     targetRevision: HEAD
-    path: enviroments/macf/manifests/tempo-datasource
+    path: environments/macf/manifests/tempo-datasource
   destination:
     server: https://kubernetes.default.svc
     namespace: tempo

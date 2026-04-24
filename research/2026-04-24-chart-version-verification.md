@@ -107,5 +107,5 @@ WebFetch-first with gh-api-follow-ups for specifics. Each claim above is traceab
 ## Consumed by
 
 - `design/DR-001-argocd-gitops-for-observability-spike.md` — cites this doc for the version pins
-- `enviroments/macf/k3d/version.yaml` (follow-up PR) — pins k3s image via `k3s_image: rancher/k3s:v1.35.3-k3s1`
-- `enviroments/macf/apps/*.yaml` (follow-up PR) — each `targetRevision` matches the "Verified latest stable" column above
+- `environments/macf/k3d/version.yaml` (follow-up PR) — pins k3s image via `k3s_image: rancher/k3s:v1.35.3-k3s1`
+- `environments/macf/apps/*.yaml` (follow-up PR) — each `targetRevision` matches the "Verified latest stable" column above

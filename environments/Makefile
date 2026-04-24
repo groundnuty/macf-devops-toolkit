@@ -1,9 +1,11 @@
 # Shared parent Makefile for all environments under this directory.
-# Each enviroments/<env>/Makefile does `include ../Makefile` to inherit these
+# Each environments/<env>/Makefile does `include ../Makefile` to inherit these
 # targets; `ENVIRONMENT := $(notdir $(CURDIR))` in the child identifies which
 # env is running.
 #
-# Pattern mirrored from groundnuty/onedata/spice-deployments:enviroments/Makefile.
+# Pattern mirrored from groundnuty/onedata/spice-deployments — spice's folder
+# is actually misspelled as `enviroments/` (sic); we corrected the name here
+# to `environments/` without touching any other structural convention.
 # Divergences for this workspace: k3d instead of bare-metal k3s, no airgap
 # image handling, no backup/restore targets (added later if needed).
 

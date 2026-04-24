@@ -15,7 +15,7 @@ spec:
   source:
     repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
     targetRevision: HEAD
-    path: enviroments/macf/manifests/otel-collector
+    path: environments/macf/manifests/otel-collector
   destination:
     server: https://kubernetes.default.svc
     namespace: otel
