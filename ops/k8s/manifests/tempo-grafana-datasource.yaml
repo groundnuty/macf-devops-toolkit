@@ -1,0 +1,30 @@
+# Registers the Tempo service as a Grafana datasource automatically.
+# kube-prometheus-stack's Grafana sidecar watches for ConfigMaps labeled
+# `grafana_datasource: "1"` across all namespaces (see values/kube-prometheus-stack.yaml
+# grafana.sidecar.datasources.searchNamespace=ALL) and registers them.
+#
+# The upstream tempo chart does not ship such a ConfigMap of its own.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-datasource
+  namespace: tempo
+  labels:
+    grafana_datasource: "1"
+data:
+  tempo-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        access: proxy
+        url: http://tempo.tempo.svc.cluster.local:3200
+        editable: false
+        isDefault: false
+        jsonData:
+          httpMethod: GET
+          tracesToLogsV2:
+            datasourceUid: loki  # optional; noop if no Loki datasource
+          serviceMap:
+            datasourceUid: prometheus
