@@ -1,0 +1,147 @@
+# langfuse-k8s helm values — chart 1.5.27 (Langfuse app 3.169.0)
+# Chart repo: https://langfuse.github.io/langfuse-k8s
+# Provenance: research/2026-04-24-chart-version-verification.md + chart Chart.yaml
+#
+# Single-node dev sizing per issue #2 notes:
+# - clickhouse.replicaCount=1 (chart default 3; Langfuse supports 1 — not HA)
+# - clickhouse.resourcesPreset=small (chart default 2xlarge; dev-scale)
+# - clickhouse.clusterEnabled=false (single-replica; skips ON-CLUSTER migrations)
+# - zookeeper trimmed similarly
+#
+# Secrets flow: 7 secrets (3 app-layer + 4 bitnami subchart auth) live in
+# separate Secret resources (manifests/langfuse/secrets.yaml.example shows
+# the template). Values reference them via secretKeyRef/existingSecret — no
+# plaintext passwords in this file.
+
+global:
+  security:
+    # Chart default is already `true` (uses bitnamilegacy/* images since the
+    # 2025-08-28 Bitnami registry migration). Listed here for explicitness.
+    allowInsecureImages: true
+
+# --- Langfuse application --------------------------------------------------
+langfuse:
+  nodeEnv: production
+
+  logging:
+    level: info
+    format: json  # argocd + kubectl logs handle structured logs better than text
+
+  # App-layer secrets — all from the single `langfuse-secrets` Secret.
+  # Generate via: openssl rand -base64 32 (salt, nextauth) / openssl rand -hex 32 (encryption).
+  salt:
+    secretKeyRef:
+      name: langfuse-secrets
+      key: salt
+  encryptionKey:
+    secretKeyRef:
+      name: langfuse-secrets
+      key: encryptionKey
+  nextauth:
+    # URL stays localhost since we reach Langfuse via `make pf-langfuse`.
+    # If we ever wire an ingress, override here.
+    url: http://localhost:3000
+    secret:
+      secretKeyRef:
+        name: langfuse-secrets
+        key: nextauth
+
+  features:
+    telemetryEnabled: false  # don't phone home from dev/research workloads
+    signUpDisabled: false    # single-user; allow the first signup then disable post-first-user
+    experimentalFeaturesEnabled: true
+
+  ingress:
+    enabled: false  # port-forward only in the spike
+
+# --- PostgreSQL (app metadata) ---------------------------------------------
+postgresql:
+  deploy: true
+  auth:
+    username: postgres
+    existingSecret: langfuse-postgresql
+    secretKeys:
+      userPasswordKey: password
+      adminPasswordKey: password
+    database: postgres_langfuse
+  # Single-node persistence — k3d-storage bind-mount on /mnt/volume1.
+  primary:
+    persistence:
+      enabled: true
+      storageClass: local-path
+      size: 5Gi
+
+# --- Valkey (Redis-compatible) ---------------------------------------------
+redis:
+  deploy: true
+  auth:
+    username: default
+    existingSecret: langfuse-redis
+    existingSecretPasswordKey: password
+  architecture: standalone  # single-node; no replica
+  primary:
+    persistence:
+      enabled: true
+      storageClass: local-path
+      size: 1Gi
+    # Langfuse docs require noeviction — chart default carries this, repeat for explicitness.
+    extraFlags:
+      - "--maxmemory-policy noeviction"
+
+# --- ClickHouse (trace storage) --------------------------------------------
+clickhouse:
+  deploy: true
+  auth:
+    username: default
+    existingSecret: langfuse-clickhouse
+    existingSecretKey: password
+
+  migration:
+    autoMigrate: true
+
+  # Single-node: disable ON-CLUSTER syntax, shrink to 1 replica.
+  # shards is chart-pinned at 1 (Langfuse doesn't shard); no override.
+  clusterEnabled: false
+  replicaCount: 1
+  resourcesPreset: small  # ~0.5 CPU / 1 Gi; small-dev. Research doc cites 6 CPU / 24 Gi for prod — we're not there.
+
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 20Gi
+
+  # ClickHouse bundled zookeeper for CH's replication/coordination. With
+  # clusterEnabled=false + replicaCount=1 ZK is almost idle; trim to 1.
+  zookeeper:
+    enabled: true
+    replicaCount: 1
+    resourcesPreset: nano
+    persistence:
+      enabled: true
+      storageClass: local-path
+      size: 2Gi
+
+  # TODO (#2 notes, research doc §1): override clickhouse.systemTableTTL
+  # for issue langfuse/langfuse-k8s#333 (system tables grow unbounded → OOM
+  # during merges). Exact override block is UNVERIFIED — pull from the
+  # upstream issue before long-running deployment. Not blocking for first
+  # install smoke.
+
+# --- MinIO / S3 (event + export blobs) -------------------------------------
+s3:
+  deploy: true
+  auth:
+    existingSecret: langfuse-s3
+    # bitnami/minio secret expects two keys: root-user + root-password.
+    # Keep both in langfuse-s3.
+    existingSecretKeyPasswordKey: root-password
+    existingSecretKeyAccessKey: root-user
+
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 10Gi
+
+# --- Langfuse web/worker Deployments ---------------------------------------
+# Use chart defaults for replica counts + resources. Single-node can run 1
+# web + 1 worker at chart defaults.
