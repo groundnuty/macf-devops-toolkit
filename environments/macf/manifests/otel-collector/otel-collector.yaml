@@ -134,21 +134,28 @@ spec:
           - sources:
               - from: connection
       # Paper-dimension preservation per science-agent tracing-plumbing-sketch §5.3.
-      # The resource processor passes these attrs through verbatim if already
-      # set on the incoming span (by the agent's OTEL_RESOURCE_ATTRIBUTES env),
-      # OR adds sentinel "unknown" values if missing so downstream queries don't
-      # NULL-match. Actions: "upsert" preserves existing values + adds defaults
-      # for missing keys.
+      # Action `insert` — only adds if the key is absent; preserves existing
+      # agent-set values verbatim. (`upsert` would overwrite agent values and
+      # break the measurement apparatus — agents stamp these attrs at
+      # bootstrap via OTEL_RESOURCE_ATTRIBUTES, which is the authoritative
+      # source.)
+      #
+      # Why some attrs have defaults + some don't:
+      # - agent.id / agent.role: NOT defaulted. Any agent emitting OTLP should
+      #   have these stamped at bootstrap (tester settings.json env block per
+      #   sketch §5.2). Missing = agent-config bug; fail loud (absent attr)
+      #   rather than mask with `unknown-agent` sentinel that collides with
+      #   legitimate operator-daily-thread spans.
+      # - agent.rules_variant: defaulted to `unknown`. Only testers know their
+      #   variant (rules-loaded vs rules-bare for A/B); production agents
+      #   don't, and that's OK to label explicitly.
+      # - scenario.*: defaulted to `none`. Most spans aren't part of a
+      #   scenario run — operator-daily traffic, routine agent work.
+      #   `none` is a clean filterable value that means "not a scenario span".
       resource/paper-dims:
         attributes:
-          - key: agent.id
-            value: unknown-agent
-            action: insert   # only set if absent
-          - key: agent.role
-            value: unknown-role
-            action: insert
           - key: agent.rules_variant
-            value: unknown-variant
+            value: unknown
             action: insert
           - key: scenario.run_id
             value: none
