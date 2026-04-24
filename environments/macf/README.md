@@ -130,4 +130,6 @@ Literal tool output will land in the follow-up PR description per `verify-before
 make nuke                 # uninstall stack + delete cluster + delete registry + wipe /mnt/volume1 data
 ```
 
+**Note:** `make nuke` calls `sudo rm -rf $(REGISTRY_DATA)` to wipe the bind-mounted registry directory on `/mnt/volume1`. It will prompt for your sudo password once at that step. Everything else in the Makefile runs unprivileged; this is the only sudo call.
+
 k3d is container-wrapped — there's no systemd service to uninstall and no host packages to remove. The VM is back to "k3d binary exists" state.
