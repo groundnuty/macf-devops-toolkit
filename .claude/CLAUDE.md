@@ -10,24 +10,35 @@ Project-level Claude Code configuration for the MACF devops agent.
 
 Loaded on every session (alphabetical):
 
+MACF identity layer:
+
 - `agent-identity.md` — who you are, scope, per-repo workflow
-- `autonomous-work.md` — how to behave unattended (from template)
-- `content-invariants.md` — file-writing invariants (from template)
 - `coordination.md` — canonical MACF cross-cutting rules (substrate copy)
 - `delegation-template.md` — canonical 6-section issue template
-- `devbox-usage.md` — devbox idioms (from template)
-- `exploration-fast-track.md`, `exploration-folder-protocol.md` — template exploration rules
-- `gh-token-refresh.md` — GH_TOKEN discipline
-- `makefile-conventions.md` — Make targets (from template)
-- `meta-governance.md` — rule-governance protocol (from template)
 - `peer-dynamic.md` — canonical MACF peer-dynamic rule
-- `pr-discipline.md` — canonical MACF PR-discipline rule (replaces template's version)
+- `pr-discipline.md` — canonical MACF PR-discipline rule
+- `gh-token-refresh.md` — GH_TOKEN discipline
+
+Behavioral discipline (distilled from science-agent + code-agent hard-won lessons, 2026-04-24):
+
+- `verify-before-claim.md` — tool output beats memory; after every `gh` write operation, verify it landed; before ordering-claims, `gh pr view` the predecessor; before "root cause:", read the fix diff
+- `check-before-propose.md` — grep existing convention before proposing a new shape; diff against a working consumer before claiming "pattern is broken"; read the file before writing code against remembered APIs
+- `execute-on-directive.md` — after the user says "go"/"proceed"/"ship it", execute. Don't circle back to re-ask.
+
+Template-origin rules (from `agentic-repo-template`, still applicable):
+
+- `autonomous-work.md` — how to behave unattended
+- `content-invariants.md` — file-writing invariants
+- `devbox-usage.md` — devbox idioms
+- `exploration-fast-track.md`, `exploration-folder-protocol.md` — exploration discipline
+- `makefile-conventions.md` — Make targets
+- `meta-governance.md` — rule-governance protocol
 - `project-conventions.md` — per-project overrides (placeholder)
-- `session-logging.md` — session log discipline (from template)
-- `summary-parity.md` — summary ↔ diff parity (from template)
-- `testing-discipline.md` — TDD loop (from template)
-- `verification-before-done.md` — done-gate check (from template)
-- `writing-quality.md` — prose conventions (from template)
+- `session-logging.md` — session log discipline
+- `summary-parity.md` — summary ↔ diff parity
+- `testing-discipline.md` — TDD loop
+- `verification-before-done.md` — done-gate check
+- `writing-quality.md` — prose conventions
 
 ## Substrate, not macf-consumer
 
