@@ -94,6 +94,8 @@ spec:
           - sources:
               - from: resource_attribute
                 name: k8s.pod.uid
+          # Fallback: match on the source TCP connection's IP (for clients that
+          # don't set k8s.pod.ip / k8s.pod.uid resource attrs themselves).
           - sources:
               - from: connection
     exporters:
@@ -104,7 +106,10 @@ spec:
       prometheus:
         endpoint: 0.0.0.0:8889
       debug:
-        verbosity: normal
+        # `basic` is the steady-state choice — matches the existing compose
+        # collector config. Flip to `normal` or `detailed` via `kubectl patch`
+        # only when actively debugging; `normal`+ floods stdout under burst.
+        verbosity: basic
     service:
       pipelines:
         traces:
