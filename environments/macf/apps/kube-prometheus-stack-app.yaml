@@ -5,6 +5,15 @@ metadata:
   namespace: argocd-applications
   annotations:
     argocd.argoproj.io/sync-wave: "0"
+    # kube-prometheus-stack's post-install admission-webhook setup creates
+    # six resources as helm hooks (SA, Job, ClusterRole, ClusterRoleBinding,
+    # Role, RoleBinding named `kube-prom-stack-kube-prome-admission`).
+    # They persist in cluster after the hook runs but are not in ArgoCD's
+    # rendered manifest set — default behavior is "prune as extraneous",
+    # which would delete the admission-webhook trust chain. `IgnoreExtraneous`
+    # tells ArgoCD to leave unlisted cluster resources alone: no prune, no
+    # OutOfSync status from them. Refs #6.
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
