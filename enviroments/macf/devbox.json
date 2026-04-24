@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": [
+    "kubernetes-helm@latest",
+    "kubectl@latest",
+    "k3d@latest",
+    "grpcurl@latest",
+    "yq-go@latest",
+    "jq@latest"
+  ],
+  "env": {
+    "KUBECONFIG": "${HOME}/.kube/config"
+  },
+  "shell": {
+    "init_hook": [
+      "echo 'devbox shell ready — run `make help` for the operational interface'"
+    ]
+  }
+}

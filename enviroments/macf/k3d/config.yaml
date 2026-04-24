@@ -1,0 +1,58 @@
+# k3d cluster declarative config.
+# Consumed by: `k3d cluster create --config k3d/config.yaml` (Makefile `cluster` target).
+# Schema:      https://k3d.io/v5.8/usage/configfile/ (kind: Simple)
+#
+# Key choices (see ../../../design/DR-001-argocd-gitops-for-observability-spike.md):
+# - Single server, no agents (k3d-macf-server-0). Spike scale.
+# - PVC storage bind-mounted from /mnt/volume1 so helm charts' PVCs
+#   (Prometheus, Tempo, Grafana, Alertmanager) land on the data volume, not
+#   inside the ephemeral k3d node container's filesystem.
+# - Pre-created persistent registry referenced by host:port; k3d auto-wires
+#   the cluster's containerd mirror through it. Registry MUST be created
+#   first (Makefile dependency: cluster: registry).
+# - Kubernetes API on 127.0.0.1:6443 only; no external exposure.
+# - Traefik left enabled (k3d default); not used for ingress in the spike —
+#   grafana/tempo/argocd are reached via `kubectl port-forward`.
+
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: macf
+
+# k3s image tag pinned in version.yaml; Makefile yq-extracts it for logging
+# but the authoritative value lives here for `k3d cluster create --config`.
+# Keep version.yaml's k3s_image in sync with this field.
+image: rancher/k3s:v1.35.3-k3s1
+
+servers: 1
+agents: 0
+
+registries:
+  use:
+    # Must match the Registry CR's metadata.name (k3d prefixes containers
+    # with `k3d-`; the host-resolvable name is `k3d-macf-mirror`).
+    - k3d-macf-mirror:5001
+
+volumes:
+  # Local-path-provisioner storage dir — every PVC landing here is on
+  # /mnt/volume1 on the host via this bind mount.
+  - volume: /mnt/volume1/k3d-storage:/var/lib/rancher/k3s/storage
+    nodeFilters:
+      - all
+
+ports:
+  - port: 127.0.0.1:6443:6443
+    nodeFilters:
+      - server:0
+
+options:
+  k3d:
+    wait: true
+    timeout: 2m
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true
+  k3s:
+    extraArgs:
+      # Keep Traefik; kept for completeness — no ingress used in the spike.
+      []
