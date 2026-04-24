@@ -38,8 +38,13 @@ langfuse:
       name: langfuse-secrets
       key: encryptionKey
   nextauth:
-    # URL stays localhost since we reach Langfuse via `make pf-langfuse`.
-    # If we ever wire an ingress, override here.
+    # URL stays localhost since we reach Langfuse via `make pf-langfuse`
+    # (port-forward to :3001). If ingress is ever added (e.g. Traefik
+    # IngressRoute on an external hostname), THIS VALUE MUST BE OVERRIDDEN
+    # to the external URL — otherwise NextAuth's OAuth callbacks will
+    # continue redirecting to localhost:3000 and silently break external
+    # logins. Same applies to `OAUTH_CLIENT_ORIGIN` if SSO providers get
+    # wired in later.
     url: http://localhost:3000
     secret:
       secretKeyRef:
@@ -53,6 +58,20 @@ langfuse:
 
   ingress:
     enabled: false  # port-forward only in the spike
+
+  # Probe delays — chart defaults (initialDelaySeconds=20) fire before
+  # Langfuse finishes its 390+ Prisma migrations on first install, so the
+  # kubelet liveness-probe kills the pod mid-migration + restarts — classic
+  # crashloop. Bump initial delay so migrations can complete before probes
+  # fire. Once pgdata is populated, subsequent restarts are fast and 20s
+  # would suffice — but 120s is harmless and preempts the first-install loop.
+  web:
+    livenessProbe:
+      initialDelaySeconds: 120
+      timeoutSeconds: 10
+    readinessProbe:
+      initialDelaySeconds: 60
+      timeoutSeconds: 10
 
 # --- PostgreSQL (app metadata) ---------------------------------------------
 postgresql:

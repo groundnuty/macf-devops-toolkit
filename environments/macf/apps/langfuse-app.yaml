@@ -10,6 +10,12 @@ metadata:
     # `langfuse-web.langfuse.svc.cluster.local:3000` — which only resolves
     # after this wave reconciles.
     argocd.argoproj.io/sync-wave: "2"
+    # Bitnami subcharts (postgresql, clickhouse, valkey/redis, minio) produce a
+    # LOT of extraneous resources — helm hooks, rollout ReplicaSets, init Jobs,
+    # etc. Same rationale as kube-prometheus-stack in PR #8 — `IgnoreExtraneous`
+    # keeps the Application's sync-status clean without pruning helm-hook
+    # infrastructure that the subcharts need.
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
