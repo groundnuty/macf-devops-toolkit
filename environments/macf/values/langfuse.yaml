@@ -57,6 +57,11 @@ langfuse:
 # --- PostgreSQL (app metadata) ---------------------------------------------
 postgresql:
   deploy: true
+  # Explicit port — chart default `port: null` leaves DATABASE_PORT unset in
+  # the langfuse-web env, which breaks Prisma connection-string parsing
+  # ("P1013: invalid port number in database URL"). Subchart's internal
+  # postgres listens on 5432 regardless; this field just feeds the app env.
+  port: 5432
   auth:
     username: postgres
     existingSecret: langfuse-postgresql
