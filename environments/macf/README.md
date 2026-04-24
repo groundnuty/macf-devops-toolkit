@@ -71,7 +71,11 @@ Fresh clusters pick it up automatically from `k3d/config.yaml`.
 
 High host ports (14317/14318 instead of 4317/4318) avoid collision with the existing compose observability stack on the same VM.
 
-`make pf-collector` (port-forward to the ClusterIP service) remains available for debugging but is **not required** for smoke tests or tester OTLP traffic anymore — the stable endpoint serves the same role without setup friction.
+`make pf-collector` (port-forward to the ClusterIP service) and the stable endpoint serve **different debugging purposes** — not one supersedes the other:
+- **Stable endpoint** (`:14317`/`:14318`): load-balanced across all Collector replicas via klipper-lb. The right tool for normal tester traffic + smoke tests.
+- **`make pf-collector`**: targets the ClusterIP service which round-robins per kube-proxy iptables; with `--pod-ip-of <pod>` it can target a specific replica. The right tool for comparing pod-A vs pod-B output, debugging a single replica during a crashloop investigation.
+
+Smoke tests + routine tester OTLP traffic should use the stable endpoint; `make pf-collector` stays as a debugging escape hatch.
 
 ## Bootstrap flow (one-time)
 
