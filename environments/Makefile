@@ -190,13 +190,17 @@ nuke: cluster-down registry-down  ## Teardown: cluster + registry + $(REGISTRY_D
 pf-grafana:  ## Grafana at http://127.0.0.1:3000
 	$(DEVBOX_RUN) kubectl -n monitoring port-forward svc/kube-prom-stack-grafana 3000:80
 
-pf-tempo:  ## Tempo — local :13200/:14317/:14318 → cluster :3200/:4317/:4318
-	@# High host ports to avoid collision with the existing compose stack
-	@# (macf-obs-*) which binds :3200/:4317/:4318. hack/smoke.sh expects these.
-	$(DEVBOX_RUN) kubectl -n tempo port-forward svc/tempo 13200:3200 14317:4317 14318:4318
+pf-tempo:  ## Tempo query API — local :13200 → cluster :3200
+	@# High host port to avoid collision with the existing compose stack
+	@# (macf-obs-*) which binds :3200. smoke.sh hits this for trace GET.
+	@# Tempo's OTLP receivers (:4317/:4318) aren't forwarded here to avoid
+	@# collision with `make pf-collector` — the smoke pipeline goes through
+	@# the Collector, not directly to Tempo's OTLP.
+	$(DEVBOX_RUN) kubectl -n tempo port-forward svc/tempo 13200:3200
 
-pf-collector:  ## Collector — local :14317/:14318 → cluster :4317/:4318
-	@# Same port-collision rationale as pf-tempo.
+pf-collector:  ## Collector OTLP — local :14317/:14318 → cluster :4317/:4318
+	@# High host ports avoid collision with the existing compose collector
+	@# (macf-obs-otel-collector-1) which binds :4317/:4318. smoke.sh POSTs here.
 	$(DEVBOX_RUN) kubectl -n otel port-forward svc/central-collector 14317:4317 14318:4318
 
 pf-argocd:  ## ArgoCD UI at http://127.0.0.1:8080
