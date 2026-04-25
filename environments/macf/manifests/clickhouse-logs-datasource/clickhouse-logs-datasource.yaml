@@ -1,0 +1,59 @@
+# Registers the langfuse-clickhouse `logs` database as a Grafana datasource.
+# Mirror of manifests/loki-datasource (Loki) and manifests/tempo-datasource
+# (Tempo) — Grafana's sidecar discovers ConfigMaps labeled
+# `grafana_datasource: "1"` cluster-wide.
+#
+# Plugin: `grafana-clickhouse-datasource` (installed via kube-prom-stack
+# values' `grafana.plugins` array). The official Grafana ClickHouse plugin.
+#
+# Auth: ClickHouse credentials live in the `langfuse-clickhouse` Secret in
+# ns/langfuse. We can't read across namespaces from a ConfigMap, so the
+# password substitution happens via Grafana's secureJsonData ENV-var
+# expansion. The actual password is patched in by the same hack/copy-
+# clickhouse-creds.sh script (or operator can set it manually post-install
+# via Grafana UI for the spike).
+#
+# UID `clickhouse-logs` distinguishes from a hypothetical future
+# `clickhouse-langfuse` datasource (Langfuse's app data) on the same CH
+# instance — different DB, same connection.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-logs-datasource
+  namespace: monitoring
+  labels:
+    grafana_datasource: "1"
+data:
+  clickhouse-logs-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: ClickHouse-logs
+        type: grafana-clickhouse-datasource
+        uid: clickhouse-logs
+        access: proxy
+        editable: false
+        isDefault: false
+        jsonData:
+          host: langfuse-clickhouse.langfuse.svc.cluster.local
+          port: 9000
+          protocol: native
+          secure: false
+          username: default
+          # Default DB; queries can override via FROM logs.otel_logs etc.
+          defaultDatabase: logs
+          defaultTable: otel_logs
+          # Trace correlation: when a row's TraceId column is selected,
+          # offer a click-through to Tempo.
+          tracesConfig:
+            otelEnabled: true
+            otelVersion: latest
+            traceIdColumn: TraceId
+            traceDurationColumn: Duration
+        # Password patched in via `make clickhouse-logs-grafana-secret` —
+        # operator-runs-once. Without this, the datasource exists but
+        # queries return auth errors. Acceptable spike state; production
+        # path would use grafana's `secureJsonData` from a Secret-mounted
+        # values file or external-secrets.
+        secureJsonData:
+          password: ""

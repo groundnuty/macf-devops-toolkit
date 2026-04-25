@@ -159,7 +159,20 @@ clickhouse:
   # shards is chart-pinned at 1 (Langfuse doesn't shard); no override.
   clusterEnabled: false
   replicaCount: 1
-  resourcesPreset: small  # ~0.5 CPU / 1 Gi; small-dev. Research doc cites 6 CPU / 24 Gi for prod — we're not there.
+  # Was `resourcesPreset: small` (~0.5 CPU / ~512Mi) sufficient for
+  # Langfuse-only workload. After PR #19c added logs ingestion as a parallel
+  # backend, ClickHouse's max_server_memory_usage (~70% of container mem)
+  # was hit during log-batch inserts: "memory limit exceeded: would use
+  # 334 MiB...maximum: 691.20 MiB" (visible in Collector retry logs).
+  # Bumped to explicit 2Gi to support the additional log workload. If we
+  # later split logs to a dedicated ClickHouse, this can revert to small.
+  # Research doc cites 6 CPU / 24 Gi for prod — we're a long way from that.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 2Gi
 
   persistence:
     enabled: true
