@@ -57,9 +57,30 @@ options:
       # Keep Traefik; kept for completeness — no ingress used in the spike.
       []
 
-# Placeholder for any non-API port-forwards (Traefik :80/:443 if we ever use
-# ingress). Empty for the spike.
-ports: []
+# Stable OTLP ingress on host — 127.0.0.1:14317 (gRPC) + :14318 (HTTP) routed
+# through k3d's serverlb (nginx) to the central OpenTelemetry Collector via
+# the `central-collector-lb` LoadBalancer Service in ns/otel. See
+# ../manifests/otel-collector/otlp-lb-service.yaml + README "Stable OTLP
+# endpoint" section + `groundnuty/macf-science-agent:research/2026-04-24-tracing-plumbing-integration-sketch.md`
+# §6 PR A.
+#
+# High host ports (14317/14318) avoid collision with the existing compose
+# collector stack on the same VM (macf-obs-otel-collector-1, binds :4317/:4318).
+# Testers + smoke scripts can `curl http://localhost:14318/v1/traces` directly,
+# no kubectl-port-forward round-trip.
+#
+# For live cluster adds (no recreate), use:
+#   k3d cluster edit macf --port-add "127.0.0.1:14317:4317@loadbalancer" \
+#                         --port-add "127.0.0.1:14318:4318@loadbalancer"
+# These ports entries here make the same mapping persistent on cluster
+# recreate (`make cluster-down && make cluster`).
+ports:
+  - port: 127.0.0.1:14317:4317
+    nodeFilters:
+      - loadbalancer
+  - port: 127.0.0.1:14318:4318
+    nodeFilters:
+      - loadbalancer
 
 # Expose the Kubernetes API on localhost:6443 only.
 # (k3d v1alpha5 schema: field is `kubeAPI`, not `exposeAPI`.)
