@@ -177,11 +177,99 @@ clickhouse:
       storageClass: local-path
       size: 2Gi
 
-  # TODO (#2 notes, research doc §1): override clickhouse.systemTableTTL
-  # for issue langfuse/langfuse-k8s#333 (system tables grow unbounded → OOM
-  # during merges). Exact override block is UNVERIFIED — pull from the
-  # upstream issue before long-running deployment. Not blocking for first
-  # install smoke.
+  # System-table TTL — fixes upstream langfuse/langfuse-k8s#333 (system tables
+  # grow unbounded → ClickHouse OOMs during merges).
+  #
+  # Two layers, both needed:
+  #   1. extraOverrides — XML drop-in at /bitnami/clickhouse/etc/conf.d/
+  #      extra-configmap/01_extra_overrides.xml. Sets ttl / partition_by /
+  #      flush_interval for *fresh-install* table creation. ClickHouse reads
+  #      this during boot; system tables CREATEd from this point onward will
+  #      have TTL baked into their engine.
+  #   2. startdbScripts — mounts at /docker-entrypoint-startdb.d/ and runs on
+  #      every container start AFTER the server accepts queries. Idempotent
+  #      ALTER-MODIFY-TTL on each system table — catches existing-cluster
+  #      upgrades where the tables predate the extraOverrides drop-in
+  #      (config-file changes don't retroactively rewrite already-CREATEd
+  #      table engines).
+  #
+  # TTL: 7d for query/text/metric/trace logs (debugging window) + 30d for
+  # part_log (helps post-mortem on bad-merge incidents). Trace data retention
+  # for the paper is in Langfuse's *application* tables (`traces`,
+  # `observations`, `scores`) — those have their own retention configured at
+  # the Langfuse app layer, NOT controlled by `system.*` TTLs.
+  #
+  # Verify post-deploy:
+  #   kubectl -n langfuse exec sts/langfuse-clickhouse-shard0 -c clickhouse -- \
+  #     clickhouse-client --password="$PW" -q \
+  #     "SELECT name, engine_full FROM system.tables \
+  #      WHERE database='system' AND name='query_log' FORMAT Vertical"
+  # → engine_full should contain `TTL event_date + toIntervalDay(7)` (or 30 for part_log).
+  extraOverrides: |
+    <clickhouse>
+      <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+      </query_log>
+      <text_log>
+        <database>system</database>
+        <table>text_log</table>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+      </text_log>
+      <metric_log>
+        <database>system</database>
+        <table>metric_log</table>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+      </metric_log>
+      <asynchronous_metric_log>
+        <database>system</database>
+        <table>asynchronous_metric_log</table>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+      </asynchronous_metric_log>
+      <trace_log>
+        <database>system</database>
+        <table>trace_log</table>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+      </trace_log>
+      <part_log>
+        <database>system</database>
+        <table>part_log</table>
+        <partition_by>event_date</partition_by>
+        <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+      </part_log>
+    </clickhouse>
+
+  startdbScripts:
+    apply-system-tables-ttl.sh: |
+      #!/usr/bin/env bash
+      # Idempotent ALTER for existing system tables that predate extraOverrides.
+      # Runs on every container start. Failures suppressed — table may not
+      # exist yet (first boot) or password not propagated yet; extraOverrides
+      # is the authoritative path for fresh installs, so a transient skip
+      # here is non-fatal.
+      set -u
+      for i in 1 2 3 4 5 6 7 8 9 10; do
+        clickhouse-client --password="$CLICKHOUSE_ADMIN_PASSWORD" -q "SELECT 1" >/dev/null 2>&1 && break
+        sleep 3
+      done
+      for tbl_ttl in "query_log:7" "text_log:7" "metric_log:7" "asynchronous_metric_log:7" "trace_log:7" "part_log:30"; do
+        tbl="${tbl_ttl%:*}"
+        days="${tbl_ttl#*:}"
+        clickhouse-client --password="$CLICKHOUSE_ADMIN_PASSWORD" -q \
+          "ALTER TABLE system.${tbl} MODIFY TTL event_date + INTERVAL ${days} DAY DELETE" 2>/dev/null || true
+      done
 
 # --- MinIO / S3 (event + export blobs) -------------------------------------
 # Two layers of S3 credentials:
