@@ -138,6 +138,28 @@ EOF
 kubectl apply -f "$TMP"
 
 echo
+echo "=== truncating Langfuse init-state tables (forces headless-init to re-run with current SALT) ==="
+# WHY: Langfuse stores api_keys.fast_hashed_secret_key as HMAC-SHA256(SALT, secret_key).
+# When we rotate the langfuse-secrets Secret (new SALT) here AND langfuse-web's headless
+# init has already populated the init-state tables with hashes from a PREVIOUS SALT, the
+# init logic SKIPS (DB not empty) — leaving a salt-version-skew where stored hashes
+# don't validate against current SALT. Truncating these tables before the pod restart
+# below forces init to re-create them with the CURRENT SALT, so subsequent API auth works.
+#
+# Targeted tables only — preserves trace data (in ClickHouse, separate). If Postgres is
+# fresh (first install), TRUNCATE no-ops cleanly.
+PG_PW=$(kubectl -n "$LANGFUSE_NS" get secret langfuse-postgresql -o jsonpath='{.data.password}' 2>/dev/null | base64 -d || echo "")
+if [ -n "$PG_PW" ] && kubectl -n "$LANGFUSE_NS" get pod langfuse-postgresql-0 >/dev/null 2>&1; then
+    kubectl -n "$LANGFUSE_NS" exec langfuse-postgresql-0 -- env PGPASSWORD="$PG_PW" \
+        psql -U postgres -d postgres_langfuse \
+        -c 'TRUNCATE TABLE api_keys, organization_memberships, project_memberships, projects, organizations, "Session", "Account", users CASCADE;' 2>/dev/null \
+        && echo "  init tables truncated (existing org/user/project gone — will re-create)" \
+        || echo "  TRUNCATE skipped (tables not yet migrated; init will create them fresh)"
+else
+    echo "  Postgres not running yet — argocd will reconcile + Langfuse will run init on first boot"
+fi
+
+echo
 echo "=== rolling restart langfuse-web (re-init from env) + central-collector (pick up real keys) ==="
 kubectl -n "$LANGFUSE_NS" rollout restart deployment/langfuse-web 2>/dev/null || \
     echo "  langfuse-web Deployment not yet reconciled — argocd will start it with these secrets present"
