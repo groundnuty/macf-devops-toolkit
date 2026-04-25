@@ -56,6 +56,32 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
+# --- OTLP telemetry (refs #24) ---------------------------------------------
+# Wires Claude Code's built-in OpenTelemetry support so every conversation
+# emits traces (per tool call), metrics (token counts, model usage), and
+# logs into the cluster's stable OTLP ingress at :14318.
+#
+# `${VAR=default}` assigns ONLY if VAR is unset — empty stays empty, so an
+# operator can opt out of telemetry for one session via:
+#   CLAUDE_CODE_ENABLE_TELEMETRY= ./claude.sh
+# Or override the endpoint to point elsewhere (e.g., a CI collector):
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.ci:4318 ./claude.sh
+#
+# `agent.id` + `agent.role` are the load-bearing paper-dim resource attrs.
+# The Collector's `resource/paper-dims` processor (in env macf) does NOT
+# default these — agents that fail to stamp them are visibly absent in
+# queries (fail-loud-on-absent), which is the right shape for the
+# measurement apparatus. See PR #12 review thread + the central Collector
+# CR's `resource/paper-dims` block for the rationale.
+: "${CLAUDE_CODE_ENABLE_TELEMETRY=1}"
+: "${OTEL_METRICS_EXPORTER=otlp}"
+: "${OTEL_LOGS_EXPORTER=otlp}"
+: "${OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf}"
+: "${OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:14318}"
+: "${OTEL_RESOURCE_ATTRIBUTES=agent.id=macf-devops-agent,agent.role=devops,service.name=claude-code-devops-agent}"
+export CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
+       OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT OTEL_RESOURCE_ATTRIBUTES
+
 # TEMPORARY: wrap claude in `sg docker -c` so claude + its Bash-tool children
 # inherit the docker gid. Needed because this host's long-running tmux server
 # predates the `ubuntu`→`docker` group addition (/etc/group mtime 2026-04-14),
