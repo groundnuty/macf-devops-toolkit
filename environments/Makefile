@@ -186,7 +186,7 @@ nuke: cluster-down registry-down  ## Teardown: cluster + registry + $(REGISTRY_D
 ##@ Port-forwards (block until Ctrl-C)
 # ################################################################################
 
-.PHONY: pf-grafana pf-tempo pf-collector pf-argocd
+.PHONY: pf-grafana pf-tempo pf-collector pf-argocd pf-prometheus
 pf-grafana:  ## Grafana at http://127.0.0.1:3000
 	$(DEVBOX_RUN) kubectl -n monitoring port-forward svc/kube-prom-stack-grafana 3000:80
 
@@ -208,6 +208,9 @@ pf-argocd:  ## ArgoCD UI at http://127.0.0.1:8080
 
 pf-langfuse:  ## Langfuse UI at http://127.0.0.1:3001 (chart default :3000 → local :3001 to avoid Grafana collision)
 	$(DEVBOX_RUN) kubectl -n langfuse port-forward svc/langfuse-web 3001:3000
+
+pf-prometheus:  ## Prometheus UI/query API at http://127.0.0.1:9090 — needed for `make smoke` metrics leg
+	$(DEVBOX_RUN) kubectl -n monitoring port-forward svc/kube-prom-stack-kube-prome-prometheus 9090:9090
 
 # ################################################################################
 ##@ Utilities

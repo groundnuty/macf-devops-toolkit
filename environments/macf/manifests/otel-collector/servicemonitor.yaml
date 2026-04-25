@@ -1,0 +1,82 @@
+# ServiceMonitor — kube-prometheus-stack scrapes the Collector's two metrics
+# surfaces:
+#   - :8889 named `prometheus` — agent OTLP-emitted metrics, re-exported by
+#     the Collector's `prometheus` exporter (see otel-collector.yaml service
+#     pipeline `metrics` exporters block). Token usage, latency histograms,
+#     error rates emitted by agents via OTLP land here.
+#   - :8888 named `monitoring` (separate `central-collector-monitoring`
+#     Service auto-created by the operator) — Collector's *own* telemetry
+#     (queue depths, exporter errors, processor evaluations). Useful for
+#     watching the pipeline's own health.
+#
+# Selector + label rationale:
+#   kube-prom-stack's prom-operator (`prometheus` CR's `serviceMonitorSelector`)
+#   matches `release: kube-prom-stack`. Without that label, this SM is
+#   silently ignored — verify post-apply via Prometheus targets page (NOT
+#   just `kubectl get servicemonitor`, which doesn't reflect prom-operator's
+#   discovery filter).
+#
+# Verification:
+#   kubectl -n monitoring port-forward svc/kube-prom-stack-kube-prome-prometheus 9090:9090
+#   open http://127.0.0.1:9090/targets — look for `serviceMonitor/otel/...`
+#   query `up{job=~".*central-collector.*"}` — both jobs (8889 + 8888) → 1
+#
+# Smoke for the :8889 surface (agent metrics):
+#   curl -X POST http://127.0.0.1:14318/v1/metrics \
+#     -H 'Content-Type: application/json' \
+#     -d '{"resourceMetrics":[{"resource":{"attributes":[]},"scopeMetrics":[
+#       {"scope":{"name":"smoke"},"metrics":[
+#         {"name":"smoke.counter","unit":"1","sum":{
+#           "aggregationTemporality":2,"isMonotonic":true,
+#           "dataPoints":[{"asInt":"42","timeUnixNano":"'$(date +%s%N)'"}]}}
+#       ]}]}]}'
+#   …then query `smoke_counter` in Prometheus.
+
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: central-collector
+  namespace: otel
+  labels:
+    # REQUIRED — prom-operator's serviceMonitorSelector matches this.
+    release: kube-prom-stack
+    app.kubernetes.io/component: opentelemetry-collector
+    app.kubernetes.io/part-of: opentelemetry
+    macf.dev/role: collector-metrics
+spec:
+  namespaceSelector:
+    matchNames:
+      - otel
+  selector:
+    # The operator creates THREE Services per collector:
+    #   - `base`       → ClusterIP carrying receiver ports (4317/4318) +
+    #                    `prometheus` named port (8889) for the exporter.
+    #   - `headless`   → headless variant of `base` (same ports). DUPLICATE
+    #                    metrics endpoint — exclude to avoid 2x scrape work.
+    #   - `monitoring` → Collector's own internal telemetry on port 8888.
+    # We want `base` + `monitoring`, NOT `headless`.
+    matchLabels:
+      app.kubernetes.io/component: opentelemetry-collector
+      app.kubernetes.io/managed-by: opentelemetry-operator
+      app.kubernetes.io/part-of: opentelemetry
+    matchExpressions:
+      - key: operator.opentelemetry.io/collector-service-type
+        operator: In
+        values: [base, monitoring]
+  endpoints:
+    # Agent OTLP metrics re-exported in prom format (lives on the `base`
+    # Service's `prometheus` port). Quietly missing on `monitoring`-typed
+    # Services — prom-operator skips endpoints whose port name doesn't
+    # exist on the matched Service.
+    - port: prometheus
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: true
+    # Collector's own internal telemetry (lives on the `monitoring` Service's
+    # `monitoring` port). Quietly missing on `base`-typed Services.
+    - port: monitoring
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      honorLabels: true
