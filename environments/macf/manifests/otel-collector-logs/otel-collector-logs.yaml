@@ -23,13 +23,16 @@
 #                               on absence — see central CR's same block).
 #     batch                   — default batching
 #   exporters:
-#     debug                   — stdout, verbosity: basic. Swapped for `loki`
-#                               in #19b and `clickhouse` in #19c.
-#
-# Backend exporters (loki, clickhouse) deliberately not in scope here.
-# This first slice proves log COLLECTION works in isolation; subsequent
-# slices add backends + Grafana datasources without re-touching the
-# Collector spec's core ingest path.
+#     otlphttp/loki           — Loki's OTLP-HTTP endpoint (Loki 3.0+ accepts
+#                               OTLP natively at /otlp/v1/logs). Forward-
+#                               compatible vs the deprecated `loki` contrib
+#                               exporter. Resource attributes flow through
+#                               as Loki labels (paper-dim attrs queryable).
+#     debug                   — stdout, verbosity: basic. Kept alongside
+#                               for live-pipeline-health visibility via
+#                               `kubectl logs`.
+#     clickhouse              — added in #19c (parallel backend; pick one
+#                               long-term after operator-comparison).
 #
 # CRD: opentelemetry.io/v1beta1 (matches central Collector — same operator).
 
@@ -157,8 +160,24 @@ spec:
       batch: {}
 
     exporters:
-      # Verbose enough to confirm log records flow + correct attribute set.
-      # Replaced by `loki` (#19b) + `clickhouse` (#19c) once destinations land.
+      # Loki's native OTLP endpoint (since Loki 3.0). Resource attributes
+      # propagate as Loki labels — paper-dim attrs (`agent_rules_variant`,
+      # `scenario_run_id`, etc.) become queryable as filter labels.
+      # Note: Loki normalizes `.` → `_` in attr names per its label syntax,
+      # so `agent.rules_variant` arrives as `agent_rules_variant` in Loki.
+      otlphttp/loki:
+        endpoint: http://loki.loki.svc.cluster.local:3100/otlp
+        tls:
+          insecure: true
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 2m
+
+      # Kept alongside for live-pipeline-health visibility via `kubectl logs`.
+      # Counts only at `verbosity: basic` — flip to `detailed` ad-hoc when
+      # debugging attr propagation.
       debug:
         verbosity: basic
 
@@ -167,4 +186,4 @@ spec:
         logs:
           receivers:  [filelog]
           processors: [k8sattributes, resource/paper-dims, batch]
-          exporters:  [debug]
+          exporters:  [otlphttp/loki, debug]

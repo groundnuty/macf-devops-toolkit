@@ -1,0 +1,111 @@
+# Loki helm values — chart `grafana/loki@7.0.0` (Loki app 3.6.7).
+# Chart repo: https://grafana.github.io/helm-charts
+#
+# Single-node dev sizing (matches Tempo's `monolithic` + Langfuse's
+# `clusterEnabled=false` patterns elsewhere in this workspace):
+#   - deploymentMode: SingleBinary  (one Loki StatefulSet pod)
+#   - singleBinary.replicas: 1
+#   - loki.storage: filesystem (no S3/GCS — chart's default is s3 + bucket
+#     that doesn't exist on this cluster).
+#   - All scalable-mode components zeroed out.
+#   - chunksCache + resultsCache (memcached) disabled — small dev not
+#     compute-bound; cache pods would dominate footprint.
+#   - lokiCanary, gateway, minio, test pods disabled.
+#
+# Schema: v13 + tsdb store + filesystem object_store. v13 is the current
+# stable schema as of Loki 3.6.x; tsdb is the recommended index store.
+#
+# Trace↔log correlation (the headline reason for picking Loki vs alternatives):
+#   - The OTel `loki` exporter (used by the DaemonSet collector configured
+#     in #19a) propagates `trace_id` + `span_id` log-record attributes as
+#     Loki labels via the `loki.format=json` mode. Grafana's "Logs↔Trace"
+#     panel pivots on these — given a trace_id from Tempo, click-through
+#     surfaces all Loki log lines for that span.
+#   - Verified with the smoke pattern (TBD: extend hack/smoke.sh after
+#     #19b lands the exporter wiring).
+
+loki:
+  # Disable auth (no multi-tenancy on a single-tenant dev cluster).
+  auth_enabled: false
+
+  commonConfig:
+    path_prefix: /var/loki
+    # SingleBinary = 1 node = replication_factor must be 1 (chart default 3).
+    replication_factor: 1
+
+  storage:
+    type: filesystem
+    # No S3/GCS/Azure — chart picks up the filesystem block when type=filesystem.
+
+  # Schema is required even on filesystem; the chart's `useTestSchema: true`
+  # is documented as for-testing-only. Set explicit schema here.
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+
+  # Trim default sidecar memory request — small dev cluster.
+  podSecurityContext:
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    runAsGroup: 10001
+    runAsNonRoot: true
+    runAsUser: 10001
+
+  # Loki's structuredConfig overrides templated config. Used here to set the
+  # log retention period at the storage level (not just at TTL on tables).
+  # 7d aligns with ClickHouse system-table TTL (PR #17 / #15).
+  limits_config:
+    retention_period: 168h  # 7 days
+    reject_old_samples: true
+    reject_old_samples_max_age: 168h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+# --- Deployment mode --------------------------------------------------------
+deploymentMode: SingleBinary
+
+# --- SingleBinary StatefulSet -----------------------------------------------
+singleBinary:
+  replicas: 1
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 5Gi
+    accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# --- SimpleScalable / Distributed components (all OFF for SingleBinary) ----
+write:
+  replicas: 0
+read:
+  replicas: 0
+backend:
+  replicas: 0
+
+# --- Optional / decorative components — all OFF in dev ----------------------
+gateway:
+  enabled: false  # Use the loki Service directly; nginx proxy unnecessary on dev.
+chunksCache:
+  enabled: false  # memcached dependency — large for dev.
+resultsCache:
+  enabled: false
+lokiCanary:
+  enabled: false  # Synthetic-load test pod; not needed.
+test:
+  enabled: false  # Helm test hooks; not needed.
+minio:
+  enabled: false  # Chart-bundled object storage; we use filesystem.
+
+# Bloom planner / builder / index gateway / pattern ingester all default to 0 — leave.

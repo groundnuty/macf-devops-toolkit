@@ -1,0 +1,45 @@
+# Registers the Loki service as a Grafana datasource automatically.
+# Mirrors manifests/tempo-datasource/tempo-datasource.yaml — Grafana's
+# sidecar watches for ConfigMaps labeled `grafana_datasource: "1"` across
+# all namespaces (kube-prom-stack values' grafana.sidecar.datasources.searchNamespace=ALL).
+#
+# The Loki chart itself doesn't ship a Grafana datasource manifest, so
+# we provide one. Once registered, Grafana auto-detects it on next
+# reconcile + makes it queryable in Explore + dashboards.
+#
+# UID `loki` is referenced by the existing tempo-datasource's
+# `tracesToLogsV2.datasourceUid: loki` field — so once this datasource
+# lands, Tempo's trace view gets a click-through to Loki for the same
+# trace_id. The Tempo datasource was authored with that UID expectation
+# pre-baked; this completes the pivot.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-datasource
+  namespace: loki
+  labels:
+    grafana_datasource: "1"
+data:
+  loki-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki.loki.svc.cluster.local:3100
+        editable: false
+        isDefault: false
+        jsonData:
+          # Trace correlation: when a log record carries `trace_id` as a
+          # parsed Loki label, the value is offered as a click-through to
+          # the Tempo datasource.
+          derivedFields:
+            - name: TraceID
+              # Match on either field name; OTel SDK sends `trace_id`,
+              # some libraries send `traceID`.
+              matcherRegex: '"trace_?[Ii][dD]":"([a-f0-9]{32})"'
+              url: '$${__value.raw}'
+              datasourceUid: tempo
+              urlDisplayLabel: 'View in Tempo'
