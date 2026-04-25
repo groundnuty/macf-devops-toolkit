@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki-datasource
+  namespace: argocd-applications
+  annotations:
+    # Wave 1: Grafana's sidecar (kube-prom wave 0) discovers this ConfigMap
+    # on reconciliation; needs the monitoring namespace + Grafana to exist
+    # already, but doesn't require Loki itself to be ready (Grafana renders
+    # the datasource entry; queries against it surface the Loki readiness
+    # at query time).
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/loki-datasource
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: loki
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

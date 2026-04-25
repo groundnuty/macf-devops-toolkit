@@ -1,0 +1,36 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki
+  namespace: argocd-applications
+  annotations:
+    # Wave 1: independent of otel-operator (wave 0). Logs Collector (wave 1)
+    # references Loki at exporter time; if Loki is briefly unready, the
+    # exporter's `retry_on_failure` queues messages for retry. No strict
+    # ordering needed — Loki is a backend, not a CRD-provider.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  sources:
+    - repoURL: https://grafana.github.io/helm-charts
+      chart: loki
+      targetRevision: 7.0.0
+      helm:
+        releaseName: loki
+        valueFiles:
+          - $values/environments/macf/values/loki.yaml
+    - repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+      targetRevision: HEAD
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: loki
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
