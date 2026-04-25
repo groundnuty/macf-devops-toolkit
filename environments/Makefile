@@ -232,6 +232,10 @@ smoke:  ## OTLP round-trip test (needs `make pf-collector` + `make pf-tempo` in 
 langfuse-bootstrap:  ## Generate ALL Langfuse secrets (subchart auth + headless-init + Collector api-keys) + restart pods. ONE-SHOT.
 	@bash hack/langfuse-bootstrap.sh
 
+.PHONY: clickhouse-logs-creds
+clickhouse-logs-creds:  ## Copy ClickHouse password to ns/otel for the logs Collector's clickhouse exporter (#19c). ONE-SHOT.
+	@bash hack/copy-clickhouse-creds.sh
+
 .PHONY: env-test
 env-test:  ## Debug — print inherited vars
 	@echo "ENVIRONMENT=$(ENVIRONMENT)"

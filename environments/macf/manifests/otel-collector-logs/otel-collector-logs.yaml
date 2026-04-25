@@ -28,11 +28,14 @@
 #                               compatible vs the deprecated `loki` contrib
 #                               exporter. Resource attributes flow through
 #                               as Loki labels (paper-dim attrs queryable).
+#     clickhouse              — Reuses existing langfuse-clickhouse instance
+#                               (ns/langfuse). Writes to a `logs` database;
+#                               table auto-created via `create_schema: true`.
+#                               Resource attrs preserved as JSONB columns;
+#                               paper-dim attrs queryable via SQL.
 #     debug                   — stdout, verbosity: basic. Kept alongside
 #                               for live-pipeline-health visibility via
 #                               `kubectl logs`.
-#     clickhouse              — added in #19c (parallel backend; pick one
-#                               long-term after operator-comparison).
 #
 # CRD: opentelemetry.io/v1beta1 (matches central Collector — same operator).
 
@@ -71,6 +74,19 @@ metadata:
 spec:
   mode: daemonset
   serviceAccount: otel-collector-logs
+  # ClickHouse exporter password — populated from ns/otel's
+  # `langfuse-clickhouse-creds` Secret, which in turn is copied from
+  # ns/langfuse/langfuse-clickhouse via hack/copy-clickhouse-creds.sh
+  # (one-shot operator step; see Makefile target `clickhouse-logs-creds`).
+  # Cross-namespace Secret refs aren't supported in k8s; the copy keeps
+  # ClickHouse's credential in a single source of truth (ns/langfuse) while
+  # the Collector reads it locally.
+  env:
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: langfuse-clickhouse-creds
+          key: password
   # filelog needs raw read on host /var/log. hostPath is the conventional
   # pattern for k8s log scrapers (Promtail, FluentBit, OTel filelog all do
   # this). containerd writes pod logs to /var/log/pods/<ns>_<pod>_<uid>/<container>/0.log
@@ -175,6 +191,33 @@ spec:
           max_interval: 30s
           max_elapsed_time: 2m
 
+      # ClickHouse-as-log-store — second backend running side-by-side with
+      # Loki for the spike comparison. Reuses the existing
+      # `langfuse-clickhouse` StatefulSet instead of deploying a separate
+      # ClickHouse cluster (cost vs isolation tradeoff documented on #19).
+      #
+      # Schema: `logs` database, `otel_logs` table — both auto-created on
+      # first export via `create_schema: true`. Default OTel ClickHouse
+      # schema includes Timestamp, TraceId, SpanId, SeverityText,
+      # SeverityNumber, ServiceName, Body, ResourceAttributes (Map(String,
+      # String)), LogAttributes — i.e., paper-dim attrs land in
+      # ResourceAttributes as queryable map keys (SQL: `WHERE
+      # ResourceAttributes['scenario.run_id'] = '...'`).
+      clickhouse:
+        endpoint: tcp://langfuse-clickhouse.langfuse.svc.cluster.local:9000
+        username: default
+        password: ${env:CLICKHOUSE_PASSWORD}
+        database: logs
+        logs_table_name: otel_logs
+        create_schema: true
+        ttl: 168h  # 7d, matches Loki retention + ClickHouse system-table TTL
+        timeout: 10s
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 2m
+
       # Kept alongside for live-pipeline-health visibility via `kubectl logs`.
       # Counts only at `verbosity: basic` — flip to `detailed` ad-hoc when
       # debugging attr propagation.
@@ -186,4 +229,6 @@ spec:
         logs:
           receivers:  [filelog]
           processors: [k8sattributes, resource/paper-dims, batch]
-          exporters:  [otlphttp/loki, debug]
+          # Both backends in parallel — operator picks the long-term one
+          # after data accumulates + comparison criteria evaluated.
+          exporters:  [otlphttp/loki, clickhouse, debug]

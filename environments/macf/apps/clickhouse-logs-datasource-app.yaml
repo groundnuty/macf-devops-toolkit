@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: clickhouse-logs-datasource
+  namespace: argocd-applications
+  annotations:
+    # Wave 1: needs the monitoring namespace + Grafana to exist (kube-prom
+    # wave 0). Grafana plugin (grafana-clickhouse-datasource) installs at
+    # Grafana pod startup; ConfigMap discovery happens after.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/clickhouse-logs-datasource
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -39,6 +39,12 @@ grafana:
   # kubelet handles volume ownership at mount time with no race. Refs #7.
   initChownData:
     enabled: false
+  # Plugins installed at startup. The ClickHouse datasource plugin is needed
+  # for the parallel logs backend in #19c (Grafana queries against the
+  # `logs` database in langfuse-clickhouse). Plugin pulls from grafana.com on
+  # pod start; no offline image needed for dev.
+  plugins:
+    - grafana-clickhouse-datasource
   sidecar:
     # Default ON; listed here for clarity. This sidecar watches for ConfigMaps
     # labeled `grafana_datasource: "1"` and registers them as datasources.
