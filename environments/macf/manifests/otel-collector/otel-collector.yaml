@@ -6,8 +6,12 @@
 #     k8sattributes         — enrich spans with pod/ns/node metadata
 #     resource/paper-dims   — ensure paper-dimension attrs propagate end-to-end
 #                             per science-agent tracing-plumbing-sketch §5.3:
-#                             agent.id, agent.role, agent.rules_variant,
-#                             scenario.run_id, scenario.name, scenario.role
+#                             gen_ai.agent.name, gen_ai.agent.role,
+#                             agent.rules_variant, scenario.run_id,
+#                             scenario.name, scenario.role
+#                             (gen_ai.agent.* names follow OTel GenAI semconv;
+#                              corrected from informal `agent.id`/`agent.role`
+#                              per #26 + macf#245 alignment)
 #     batch                 — default batching
 #   exporters:
 #     otlp/tempo            — Grafana Tempo (gRPC OTLP); trace search + timeline
@@ -141,11 +145,15 @@ spec:
       # source.)
       #
       # Why some attrs have defaults + some don't:
-      # - agent.id / agent.role: NOT defaulted. Any agent emitting OTLP should
-      #   have these stamped at bootstrap (tester settings.json env block per
-      #   sketch §5.2). Missing = agent-config bug; fail loud (absent attr)
-      #   rather than mask with `unknown-agent` sentinel that collides with
-      #   legitimate operator-daily-thread spans.
+      # - gen_ai.agent.name / gen_ai.agent.role: NOT defaulted. Any agent
+      #   emitting OTLP should have these stamped at bootstrap (tester
+      #   settings.json env block per sketch §5.2; for production agents see
+      #   each substrate workspace's claude.sh OTLP block). Names follow OTel
+      #   GenAI semconv — `gen_ai.*` namespace, not flat `agent.*` (corrected
+      #   from informal naming per #26 + macf#245 alignment).
+      #   Missing = agent-config bug; fail loud (absent attr) rather than
+      #   mask with `unknown-agent` sentinel that collides with legitimate
+      #   operator-daily-thread spans.
       # - agent.rules_variant: defaulted to `unknown`. Only testers know their
       #   variant (rules-loaded vs rules-bare for A/B); production agents
       #   don't, and that's OK to label explicitly.

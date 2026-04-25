@@ -32,6 +32,18 @@ if [ "$APP_ID" = "null" ] || [ "$INSTALL_ID" = "null" ] || [ "$KEY_PATH" = "null
   exit 1
 fi
 
+# Read OTLP-related settings from settings.local.json with shell-default
+# fallbacks. The CC process reads its own .env block on launch, but THIS
+# launcher (which runs before CC starts) needs the values via direct jq
+# lookup. `// empty` returns empty when the key is absent, distinguishing
+# null-from-jq vs missing-key — we treat both as "use default".
+MACF_AGENT_NAME_FROM_SETTINGS=$(jq -r '.env.MACF_AGENT_NAME // empty' "$SETTINGS")
+MACF_AGENT_ROLE_FROM_SETTINGS=$(jq -r '.env.MACF_AGENT_ROLE // empty' "$SETTINGS")
+MACF_OTEL_ENDPOINT_FROM_SETTINGS=$(jq -r '.env.MACF_OTEL_ENDPOINT // empty' "$SETTINGS")
+[ -n "$MACF_AGENT_NAME_FROM_SETTINGS" ] && : "${MACF_AGENT_NAME:=$MACF_AGENT_NAME_FROM_SETTINGS}"
+[ -n "$MACF_AGENT_ROLE_FROM_SETTINGS" ] && : "${MACF_AGENT_ROLE:=$MACF_AGENT_ROLE_FROM_SETTINGS}"
+[ -n "$MACF_OTEL_ENDPOINT_FROM_SETTINGS" ] && : "${MACF_OTEL_ENDPOINT:=$MACF_OTEL_ENDPOINT_FROM_SETTINGS}"
+
 ABS_KEY="$DIR/$KEY_PATH"
 if [ ! -f "$ABS_KEY" ]; then
   echo "error: private key not found at $ABS_KEY" >&2
@@ -56,31 +68,61 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
   exit 0
 fi
 
-# --- OTLP telemetry (refs #24) ---------------------------------------------
+# --- OTLP telemetry (refs #24, aligned per #26) ----------------------------
 # Wires Claude Code's built-in OpenTelemetry support so every conversation
 # emits traces (per tool call), metrics (token counts, model usage), and
-# logs into the cluster's stable OTLP ingress at :14318.
+# logs into the cluster's stable OTLP ingress.
 #
-# `${VAR=default}` assigns ONLY if VAR is unset — empty stays empty, so an
-# operator can opt out of telemetry for one session via:
-#   CLAUDE_CODE_ENABLE_TELEMETRY= ./claude.sh
-# Or override the endpoint to point elsewhere (e.g., a CI collector):
-#   OTEL_EXPORTER_OTLP_ENDPOINT=http://collector.ci:4318 ./claude.sh
+# Resource-attr naming follows OTel GenAI semantic conventions:
+#   gen_ai.agent.name   — semconv-compliant agent identity (vs the informal
+#                         flat `agent.id` from PR #25, corrected per code-
+#                         agent's review of macf#245).
+#   gen_ai.agent.role   — extension of the gen_ai.* namespace; same
+#                         convention code-agent uses in the canonical
+#                         `claude-sh.ts` template.
+#   OTEL_SERVICE_NAME   — `macf-agent-<role>` groups all MACF agents under
+#                         one service.name family for Issue H per-cell
+#                         tooling queries.
 #
-# `agent.id` + `agent.role` are the load-bearing paper-dim resource attrs.
-# The Collector's `resource/paper-dims` processor (in env macf) does NOT
-# default these — agents that fail to stamp them are visibly absent in
-# queries (fail-loud-on-absent), which is the right shape for the
-# measurement apparatus. See PR #12 review thread + the central Collector
-# CR's `resource/paper-dims` block for the rationale.
-: "${CLAUDE_CODE_ENABLE_TELEMETRY=1}"
-: "${OTEL_METRICS_EXPORTER=otlp}"
-: "${OTEL_LOGS_EXPORTER=otlp}"
-: "${OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf}"
-: "${OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:14318}"
-: "${OTEL_RESOURCE_ATTRIBUTES=agent.id=macf-devops-agent,agent.role=devops,service.name=claude-code-devops-agent}"
-export CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
-       OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT OTEL_RESOURCE_ATTRIBUTES
+# Endpoint defaults to OTel canonical `:4318`; this workspace's stable
+# ingress is on `:14318` (avoids collision with a pre-existing compose
+# stack on the same host) so we override via MACF_OTEL_ENDPOINT, set in
+# `.claude/settings.local.json`.
+#
+# `${VAR=default}` semantics: assigns ONLY if VAR is unset; empty stays
+# empty. Two preserved override paths:
+#   - Opt-out for one session:
+#       MACF_OTEL_DISABLED=1 ./claude.sh
+#       (or the more general: CLAUDE_CODE_ENABLE_TELEMETRY= ./claude.sh)
+#   - Endpoint override for one session:
+#       MACF_OTEL_ENDPOINT=http://other.ci:4318 ./claude.sh
+#
+# `gen_ai.agent.name` + `gen_ai.agent.role` are the load-bearing paper-dim
+# resource attrs. The Collector's `resource/paper-dims` processor (in env
+# macf) does NOT default these — agents that fail to stamp them are
+# visibly absent in queries (fail-loud-on-absent), which is the right
+# shape for the measurement apparatus. See PR #12 review thread + the
+# central Collector CR's `resource/paper-dims` block for the rationale.
+
+if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
+  : "${CLAUDE_CODE_ENABLE_TELEMETRY=1}"
+  : "${OTEL_METRICS_EXPORTER=otlp}"
+  : "${OTEL_LOGS_EXPORTER=otlp}"
+  : "${OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf}"
+  : "${MACF_OTEL_ENDPOINT=http://localhost:4318}"
+  : "${OTEL_EXPORTER_OTLP_ENDPOINT=$MACF_OTEL_ENDPOINT}"
+  # Agent name + role parameterized via settings.local.json — defaults
+  # below are sane fallbacks for this devops workspace, but the
+  # MACF_AGENT_NAME / MACF_AGENT_ROLE jq-reads above populate them from
+  # settings, so changing identity is a one-line settings edit.
+  : "${MACF_AGENT_NAME:=macf-devops-agent}"
+  : "${MACF_AGENT_ROLE:=devops}"
+  : "${OTEL_SERVICE_NAME=macf-agent-${MACF_AGENT_ROLE}}"
+  : "${OTEL_RESOURCE_ATTRIBUTES=gen_ai.agent.name=${MACF_AGENT_NAME},gen_ai.agent.role=${MACF_AGENT_ROLE}}"
+  export CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
+         OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
+         OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES
+fi
 
 # TEMPORARY: wrap claude in `sg docker -c` so claude + its Bash-tool children
 # inherit the docker gid. Needed because this host's long-running tmux server
