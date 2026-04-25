@@ -184,14 +184,55 @@ clickhouse:
   # install smoke.
 
 # --- MinIO / S3 (event + export blobs) -------------------------------------
+# Two layers of S3 credentials:
+#  1. MinIO subchart auth (s3.auth.*)        — rooted at langfuse-s3 Secret;
+#     keys `root-user` + `root-password`. Bitnami MinIO reads these into
+#     MINIO_ROOT_USER + MINIO_ROOT_PASSWORD env on the langfuse-s3 pod.
+#  2. Langfuse-app S3 client creds (s3.eventUpload/batchExport/mediaUpload)
+#     — must reference the SAME langfuse-s3 Secret keys so the Langfuse
+#     web/worker can authenticate against MinIO. The chart does NOT auto-
+#     plumb (1) → (2); without explicit per-upload accessKeyId/secretAccessKey
+#     here, the chart hardcodes ACCESS_KEY_ID="minio" and leaves
+#     SECRET_ACCESS_KEY unset → InvalidAccessKeyId 403 from MinIO when
+#     Langfuse tries to upload OTel ingestion JSON, which silently breaks
+#     the OTLP→Langfuse pipeline (Collector POST → Langfuse 500 → Trace 404).
 s3:
   deploy: true
   auth:
     existingSecret: langfuse-s3
-    # bitnami/minio secret expects two keys: root-user + root-password.
-    # Keep both in langfuse-s3.
-    existingSecretKeyPasswordKey: root-password
-    existingSecretKeyAccessKey: root-user
+    rootUserSecretKey: root-user
+    rootPasswordSecretKey: root-password
+
+  # Top-level defaults for accessKey/secretKey are inherited by per-upload-
+  # type sections IF those don't override. Chart 1.5.27 nevertheless emits
+  # all three sets of env vars separately, so we set per-section explicitly.
+  eventUpload:
+    accessKeyId:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-user
+    secretAccessKey:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-password
+  batchExport:
+    accessKeyId:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-user
+    secretAccessKey:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-password
+  mediaUpload:
+    accessKeyId:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-user
+    secretAccessKey:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-password
 
   persistence:
     enabled: true
