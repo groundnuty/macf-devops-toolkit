@@ -110,4 +110,67 @@ elif [ -z "${LANGFUSE_PUBLIC_KEY:-}" ] || [ -z "${LANGFUSE_SECRET_KEY:-}" ]; the
     esac
 fi
 echo
-echo "=== done. Tempo leg above + Langfuse leg (if keys wired). ==="
+
+# --- Prometheus metrics leg ----------------------------------------------------
+# Third verification path per #18: POST an OTLP metric to the Collector and
+# query Prometheus for it within ~30s (Prometheus scrapes :8889 every 30s).
+#
+# Reuses the same trace_id as the span above — gives a stable correlation
+# label (`trace_id="$TRACE_ID"` works as a metric exemplar attr too).
+#
+# Prometheus port-forward is operator-side: `make pf-prometheus` (or
+# `kubectl -n monitoring port-forward svc/kube-prom-stack-kube-prome-prometheus 9090:9090`).
+# If :9090 is not reachable, this leg SKIPs without failing the smoke.
+
+PROM_URL="${PROM_URL:-http://127.0.0.1:9090}"
+
+echo "=== Prometheus metrics leg ==="
+METRIC_PAYLOAD=$(cat <<EOF
+{"resourceMetrics":[{"resource":{"attributes":[
+  {"key":"service.name","value":{"stringValue":"macf-smoke-test"}},
+  {"key":"service.version","value":{"stringValue":"0.1.0"}}
+]},"scopeMetrics":[{"scope":{"name":"macf-smoke","version":"0.1.0"},
+"metrics":[{"name":"macf_smoke_counter","unit":"1","sum":{
+  "aggregationTemporality":2,"isMonotonic":true,
+  "dataPoints":[{
+    "asInt":"1","timeUnixNano":"$NOW_NS",
+    "attributes":[
+      {"key":"trace_id","value":{"stringValue":"$TRACE_ID"}},
+      {"key":"test.source","value":{"stringValue":"macf-devops-agent-smoke"}}
+    ]
+  }]
+}}]}]}]}
+EOF
+)
+
+echo "POST $COLLECTOR_OTLP_HTTP/v1/metrics  (trace_id=$TRACE_ID)"
+echo "$METRIC_PAYLOAD" | curl -sSi -X POST \
+  -H 'Content-Type: application/json' \
+  -d @- \
+  "$COLLECTOR_OTLP_HTTP/v1/metrics" | head -3
+echo
+
+if curl -sf -o /dev/null -m 2 "$PROM_URL/-/ready"; then
+    # `{` `}` `"` must be URL-encoded — `--data-urlencode` + `-G` handles it.
+    Q="macf_smoke_counter_total{trace_id=\"$TRACE_ID\"}"
+    echo "Polling $PROM_URL for $Q (up to 60s — scrape interval is 30s)..."
+    FOUND=""
+    for i in $(seq 1 12); do
+        sleep 5
+        if curl -sf -G "$PROM_URL/api/v1/query" --data-urlencode "query=$Q" \
+             | jq -e '.data.result | length > 0' >/dev/null 2>&1; then
+            FOUND=1
+            echo "  ✓ found after ${i}x5s"
+            break
+        fi
+    done
+    if [ -n "$FOUND" ]; then
+        curl -sS -G "$PROM_URL/api/v1/query" --data-urlencode "query=$Q" | jq '.data.result[0]'
+    else
+        echo "  ✗ NOT FOUND after 60s"
+    fi
+else
+    echo "SKIP: Prometheus at $PROM_URL not reachable (run \`make pf-prometheus\`)"
+fi
+echo
+echo "=== done. Tempo + Langfuse + Prometheus legs above. ==="
