@@ -1,0 +1,170 @@
+# Logs-collection Collector — DaemonSet mode (one pod per node).
+#
+# Why a SECOND Collector alongside the central Deployment one (#11/#12):
+#   - DaemonSet placement is needed for the `filelog` receiver to read
+#     `/var/log/pods/` host paths on every node. The central Deployment-mode
+#     Collector wouldn't see logs from pods scheduled to nodes where it
+#     doesn't run.
+#   - Pipeline shape is signal-specific (logs vs traces/metrics). Mixing
+#     would make the central Collector's config harder to reason about.
+#   - Resource isolation: log-burst on one node doesn't crowd out trace
+#     batching across the whole cluster.
+#
+# Scope of this manifest (#19a — first slice of #19):
+#   receivers:
+#     filelog                 — tail /var/log/pods/*/*/*.log; k8s log format
+#                               parser (operator container output convention)
+#   processors:
+#     k8sattributes           — enrich log records with pod/ns/node + paper-
+#                               dim resource attrs (mirrors central Collector)
+#     resource/paper-dims     — same insert-not-upsert defaulting as traces:
+#                               agent.rules_variant=unknown, scenario.*=none.
+#                               agent.id/agent.role NOT defaulted (fail-loud
+#                               on absence — see central CR's same block).
+#     batch                   — default batching
+#   exporters:
+#     debug                   — stdout, verbosity: basic. Swapped for `loki`
+#                               in #19b and `clickhouse` in #19c.
+#
+# Backend exporters (loki, clickhouse) deliberately not in scope here.
+# This first slice proves log COLLECTION works in isolation; subsequent
+# slices add backends + Grafana datasources without re-touching the
+# Collector spec's core ingest path.
+#
+# CRD: opentelemetry.io/v1beta1 (matches central Collector — same operator).
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector-logs
+  namespace: otel
+
+---
+# Reuses the existing `otel-collector-k8sattributes` ClusterRole (defined in
+# manifests/otel-collector/otel-collector.yaml). Same RBAC set is needed —
+# both collectors call `k8sattributes` processor with the same metadata
+# resolution requirements. Separate binding keeps the SA-to-role mapping
+# explicit per collector.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-collector-logs-k8sattributes
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector-logs
+    namespace: otel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-collector-k8sattributes
+
+---
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: logs
+  namespace: otel
+spec:
+  mode: daemonset
+  serviceAccount: otel-collector-logs
+  # filelog needs raw read on host /var/log. hostPath is the conventional
+  # pattern for k8s log scrapers (Promtail, FluentBit, OTel filelog all do
+  # this). containerd writes pod logs to /var/log/pods/<ns>_<pod>_<uid>/<container>/0.log
+  # with symlinks from /var/log/containers/ — we tail the canonical path.
+  volumes:
+    - name: varlogpods
+      hostPath:
+        path: /var/log/pods
+        type: DirectoryOrCreate
+    - name: varlibdockercontainers
+      hostPath:
+        path: /var/lib/docker/containers
+        type: DirectoryOrCreate
+  volumeMounts:
+    - name: varlogpods
+      mountPath: /var/log/pods
+      readOnly: true
+    - name: varlibdockercontainers
+      mountPath: /var/lib/docker/containers
+      readOnly: true
+  config:
+    receivers:
+      filelog:
+        # Tail container stdout/stderr per-pod. k3s/containerd convention is
+        # /var/log/pods/<ns>_<pod>_<uid>/<container>/<restart>.log.
+        include:
+          - /var/log/pods/*/*/*.log
+        # Skip Collector's own logs to prevent feedback loop.
+        exclude:
+          - /var/log/pods/otel_logs-collector-*/*/*.log
+        start_at: end
+        include_file_path: true
+        include_file_name: false
+        # The k8sattributes processor uses pod_uid (extracted from path) as
+        # the identifier — these operators decode the on-disk format.
+        operators:
+          - id: container-parser
+            type: container
+            format: containerd
+
+    processors:
+      # Attach pod/ns/node + paper-dim resource attrs to log records — same
+      # association rules as central collector for spans + metrics.
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.deployment.name
+            - k8s.statefulset.name
+            - k8s.daemonset.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.node.name
+            - k8s.container.name
+          labels:
+            - tag_name: app.kubernetes.io/name
+              key: app.kubernetes.io/name
+            - tag_name: app.kubernetes.io/instance
+              key: app.kubernetes.io/instance
+        pod_association:
+          # filelog's container parser sets k8s.pod.uid; that's our identifier.
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+
+      # Same insert-not-upsert defaults as central Collector. agent.id /
+      # agent.role intentionally absent here — those must be stamped at the
+      # source agent's bootstrap, NOT defaulted, so missing values are
+      # visible (NOT masked by `unknown-agent` sentinel).
+      resource/paper-dims:
+        attributes:
+          - key: agent.rules_variant
+            value: unknown
+            action: insert
+          - key: scenario.run_id
+            value: none
+            action: insert
+          - key: scenario.name
+            value: none
+            action: insert
+          - key: scenario.role
+            value: none
+            action: insert
+
+      batch: {}
+
+    exporters:
+      # Verbose enough to confirm log records flow + correct attribute set.
+      # Replaced by `loki` (#19b) + `clickhouse` (#19c) once destinations land.
+      debug:
+        verbosity: basic
+
+    service:
+      pipelines:
+        logs:
+          receivers:  [filelog]
+          processors: [k8sattributes, resource/paper-dims, batch]
+          exporters:  [debug]

@@ -1,0 +1,28 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: otel-collector-logs
+  namespace: argocd-applications
+  annotations:
+    # Wave 1: same as `otel-collector` — depends on otel-operator (wave 0)
+    # having registered the OpenTelemetryCollector CRD. Independent of the
+    # central Collector itself; both can reconcile in parallel within wave 1.
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/otel-collector-logs
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: otel
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
