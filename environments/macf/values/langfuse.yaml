@@ -53,19 +53,51 @@ langfuse:
 
   features:
     telemetryEnabled: false  # don't phone home from dev/research workloads
-    signUpDisabled: false    # single-user; allow the first signup then disable post-first-user
+    signUpDisabled: true     # headless-init creates the admin user; lock further signups
     experimentalFeaturesEnabled: true
 
   ingress:
     enabled: false  # port-forward only in the spike
 
-  # Probe delays — chart defaults (initialDelaySeconds=20) fire before
-  # Langfuse finishes its 390+ Prisma migrations on first install, so the
-  # kubelet liveness-probe kills the pod mid-migration + restarts — classic
-  # crashloop. Bump initial delay so migrations can complete before probes
-  # fire. Once pgdata is populated, subsequent restarts are fast and 20s
-  # would suffice — but 120s is harmless and preempts the first-install loop.
+  # Web deployment overrides:
+  # - additionalEnv: Langfuse reads LANGFUSE_INIT_* env vars on first boot
+  #   to create org/project/user/API-keys WITHOUT requiring a UI signup
+  #   (https://langfuse.com/self-hosting/headless-initialization). The
+  #   `langfuse-init` Secret is generated + applied by
+  #   hack/langfuse-bootstrap.sh (`make langfuse-bootstrap`); same script
+  #   writes a parallel `langfuse-api-keys` Secret in ns/otel so the
+  #   Collector's otlphttp/langfuse exporter has the matching basic-auth
+  #   keys — single source of truth for public/secret keys.
+  #
+  #   NOTE on `additionalEnv` vs `additionalEnvFrom`: chart v1.5.27 (which
+  #   we pin) only supports `additionalEnv` (explicit per-key list). Newer
+  #   chart main has `additionalEnvFrom` (bulk Secret import) — when we
+  #   bump past 1.5.27, the 9 entries below collapse to a single secretRef.
+  # - probe delays: chart defaults (initialDelaySeconds=20) fire before
+  #   Langfuse finishes its 390+ Prisma migrations on first install, so
+  #   the kubelet liveness-probe kills the pod mid-migration + restarts.
+  #   Bumped to 120/60s so migrations can complete before probes fire.
   web:
+    pod:
+      additionalEnv:
+        - name: LANGFUSE_INIT_ORG_ID
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_ORG_ID } }
+        - name: LANGFUSE_INIT_ORG_NAME
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_ORG_NAME } }
+        - name: LANGFUSE_INIT_PROJECT_ID
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_PROJECT_ID } }
+        - name: LANGFUSE_INIT_PROJECT_NAME
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_PROJECT_NAME } }
+        - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_PROJECT_PUBLIC_KEY } }
+        - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_PROJECT_SECRET_KEY } }
+        - name: LANGFUSE_INIT_USER_EMAIL
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_USER_EMAIL } }
+        - name: LANGFUSE_INIT_USER_NAME
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_USER_NAME } }
+        - name: LANGFUSE_INIT_USER_PASSWORD
+          valueFrom: { secretKeyRef: { name: langfuse-init, key: LANGFUSE_INIT_USER_PASSWORD } }
     livenessProbe:
       initialDelaySeconds: 120
       timeoutSeconds: 10
@@ -152,14 +184,55 @@ clickhouse:
   # install smoke.
 
 # --- MinIO / S3 (event + export blobs) -------------------------------------
+# Two layers of S3 credentials:
+#  1. MinIO subchart auth (s3.auth.*)        — rooted at langfuse-s3 Secret;
+#     keys `root-user` + `root-password`. Bitnami MinIO reads these into
+#     MINIO_ROOT_USER + MINIO_ROOT_PASSWORD env on the langfuse-s3 pod.
+#  2. Langfuse-app S3 client creds (s3.eventUpload/batchExport/mediaUpload)
+#     — must reference the SAME langfuse-s3 Secret keys so the Langfuse
+#     web/worker can authenticate against MinIO. The chart does NOT auto-
+#     plumb (1) → (2); without explicit per-upload accessKeyId/secretAccessKey
+#     here, the chart hardcodes ACCESS_KEY_ID="minio" and leaves
+#     SECRET_ACCESS_KEY unset → InvalidAccessKeyId 403 from MinIO when
+#     Langfuse tries to upload OTel ingestion JSON, which silently breaks
+#     the OTLP→Langfuse pipeline (Collector POST → Langfuse 500 → Trace 404).
 s3:
   deploy: true
   auth:
     existingSecret: langfuse-s3
-    # bitnami/minio secret expects two keys: root-user + root-password.
-    # Keep both in langfuse-s3.
-    existingSecretKeyPasswordKey: root-password
-    existingSecretKeyAccessKey: root-user
+    rootUserSecretKey: root-user
+    rootPasswordSecretKey: root-password
+
+  # Top-level defaults for accessKey/secretKey are inherited by per-upload-
+  # type sections IF those don't override. Chart 1.5.27 nevertheless emits
+  # all three sets of env vars separately, so we set per-section explicitly.
+  eventUpload:
+    accessKeyId:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-user
+    secretAccessKey:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-password
+  batchExport:
+    accessKeyId:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-user
+    secretAccessKey:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-password
+  mediaUpload:
+    accessKeyId:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-user
+    secretAccessKey:
+      secretKeyRef:
+        name: langfuse-s3
+        key: root-password
 
   persistence:
     enabled: true

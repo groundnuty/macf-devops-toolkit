@@ -1,0 +1,21 @@
+# EXAMPLE — NOT APPLIED BY ARGOCD.
+# Generate the actual Secret via `make langfuse-api-keys` (runs
+# hack/langfuse-api-keys.sh; prompts for keys).
+#
+# The Collector Deployment's env section (see otel-collector.yaml) references
+# this Secret's `public-key` + `secret-key` entries. Without them, the
+# Collector pod waits on Secret availability before starting.
+#
+# Key retrieval: log in to Langfuse UI (`make pf-langfuse` → http://127.0.0.1:3001)
+# → Create project → API Keys → Copy public (pk-lf-...) + secret (sk-lf-...).
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: langfuse-api-keys
+  namespace: otel
+type: Opaque
+stringData:
+  public-key: "pk-lf-REPLACE_WITH_REAL_FROM_LANGFUSE_UI"
+  secret-key: "sk-lf-REPLACE_WITH_REAL_FROM_LANGFUSE_UI"

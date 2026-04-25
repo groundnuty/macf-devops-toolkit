@@ -72,4 +72,42 @@ sleep 3
 echo "=== GET Tempo traces/$TRACE_ID ==="
 curl -sSi "$TEMPO_URL/api/traces/$TRACE_ID" | head -40
 echo
-echo "=== done. If the trace body appears above with the 'macf.smoke.llm.call' span, the round-trip works. ==="
+
+# --- Langfuse leg --------------------------------------------------------------
+# Second verification path per #11 + science-agent review on PR #12:
+# after POSTing to the Collector's otlphttp/langfuse exporter fans to Langfuse,
+# we should see the span via Langfuse's /api/public/traces API with
+# gen_ai.* attrs visible.
+#
+# Auth: reads keys from the langfuse-api-keys Secret in ns/otel
+# (see hack/langfuse-api-keys.sh). If keys are the bootstrap-placeholder
+# values (pk-lf-placeholder / sk-lf-placeholder), the request 401s and we
+# report SKIPPED — not a hard failure. Operator runs `make langfuse-api-keys`
+# to wire real keys.
+
+LANGFUSE_URL="${LANGFUSE_URL:-http://127.0.0.1:3001}"
+
+echo "=== Langfuse leg ==="
+if ! kubectl -n otel get secret langfuse-api-keys >/dev/null 2>&1; then
+    echo "SKIP: ns/otel Secret langfuse-api-keys not found (run \`make langfuse-api-keys\` after Langfuse UI signup)"
+elif [ -z "${LANGFUSE_PUBLIC_KEY:-}" ] || [ -z "${LANGFUSE_SECRET_KEY:-}" ]; then
+    PK=$(kubectl -n otel get secret langfuse-api-keys -o jsonpath='{.data.public-key}' | base64 -d 2>/dev/null || echo "")
+    SK=$(kubectl -n otel get secret langfuse-api-keys -o jsonpath='{.data.secret-key}' | base64 -d 2>/dev/null || echo "")
+    case "$PK" in
+        pk-lf-placeholder*|"" )
+            echo "SKIP: langfuse-api-keys Secret holds placeholder values — run \`make langfuse-api-keys\` with real keys from Langfuse UI"
+            ;;
+        *)
+            # Also need Langfuse port-forwarded — assume `make pf-langfuse` is running.
+            echo "GET Langfuse /api/public/traces/$TRACE_ID"
+            # Langfuse needs more time than Tempo on first ingest (goes through
+            # queue → worker → ClickHouse). Give it 10s extra beyond the 3s
+            # Tempo wait above.
+            sleep 10
+            curl -sS -u "$PK:$SK" "$LANGFUSE_URL/api/public/traces/$TRACE_ID" | jq -e '.observations[0].modelParameters // .gen_ai // {}' 2>/dev/null || true
+            curl -sSi -u "$PK:$SK" "$LANGFUSE_URL/api/public/traces/$TRACE_ID" | head -5
+            ;;
+    esac
+fi
+echo
+echo "=== done. Tempo leg above + Langfuse leg (if keys wired). ==="
