@@ -229,10 +229,23 @@ else
   echo "  (Langfuse credentials not available — empty result)"
 fi
 
-# 3. Loki — query_range with stream selector on the underscore-form label
+# 3. Loki — query_range. Loki only indexes a small set of labels (k8s_*,
+# service_name, service_namespace); other OTLP resource attrs land in
+# structured metadata, NOT as indexed labels. So `{gen_ai_agent_name=...}`
+# returns 0 streams (silent — empty result, no error).
+#
+# Strategy: when filtering on `gen_ai.agent.name`, use `service_name` —
+# claude.sh templates set both to the same value, so the indexed-label
+# selector is equivalent and faster. For any other filter key, combine an
+# always-match stream selector with a structured-metadata line filter.
 echo "Querying Loki..."
+if [ "$FK_DOT" = "gen_ai.agent.name" ]; then
+  LOKI_QUERY="{service_name=\"${FILTER_VALUE}\"}"
+else
+  LOKI_QUERY="{service_name=~\".+\"} | ${FK_UNDERSCORE}=\"${FILTER_VALUE}\""
+fi
 curl -sS -G "http://127.0.0.1:3100/loki/api/v1/query_range" \
-  --data-urlencode "query={${FK_UNDERSCORE}=\"${FILTER_VALUE}\"}" \
+  --data-urlencode "query=${LOKI_QUERY}" \
   --data-urlencode "start=$START_NS" \
   --data-urlencode "end=$END_NS" \
   --data-urlencode "limit=5000" \
@@ -266,11 +279,19 @@ curl -sS -G "http://127.0.0.1:9090/api/v1/query_range" \
   --data-urlencode "step=60s" \
   > "$OUT_DIR/metrics-prom.json" || echo "  (Prom query failed)"
 
-# 6. Grafana drill-in URLs (live click-through; pre-filtered)
+# 6. Grafana drill-in URLs (live click-through; pre-filtered).
+# Loki URL: same selector strategy as the API query above — service_name
+# label for the gen_ai.agent.name common case, structured-metadata
+# fallback otherwise. URL-encode the | (pipe) as %7C and " as %5C%22.
+if [ "$FK_DOT" = "gen_ai.agent.name" ]; then
+  LOKI_URL_QUERY="%7Bservice_name%3D%5C%22${FILTER_VALUE}%5C%22%7D"
+else
+  LOKI_URL_QUERY="%7Bservice_name%3D~%5C%22.%2B%5C%22%7D%20%7C%20${FK_UNDERSCORE}%3D%5C%22${FILTER_VALUE}%5C%22"
+fi
 cat > "$OUT_DIR/grafana-urls.json" <<URLS
 {
   "tempo": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%7B%22query%22:%22%7B%20resource.${FK_DOT}%20%3D%20%5C%22${FILTER_VALUE}%5C%22%20%7D%22%7D%5D%7D",
-  "loki": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22%7B${FK_UNDERSCORE}%3D%5C%22${FILTER_VALUE}%5C%22%7D%22%7D%5D%7D",
+  "loki": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22${LOKI_URL_QUERY}%22%7D%5D%7D",
   "prometheus": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22prometheus%22,%22queries%22:%5B%7B%22expr%22:%22%7B${FK_UNDERSCORE}%3D%5C%22${FILTER_VALUE}%5C%22%7D%22%7D%5D%7D",
   "clickhouse_logs": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22clickhouse-logs%22%7D",
   "langfuse_native_ui": "http://127.0.0.1:3001/project/macf-dev/traces"
@@ -339,6 +360,29 @@ fi
 # Pagination truncation warning (Langfuse-specific)
 if [ "${PAGINATION_TRUNCATED:-0}" = "1" ]; then
   add_warning "langfuse: pagination hit 50-page cap (5000 traces); count of $LANGFUSE_HITS may be partial — narrow filter or split window"
+fi
+
+# Loki/ClickHouse divergence warning (per #46). Both backends are
+# downstream of the same Collector logs pipeline; when one is non-empty
+# and the other is significantly smaller, suspect: (a) Loki query
+# selector mismatch (label vs structured metadata), (b) silent ingest
+# failure on one exporter, or (c) Loki retention shorter than CH.
+# Threshold: 10× divergence, with a floor to avoid noise on tiny windows
+# (e.g. 0/3 isn't a 3× problem). 100-row floor on the larger side
+# matches typical scenario sweep volume (~60 events per iteration).
+LARGER=$LOKI_STREAMS
+[ "$CH_ROWS" -gt "$LARGER" ] && LARGER=$CH_ROWS
+if [ "$LARGER" -ge 100 ]; then
+  if [ "$LOKI_STREAMS" -eq 0 ] && [ "$CH_ROWS" -ge 100 ]; then
+    add_warning "loki/clickhouse divergence: loki=0 streams but clickhouse=$CH_ROWS rows — same pipeline, silent split. See macf-devops-toolkit#46 for hypotheses (label selector? ingest failure? retention?)."
+  elif [ "$CH_ROWS" -eq 0 ] && [ "$LOKI_STREAMS" -ge 100 ]; then
+    add_warning "loki/clickhouse divergence: clickhouse=0 rows but loki=$LOKI_STREAMS streams — same pipeline, silent split"
+  elif [ "$LOKI_STREAMS" -gt 0 ] && [ "$CH_ROWS" -gt 0 ]; then
+    # Both non-zero — check ratio
+    if [ $((LOKI_STREAMS * 10)) -lt "$CH_ROWS" ] || [ $((CH_ROWS * 10)) -lt "$LOKI_STREAMS" ]; then
+      add_warning "loki/clickhouse divergence: loki=$LOKI_STREAMS streams vs clickhouse=$CH_ROWS rows differ by >10× — investigate pipeline"
+    fi
+  fi
 fi
 
 WARNINGS_JSON=$(cat "$WARNINGS_TMP")
