@@ -2,31 +2,11 @@
 # on the VM via SSH, pushes the resulting JSON bundle to the archive repo,
 # posts a summary comment on the closed issue/PR. Per DR-002.
 #
-# OPERATOR SETUP (one-time, gates first-run success):
-#
-#   1. Tailscale OAuth client in groundnuty org settings:
-#      Settings → Tailscale → OAuth clients → New client (with `auth_keys`
-#      scope + tag `tag:gha-runner`). Store ID + secret as org-level GitHub
-#      Actions secrets:
-#        TAILSCALE_OAUTH_CLIENT_ID
-#        TAILSCALE_OAUTH_SECRET
-#
-#   2. SSH key for `ubuntu@<VM-tailnet-name>`:
-#      a. Generate keypair: `ssh-keygen -t ed25519 -f /tmp/obs-runner-key -N ""`
-#      b. Install public half: append /tmp/obs-runner-key.pub to the VM's
-#         /home/ubuntu/.ssh/authorized_keys
-#      c. Store private half as REPO secret OBS_RUNNER_SSH_KEY (full PEM)
-#      d. Store the VM's tailnet name (e.g., `orzech-dev-agents`) as REPO
-#         var OBS_RUNNER_HOST
-#
-#   3. groundnuty/macf-observability-archive repo:
-#      a. Create the repo (private OK; can flip to public if paper supplementary
-#         materials need it later)
-#      b. Generate a deploy key with WRITE access on the archive repo
-#      c. Store the deploy private key as REPO secret ARCHIVE_DEPLOY_KEY
-#
-# Until all three are configured, the workflow fires but fails at step 2
-# (tailscale-up) or step 4 (ssh) with clear errors. No silent failures.
+# OPERATOR SETUP: see docs/observability-bundle-setup.md (single canonical
+# runbook covering Tailscale OAuth, SSH key, archive-repo deploy key, and
+# first-run validation). Until all three setup steps are configured, the
+# workflow fires but fails at the first missing-secret step with clear
+# errors. No silent failures.
 
 name: observability-snapshot
 
