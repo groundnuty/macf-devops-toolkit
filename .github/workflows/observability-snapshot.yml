@@ -1,0 +1,195 @@
+# Observability bundle on issue/PR close — calls hack/observability-snapshot.sh
+# on the VM via SSH, pushes the resulting JSON bundle to the archive repo,
+# posts a summary comment on the closed issue/PR. Per DR-002.
+#
+# OPERATOR SETUP (one-time, gates first-run success):
+#
+#   1. Tailscale OAuth client in groundnuty org settings:
+#      Settings → Tailscale → OAuth clients → New client (with `auth_keys`
+#      scope + tag `tag:gha-runner`). Store ID + secret as org-level GitHub
+#      Actions secrets:
+#        TAILSCALE_OAUTH_CLIENT_ID
+#        TAILSCALE_OAUTH_SECRET
+#
+#   2. SSH key for `ubuntu@<VM-tailnet-name>`:
+#      a. Generate keypair: `ssh-keygen -t ed25519 -f /tmp/obs-runner-key -N ""`
+#      b. Install public half: append /tmp/obs-runner-key.pub to the VM's
+#         /home/ubuntu/.ssh/authorized_keys
+#      c. Store private half as REPO secret OBS_RUNNER_SSH_KEY (full PEM)
+#      d. Store the VM's tailnet name (e.g., `orzech-dev-agents`) as REPO
+#         var OBS_RUNNER_HOST
+#
+#   3. groundnuty/macf-observability-archive repo:
+#      a. Create the repo (private OK; can flip to public if paper supplementary
+#         materials need it later)
+#      b. Generate a deploy key with WRITE access on the archive repo
+#      c. Store the deploy private key as REPO secret ARCHIVE_DEPLOY_KEY
+#
+# Until all three are configured, the workflow fires but fails at step 2
+# (tailscale-up) or step 4 (ssh) with clear errors. No silent failures.
+
+name: observability-snapshot
+
+on:
+  issues:
+    types: [closed]
+  pull_request:
+    types: [closed]
+
+# Permissions: workflow needs to comment on the closed issue/PR.
+# Other writes (archive-repo push, secret reads) happen via dedicated keys.
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout (this repo's snapshot script lives here)
+        uses: actions/checkout@v4
+
+      - name: Tailscale up (join tailnet so we can reach the cluster VM)
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
+          tags: tag:gha-runner
+
+      - name: Install SSH key for VM access
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.OBS_RUNNER_SSH_KEY }}" > ~/.ssh/obs-runner
+          chmod 600 ~/.ssh/obs-runner
+          # tailnet hostname → known_hosts via ssh-keyscan over Tailscale
+          ssh-keyscan -H "${{ vars.OBS_RUNNER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Determine issue/PR number + repo
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            echo "kind=issue" >> "$GITHUB_OUTPUT"
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=pr" >> "$GITHUB_OUTPUT"
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "repo=${{ github.repository }}" >> "$GITHUB_OUTPUT"
+
+      - name: Run snapshot script on the VM via SSH
+        env:
+          REPO: ${{ steps.ref.outputs.repo }}
+          NUMBER: ${{ steps.ref.outputs.number }}
+          KIND: ${{ steps.ref.outputs.kind }}
+          VM_HOST: ${{ vars.OBS_RUNNER_HOST }}
+        run: |
+          # Bundle path on the VM: /tmp/obs-bundle-<repo-slug>-<N>/
+          REMOTE_BUNDLE="/tmp/obs-bundle-${REPO//\//-}-${NUMBER}"
+          # Run the script. The VM has the macf-devops-toolkit repo cloned at
+          # ~/repos/groundnuty/macf-devops-toolkit (per the operator's layout).
+          # Optional --grafana-base override via repo var (vars.GRAFANA_BASE).
+          # Default in the script is http://127.0.0.1:3000 which only
+          # resolves on the VM or via operator's port-forward. For sister-
+          # repo propagation where issue-closers are other agents
+          # (science-agent, code-agent, testers) without port-forward
+          # access, set vars.GRAFANA_BASE to the cluster's external URL
+          # (or to a tailnet-reachable Grafana endpoint if exposed).
+          GRAFANA_FLAG=""
+          if [ -n "${{ vars.GRAFANA_BASE }}" ]; then
+            GRAFANA_FLAG="--grafana-base '${{ vars.GRAFANA_BASE }}'"
+          fi
+          ssh -i ~/.ssh/obs-runner ubuntu@"$VM_HOST" \
+            "cd ~/repos/groundnuty/macf-devops-toolkit/environments/macf && \
+             devbox run -q -- bash hack/observability-snapshot.sh \
+               --mode github-issue \
+               --repo '$REPO' \
+               --issue '$NUMBER' \
+               --out-dir '$REMOTE_BUNDLE' \
+               $GRAFANA_FLAG"
+          # scp the bundle back to the runner. Bundle path `./bundle/` is
+          # runner-relative; safe on github-hosted runners (fresh workspace
+          # per run, no concurrent-workflow collision risk). If we ever
+          # switch to self-hosted / persistent runners, this becomes a
+          # collision concern + would need per-issue subdirs.
+          scp -i ~/.ssh/obs-runner -r ubuntu@"$VM_HOST":"$REMOTE_BUNDLE" ./bundle/
+          # Cleanup VM-side
+          ssh -i ~/.ssh/obs-runner ubuntu@"$VM_HOST" "rm -rf '$REMOTE_BUNDLE' || true"
+          ls -la ./bundle/
+
+      - name: Push bundle to archive repo
+        env:
+          REPO: ${{ steps.ref.outputs.repo }}
+          NUMBER: ${{ steps.ref.outputs.number }}
+        run: |
+          # Clone archive repo using deploy key
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ARCHIVE_DEPLOY_KEY }}" > ~/.ssh/archive-deploy
+          chmod 600 ~/.ssh/archive-deploy
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/archive-deploy" \
+            git clone git@github.com:groundnuty/macf-observability-archive.git ~/archive
+          # Place the bundle at runs/work/<owner>/<repo>/<N>/
+          OWNER_REPO="${REPO//\//-}"
+          DEST_DIR=~/archive/work/$REPO/$NUMBER
+          mkdir -p "$DEST_DIR"
+          cp -r ./bundle/* "$DEST_DIR/"
+          # Commit + push
+          cd ~/archive
+          git config user.name "macf-devops-agent[bot]"
+          git config user.email "278898590+macf-devops-agent[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes to commit (bundle empty?)"
+          else
+            git commit -m "obs-bundle: $REPO#$NUMBER"
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/archive-deploy" git push
+          fi
+
+      - name: Post summary comment on closed issue/PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ steps.ref.outputs.repo }}
+          NUMBER: ${{ steps.ref.outputs.number }}
+          KIND: ${{ steps.ref.outputs.kind }}
+        run: |
+          # Read the bundle's manifest + grafana-urls files for summary
+          MANIFEST=$(cat ./bundle/manifest.json)
+          GRAFANA=$(cat ./bundle/grafana-urls.json)
+
+          # Render a markdown comment
+          BODY=$(cat <<EOF
+          ## 📊 Observability bundle
+
+          **Window**: $(echo "$MANIFEST" | jq -r '.window.start_iso') → $(echo "$MANIFEST" | jq -r '.window.end_iso')  ($(echo "$MANIFEST" | jq -r '.window.duration_seconds')s)
+          **Filter**: \`$(echo "$MANIFEST" | jq -r '.filter.key')\` = \`$(echo "$MANIFEST" | jq -r '.filter.value')\`
+
+          ### Summary
+          | Backend | Count |
+          |---|---|
+          | Tempo | $(echo "$MANIFEST" | jq -r '.summary.tempo_traces') traces |
+          | Langfuse | $(echo "$MANIFEST" | jq -r '.summary.langfuse_traces') traces |
+          | Loki | $(echo "$MANIFEST" | jq -r '.summary.loki_streams') streams |
+          | ClickHouse-logs | $(echo "$MANIFEST" | jq -r '.summary.clickhouse_rows') rows |
+          | Prometheus | $(echo "$MANIFEST" | jq -r '.summary.prometheus_series') series |
+
+          ### Drill-in (Grafana, pre-filtered)
+          - 🔍 [Tempo]($(echo "$GRAFANA" | jq -r '.tempo'))
+          - 📜 [Loki]($(echo "$GRAFANA" | jq -r '.loki'))
+          - 📈 [Prometheus]($(echo "$GRAFANA" | jq -r '.prometheus'))
+          - 💬 [Langfuse UI]($(echo "$GRAFANA" | jq -r '.langfuse_native_ui'))
+
+          ### Full bundle
+          [\`groundnuty/macf-observability-archive/work/$REPO/$NUMBER/\`](https://github.com/groundnuty/macf-observability-archive/tree/main/work/$REPO/$NUMBER)
+
+          🤖 Auto-generated by [observability-snapshot.yml](.github/workflows/observability-snapshot.yml) — DR-002
+          EOF
+          )
+
+          if [ "$KIND" = "issue" ]; then
+            gh issue comment "$NUMBER" --repo "$REPO" --body "$BODY"
+          else
+            gh pr comment "$NUMBER" --repo "$REPO" --body "$BODY"
+          fi
