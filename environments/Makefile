@@ -236,6 +236,10 @@ langfuse-bootstrap:  ## Generate ALL Langfuse secrets (subchart auth + headless-
 clickhouse-logs-creds:  ## Copy ClickHouse password to ns/otel for the logs Collector's clickhouse exporter (#19c). ONE-SHOT.
 	@bash hack/copy-clickhouse-creds.sh
 
+.PHONY: archive-sessions
+archive-sessions:  ## Archive substrate-agent session JSONLs (#33). Override OUT_DIR=<path> to control destination.
+	@bash hack/archive-agent-sessions.sh
+
 .PHONY: env-test
 env-test:  ## Debug — print inherited vars
 	@echo "ENVIRONMENT=$(ENVIRONMENT)"
