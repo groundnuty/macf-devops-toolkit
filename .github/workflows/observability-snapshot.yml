@@ -90,14 +90,30 @@ jobs:
           REMOTE_BUNDLE="/tmp/obs-bundle-${REPO//\//-}-${NUMBER}"
           # Run the script. The VM has the macf-devops-toolkit repo cloned at
           # ~/repos/groundnuty/macf-devops-toolkit (per the operator's layout).
+          # Optional --grafana-base override via repo var (vars.GRAFANA_BASE).
+          # Default in the script is http://127.0.0.1:3000 which only
+          # resolves on the VM or via operator's port-forward. For sister-
+          # repo propagation where issue-closers are other agents
+          # (science-agent, code-agent, testers) without port-forward
+          # access, set vars.GRAFANA_BASE to the cluster's external URL
+          # (or to a tailnet-reachable Grafana endpoint if exposed).
+          GRAFANA_FLAG=""
+          if [ -n "${{ vars.GRAFANA_BASE }}" ]; then
+            GRAFANA_FLAG="--grafana-base '${{ vars.GRAFANA_BASE }}'"
+          fi
           ssh -i ~/.ssh/obs-runner ubuntu@"$VM_HOST" \
             "cd ~/repos/groundnuty/macf-devops-toolkit/environments/macf && \
              devbox run -q -- bash hack/observability-snapshot.sh \
                --mode github-issue \
                --repo '$REPO' \
                --issue '$NUMBER' \
-               --out-dir '$REMOTE_BUNDLE'"
-          # scp the bundle back to the runner
+               --out-dir '$REMOTE_BUNDLE' \
+               $GRAFANA_FLAG"
+          # scp the bundle back to the runner. Bundle path `./bundle/` is
+          # runner-relative; safe on github-hosted runners (fresh workspace
+          # per run, no concurrent-workflow collision risk). If we ever
+          # switch to self-hosted / persistent runners, this becomes a
+          # collision concern + would need per-issue subdirs.
           scp -i ~/.ssh/obs-runner -r ubuntu@"$VM_HOST":"$REMOTE_BUNDLE" ./bundle/
           # Cleanup VM-side
           ssh -i ~/.ssh/obs-runner ubuntu@"$VM_HOST" "rm -rf '$REMOTE_BUNDLE' || true"
