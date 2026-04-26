@@ -244,3 +244,35 @@ Considered: bundle contains only Grafana Explore URLs, no JSON snapshots. Reject
 ### Self-hosted GitHub runner (rejected after Tailscale operator-correction)
 
 Considered: GH-hosted runners can't reach VM-localhost ports → install self-hosted runner on the VM. Rejected after operator surfaced that this VM is already on Tailscale + GH-hosted runners can join via `tailscale/github-action@v2`. The single piece of infra (Tailscale OAuth client) replaces the per-repo runner registration + maintenance overhead.
+
+## Appendix — semantic notes on the token-rename fix (#31)
+
+Surfaced during PR #34 review by science-agent. The OTTL `transform/genai-semconv` processor is **correct per OTel GenAI semconv** but has two semantics worth flagging for future paper-claim work and for cross-tooling consumers:
+
+### `gen_ai.usage.total_tokens` undercounts Anthropic's billed prompt tokens when prompt-cache is hit
+
+The OTTL statement computes `total_tokens = input_tokens + output_tokens`, matching OTel GenAI semconv (total = prompt + completion). But Anthropic's Claude API splits prompt-token billing into three independent counters:
+
+- `input_tokens` — non-cached input tokens (full price)
+- `cache_creation_input_tokens` — tokens written to cache (1.25× input price)
+- `cache_read_input_tokens` — tokens read from cache (0.1× input price)
+
+Anthropic's **actual billed prompt tokens** for a request = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. Most Claude Code requests post-warmup are heavy on cache reads, so the semconv-aligned `total_tokens` undercounts the billed amount.
+
+**Implication for paper-evidence (Claim 2: "MACF channels reduce cross-agent overhead"):** token-cost analysis needs the cache-inclusive prompt count, not the semconv `total`. The cache-related attrs are preserved (alongside the renamed semconv ones) so the cost-aware count is still computable in queries:
+
+```
+billed_prompt = input_tokens + cache_creation_tokens + cache_read_tokens
+```
+
+Just don't substitute `gen_ai.usage.total_tokens` for cost estimation.
+
+### `gen_ai.usage.cache_*` attrs are vendor-extensions, not canonical semconv
+
+OTel GenAI semconv (as of late 2025 / early 2026) covers `gen_ai.usage.{input,output}_tokens` but cache-related attrs are NOT part of the canonical spec — they're vendor-extension territory under the `gen_ai.usage.*` namespace.
+
+- **Langfuse** has explicit Anthropic-aware parsing → handles them correctly today.
+- **Strict-semconv consumers** (e.g., generic Tempo dashboards built against the canonical spec only) won't recognize `gen_ai.usage.cache_read_tokens` / `gen_ai.usage.cache_creation_tokens`.
+- **Naming**: `cache_read_tokens` (Collector-renamed) drops the `_input_` qualifier vs Anthropic's wire format `cache_read_input_tokens`. Minor, but if cache-output tokens ever become a thing in future Anthropic API revisions, the schema needs disambiguation.
+
+Not a blocker (vendor extensions on `gen_ai.*` is a normal pattern), just a flag for cross-tooling-compatibility analysis.
