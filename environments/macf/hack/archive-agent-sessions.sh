@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Archive substrate-agent session JSONLs (per #33).
+# Archive agent session JSONLs (per #33, extended for testers per #47).
 #
 # Claude Code stores per-conversation transcripts at:
 #   ~/.claude/projects/<encoded-project-path>/<session-uuid>.jsonl
@@ -10,10 +10,16 @@
 # the conversation started.
 #
 # Per DR-002 §"The 900k context as observability artifact" + operator's
-# 2026-04-26 design call: substrate agents archive these JSONLs to a
-# flat layout (separate from per-issue observability bundles); update
-# mechanism is a periodic `cp` because the source is append-only on
-# disk → re-copy is idempotent + always reflects the latest growth.
+# 2026-04-26 design call: agents archive these JSONLs to a flat layout
+# (separate from per-issue observability bundles); update mechanism is
+# a periodic `cp` because the source is append-only on disk → re-copy
+# is idempotent + always reflects the latest growth.
+#
+# Scope: substrate agents (devops, science, code) AND testers (1..N).
+# Tester JSONLs may contain content that OTLP redacts when
+# OTEL_LOG_USER_PROMPTS / RAW_API_BODIES are off — same threat model
+# as devops-toolkit#32 stage 2+ and testbed#73 rollout. Treat archive
+# privacy accordingly.
 #
 # Layout in the destination:
 #   <out-dir>/sessions/<agent-name>/<session-uuid>.jsonl
@@ -23,8 +29,6 @@
 # wraps the push step. Keeping the script transport-agnostic lets the
 # scheduling decision (which the issue defers) stay separate from the
 # data-layout decision (which is fixed by this script).
-#
-# Testers deferred per #33 body — substrate agents only.
 
 set -euo pipefail
 
@@ -41,6 +45,27 @@ declare -A AGENT_FOR_REPO=(
   [macf]="macf-code-agent"
 )
 
+# Resolve a project-dir basename to a canonical agent name. Returns
+# empty string if the directory belongs to neither a known substrate
+# nor a tester home.
+#
+# Tester home convention: project dirs encode `/home/ubuntu/tester-N-home`
+# as `-home-ubuntu-tester-N-home`. Regex captures the digit suffix, so
+# adding tester-5/6/... requires no edit here.
+resolve_agent() {
+  local base=$1
+  for repo in "${!AGENT_FOR_REPO[@]}"; do
+    if [[ "$base" == *"groundnuty-$repo" ]]; then
+      echo "${AGENT_FOR_REPO[$repo]}"
+      return
+    fi
+  done
+  if [[ "$base" =~ -home-ubuntu-tester-([0-9]+)-home$ ]]; then
+    echo "macf-tester-${BASH_REMATCH[1]}-agent"
+    return
+  fi
+}
+
 mkdir -p "$OUT_DIR/sessions"
 
 ARCHIVED=0
@@ -50,14 +75,7 @@ for proj_dir in "$PROJECTS_DIR"/-*; do
   [ -d "$proj_dir" ] || continue
   base=$(basename "$proj_dir")
 
-  # Find which substrate agent this directory belongs to (if any).
-  agent=""
-  for repo in "${!AGENT_FOR_REPO[@]}"; do
-    if [[ "$base" == *"groundnuty-$repo" ]]; then
-      agent="${AGENT_FOR_REPO[$repo]}"
-      break
-    fi
-  done
+  agent=$(resolve_agent "$base")
   if [ -z "$agent" ]; then
     SKIPPED=$((SKIPPED + 1))
     continue
