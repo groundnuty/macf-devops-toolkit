@@ -143,8 +143,16 @@ for proj_dir in "$PROJECTS_DIR"/-*; do
   count=$(find "$dest" -type f 2>/dev/null | wc -l)
   API_BODIES_ARCHIVED=$((API_BODIES_ARCHIVED + count))
 done
+# Total bytes across all archived api-bodies — paired with count so
+# operators can spot whether capture is functioning at expected scale
+# (e.g., 100 files × <1 KB might indicate truncation/error vs healthy
+# 100 × ~60 KB). Per science-agent design note on #50.
+API_BODIES_TOTAL_BYTES=0
+if [ -d "$OUT_DIR/api-bodies" ]; then
+  API_BODIES_TOTAL_BYTES=$(find "$OUT_DIR/api-bodies" -type f -exec stat -c '%s' {} \; 2>/dev/null | awk '{s+=$1} END {print s+0}')
+fi
 if [ "$API_BODIES_ARCHIVED" -gt 0 ]; then
-  echo "OK archived $API_BODIES_ARCHIVED api-body file(s) to $OUT_DIR/api-bodies/"
+  echo "OK archived $API_BODIES_ARCHIVED api-body file(s) (${API_BODIES_TOTAL_BYTES} bytes) to $OUT_DIR/api-bodies/"
 else
   echo "(no api-bodies on disk yet — sister testbed-side claude.sh edit pending)"
 fi
@@ -158,6 +166,7 @@ cat > "$OUT_DIR/archive-manifest.json" <<MANIFEST
   "host": "$(hostname)",
   "archived_count": $ARCHIVED,
   "api_bodies_archived_count": $API_BODIES_ARCHIVED,
+  "api_bodies_total_bytes": $API_BODIES_TOTAL_BYTES,
   "skipped_dirs": $SKIPPED,
   "sessions": [
 $(find "$OUT_DIR/sessions" -name '*.jsonl' -type f | while read f; do
