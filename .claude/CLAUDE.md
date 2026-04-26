@@ -15,9 +15,10 @@ MACF identity layer:
 - `agent-identity.md` — who you are, scope, per-repo workflow
 - `coordination.md` — canonical MACF cross-cutting rules (substrate copy)
 - `delegation-template.md` — canonical 6-section issue template
+- `gh-token-refresh.md` — GH_TOKEN discipline
+- `mention-routing-hygiene.md` — describing-vs-addressing handle discipline (canonical macf rule)
 - `peer-dynamic.md` — canonical MACF peer-dynamic rule
 - `pr-discipline.md` — canonical MACF PR-discipline rule
-- `gh-token-refresh.md` — GH_TOKEN discipline
 
 Behavioral discipline (distilled from science-agent + code-agent hard-won lessons, 2026-04-24):
 
