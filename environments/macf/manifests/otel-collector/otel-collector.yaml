@@ -97,6 +97,15 @@ spec:
         secretKeyRef:
           name: langfuse-api-keys
           key: secret-key
+    # ClickHouse password for the `clickhouse` exporter on the logs
+    # pipeline (added per #28). Same `langfuse-clickhouse-creds` Secret
+    # the DaemonSet logs-Collector reads (populated by
+    # `make clickhouse-logs-creds` from ns/langfuse's langfuse-clickhouse).
+    - name: CLICKHOUSE_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: langfuse-clickhouse-creds
+          key: password
   config:
     extensions:
       # basicauth extension — computes "Authorization: Basic <b64(public:secret)>"
@@ -194,6 +203,53 @@ spec:
           max_elapsed_time: 2m
       prometheus:
         endpoint: 0.0.0.0:8889
+        # Promote OTel resource attributes to Prometheus labels (per #29).
+        # Without this, claude_code_* metrics arrive but
+        # `gen_ai.agent.role`, `agent.rules_variant`, `service.namespace`
+        # etc. don't surface as queryable labels — Issue H per-cell
+        # aggregation can't filter without them.
+        # Cardinality risk is low here: paper-dim attrs are mostly
+        # low-card (agent role/name, rules_variant). `scenario.run_id`
+        # is the higher-card one but defaults to "none" via the
+        # resource/paper-dims processor for non-scenario traffic.
+        resource_to_telemetry_conversion:
+          enabled: true
+
+      # Loki + ClickHouse exporters added per #28 — central Collector
+      # gains a `logs:` pipeline so agents' OTLP-emitted logs route to
+      # the same backends the DaemonSet's filelog scrapes go to. Without
+      # these, CC's OTLP log records arrive at :14318 + are silently
+      # dropped (no logs pipeline = no exporter = drop). Same exporter
+      # config + retry tuning as the DaemonSet's logs-Collector.
+      otlphttp/loki:
+        endpoint: http://loki.loki.svc.cluster.local:3100/otlp
+        tls:
+          insecure: true
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 2m
+      clickhouse:
+        endpoint: tcp://langfuse-clickhouse.langfuse.svc.cluster.local:9000
+        username: default
+        password: ${env:CLICKHOUSE_PASSWORD}
+        database: logs
+        logs_table_name: otel_logs
+        # `create_schema: true` is idempotent — schema was already created
+        # by the DaemonSet logs-Collector on first ingest, so this is a
+        # no-op on first central-collector startup. If the central
+        # Collector ever boots BEFORE the DaemonSet, it'd create the
+        # schema instead. Same outcome.
+        create_schema: true
+        ttl: 168h
+        timeout: 10s
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 2m
+
       debug:
         # `basic` is the steady-state choice — matches the existing compose
         # collector config. Flip to `normal` or `detailed` via `kubectl patch`
@@ -210,3 +266,13 @@ spec:
           receivers:  [otlp]
           processors: [batch]
           exporters:  [prometheus]
+        # Logs pipeline (added per #28). Receives OTLP logs from agents
+        # (testers, post-restart substrate agents). k8sattributes is
+        # harmless on host-side OTLP logs (no k8s.pod.uid to look up,
+        # processor silently no-ops); resource/paper-dims preserves
+        # agent-stamped attrs (insert-not-upsert). Both backends in
+        # parallel mirroring the DaemonSet logs-Collector pattern.
+        logs:
+          receivers:  [otlp]
+          processors: [k8sattributes, resource/paper-dims, batch]
+          exporters:  [otlphttp/loki, clickhouse, debug]
