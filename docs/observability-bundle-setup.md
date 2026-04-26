@@ -81,6 +81,8 @@ The runner SSHes from inside the tailnet to the VM, runs the snapshot script, sc
 
 ## Step 3 — Archive repo
 
+> **Operator-only steps.** Both `macf-devops-agent[bot]` and `macf-science-agent[bot]` GitHub Apps lack the necessary scopes (`administration: write` at org level, `actions/secrets: write` on workflow repos, `administration: write` on the new archive repo). Verified empirically — see `groundnuty/macf-devops-toolkit#54` for the 403-probe trail. This is by-design (least-privilege); attempting to delegate Step 3 to a bot will fail at step 1 with `Resource not accessible by integration`. Steps below are framed for operator-via-Chrome execution.
+
 The bundle JSON is committed to a separate, dedicated repo so it's git-tracked, citeable, and survives backend retention/reconfig.
 
 1. **Create the repo.** `groundnuty/macf-observability-archive`.
@@ -103,6 +105,39 @@ The bundle JSON is committed to a separate, dedicated repo so it's git-tracked, 
    - `ARCHIVE_DEPLOY_KEY` = contents of `/tmp/archive-deploy`
 
 5. **Cleanup**: delete `/tmp/archive-deploy` + `/tmp/archive-deploy.pub` from laptop after Step 4.
+
+### Verification one-liners (Step 3 post-creation checklist)
+
+After steps 1-5 above complete, run these checks. Each should produce the expected output; any mismatch indicates a step needs revisiting.
+
+```bash
+# 1. Archive repo exists + is private
+gh repo view groundnuty/macf-observability-archive --json visibility --jq .visibility
+# Expected: "PRIVATE"
+
+# 2. README committed on main
+gh api repos/groundnuty/macf-observability-archive/contents/README.md --jq .name
+# Expected: "README.md"
+
+# 3. Deploy key installed with WRITE access (read_only=false)
+gh api repos/groundnuty/macf-observability-archive/keys --jq '.[] | {title, read_only}'
+# Expected: {"title":"macf-obs-snapshot-workflow","read_only":false}
+
+# 4. Secret set on workflow repo (note: secret values are write-only via API; only existence is verifiable)
+gh secret list --repo groundnuty/macf-devops-toolkit | grep ARCHIVE_DEPLOY_KEY
+# Expected: ARCHIVE_DEPLOY_KEY    Updated <recent timestamp>
+
+# 5. Local keypair files cleaned up
+ls /tmp/archive-deploy /tmp/archive-deploy.pub 2>&1
+# Expected: ls: cannot access '/tmp/archive-deploy': No such file or directory
+```
+
+If any check fails:
+- (1) repo visibility wrong → recreate with `--private` flag (or change in Settings → Danger Zone)
+- (2) README missing → commit-via-web-UI as in step 1
+- (3) `read_only:true` → delete the key, re-add with "Allow write access" checked
+- (4) secret missing → re-run step 4; verify private-half pasted (full PEM with begin/end markers)
+- (5) files still present → just delete; security risk grows linearly with time-on-disk
 
 ## Step 4 — First-run validation
 
