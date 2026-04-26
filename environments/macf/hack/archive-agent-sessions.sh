@@ -66,6 +66,24 @@ resolve_agent() {
   fi
 }
 
+# Resolve a tester project-dir basename to its $HOME / workspace path.
+# `=file:<dir>` mode for OTEL_LOG_RAW_API_BODIES (per #50) writes
+# untruncated request + response bodies to disk under that dir; we use
+# `$HOME/.claude/api-bodies/` so each tester's bodies live alongside
+# its session JSONLs and inherit the same per-tester $HOME isolation.
+#
+# Substrate agents share one $HOME on the host (the operator's user dir)
+# so attribution-per-substrate from a shared api-bodies/ dir is
+# ambiguous; deferred until substrate-side =file: rolls out + we decide
+# on a per-session-uuid sub-layout. Returns empty for substrates here.
+resolve_tester_home() {
+  local base=$1
+  if [[ "$base" =~ -home-ubuntu-tester-([0-9]+)-home$ ]]; then
+    echo "/home/ubuntu/tester-${BASH_REMATCH[1]}-home"
+    return
+  fi
+}
+
 mkdir -p "$OUT_DIR/sessions"
 
 ARCHIVED=0
@@ -97,6 +115,40 @@ done
 
 echo "OK archived $ARCHIVED session JSONL(s) to $OUT_DIR/sessions/ ($SKIPPED non-substrate dirs skipped)"
 
+# Tester api-bodies archive (per #50). `OTEL_LOG_RAW_API_BODIES=file:$HOME/.claude/api-bodies/`
+# writes untruncated request + response bodies to disk; archive them
+# alongside the session JSONLs so per-issue / per-scenario bundles can
+# reference full input-context content for paper-evidence-grade analysis.
+# (Default OTLP `=1` mode caps at 60 KB inline — request bodies hit the
+# cap empirically on testbed#73 verification, motivating this path.)
+API_BODIES_ARCHIVED=0
+for proj_dir in "$PROJECTS_DIR"/-*; do
+  [ -d "$proj_dir" ] || continue
+  base=$(basename "$proj_dir")
+  agent=$(resolve_agent "$base")
+  [ -z "$agent" ] && continue
+
+  tester_home=$(resolve_tester_home "$base")
+  [ -z "$tester_home" ] && continue   # substrate: api-bodies attribution deferred
+
+  api_dir="$tester_home/.claude/api-bodies"
+  [ -d "$api_dir" ] || continue
+
+  dest="$OUT_DIR/api-bodies/$agent"
+  mkdir -p "$dest"
+  # Preserve internal structure (Claude Code may organize by session-uuid
+  # subdirs). cp -rp keeps mtimes; trailing /. copies dir contents not the
+  # dir itself.
+  cp -rp "$api_dir/." "$dest/" 2>/dev/null || true
+  count=$(find "$dest" -type f 2>/dev/null | wc -l)
+  API_BODIES_ARCHIVED=$((API_BODIES_ARCHIVED + count))
+done
+if [ "$API_BODIES_ARCHIVED" -gt 0 ]; then
+  echo "OK archived $API_BODIES_ARCHIVED api-body file(s) to $OUT_DIR/api-bodies/"
+else
+  echo "(no api-bodies on disk yet — sister testbed-side claude.sh edit pending)"
+fi
+
 # Manifest: a tiny JSON file in the archive root recording when this
 # run happened + what was captured. Useful for diff-based "what
 # changed since last archive" reporting if we ever wire one.
@@ -105,6 +157,7 @@ cat > "$OUT_DIR/archive-manifest.json" <<MANIFEST
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "host": "$(hostname)",
   "archived_count": $ARCHIVED,
+  "api_bodies_archived_count": $API_BODIES_ARCHIVED,
   "skipped_dirs": $SKIPPED,
   "sessions": [
 $(find "$OUT_DIR/sessions" -name '*.jsonl' -type f | while read f; do
