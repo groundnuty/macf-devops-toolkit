@@ -124,6 +124,24 @@ spec:
             endpoint: 0.0.0.0:4318
     processors:
       batch: {}
+      # Rename Claude Code's non-OTel-semconv span attributes to GenAI
+      # semconv names (#31). Claude Code emits `input_tokens`,
+      # `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`
+      # directly on `claude_code.llm_request` spans; OTel GenAI semconv
+      # specifies `gen_ai.usage.{input,output,total}_tokens`. Langfuse's
+      # OTel parser expects the semconv names → without this rename, every
+      # Claude Code trace shows tokens=0 in Langfuse (verified live).
+      # Tempo via TraceQL also benefits — queries like
+      # `{ resource.gen_ai.usage.input_tokens > 1000 }` become possible.
+      transform/genai-semconv:
+        trace_statements:
+          - context: span
+            statements:
+              - set(attributes["gen_ai.usage.input_tokens"], attributes["input_tokens"]) where attributes["input_tokens"] != nil
+              - set(attributes["gen_ai.usage.output_tokens"], attributes["output_tokens"]) where attributes["output_tokens"] != nil
+              - set(attributes["gen_ai.usage.total_tokens"], attributes["input_tokens"] + attributes["output_tokens"]) where attributes["input_tokens"] != nil and attributes["output_tokens"] != nil
+              - set(attributes["gen_ai.usage.cache_read_tokens"], attributes["cache_read_tokens"]) where attributes["cache_read_tokens"] != nil
+              - set(attributes["gen_ai.usage.cache_creation_tokens"], attributes["cache_creation_tokens"]) where attributes["cache_creation_tokens"] != nil
       k8sattributes:
         auth_type: serviceAccount
         passthrough: false
@@ -260,7 +278,10 @@ spec:
       pipelines:
         traces:
           receivers:  [otlp]
-          processors: [k8sattributes, resource/paper-dims, batch]
+          # `transform/genai-semconv` after `resource/paper-dims` so it
+          # operates on the agent-stamped + processor-defaulted shape;
+          # before `batch` so renamed attrs land in the exported batch.
+          processors: [k8sattributes, resource/paper-dims, transform/genai-semconv, batch]
           exporters:  [otlp/tempo, otlphttp/langfuse, debug]
         metrics:
           receivers:  [otlp]
