@@ -119,9 +119,50 @@ if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
   : "${MACF_AGENT_ROLE:=devops}"
   : "${OTEL_SERVICE_NAME=macf-agent-${MACF_AGENT_ROLE}}"
   : "${OTEL_RESOURCE_ATTRIBUTES=gen_ai.agent.name=${MACF_AGENT_NAME},gen_ai.agent.role=${MACF_AGENT_ROLE}}"
+
+  # --- Conversation-content logging (#32, experimental on devops only) ----
+  # Enables the four content-capture knobs documented in
+  # https://code.claude.com/docs/en/monitoring-usage:
+  #   OTEL_LOG_USER_PROMPTS=1   — full user-prompt text as `user_prompt`
+  #                               log events (default: redacted)
+  #   OTEL_LOG_TOOL_CONTENT=1   — full tool input/output as span events
+  #                               (60 KB inline cap)
+  #   OTEL_LOG_TOOL_DETAILS=1   — Bash command names, MCP names, skill
+  #                               names on tool_result + user_prompt events
+  #   OTEL_LOG_RAW_API_BODIES=1 — full Anthropic Messages API request +
+  #                               response bodies (60 KB inline cap; the
+  #                               only path to capture model COMPLETIONS,
+  #                               since there's no separate _COMPLETIONS
+  #                               env var)
+  # Together: full conversation transparency (prompts + completions +
+  # tool I/O). Lands in Loki + ClickHouse-logs via the central Collector's
+  # logs pipeline (per #28). Per-event 60 KB inline cap means very long
+  # prompts (e.g. cached 900k contexts) get truncated; flip
+  # OTEL_LOG_RAW_API_BODIES to `=file:/var/log/claude-api-bodies/` for
+  # untruncated capture if needed.
+  #
+  # Stage 1 scope per #32: experimental, devops-agent only. After one
+  # session of observation + sample inspection, decide whether to
+  # propagate to science / code / tester via sister PRs.
+  #
+  # Privacy: conversation content includes EVERYTHING the agent saw
+  # (file contents, env vars, GH tokens if mishandled, internal
+  # reasoning). Stored in Loki/CH (7d retention per #19). Anyone with
+  # cluster access reads everything. Acceptable for this single-VM dev
+  # spike; production deployment needs scrubbing + access controls.
+  #
+  # Opt-out at the same MACF_OTEL_DISABLED gate above (turning off
+  # telemetry entirely also disables this). For finer-grained opt-out
+  # (telemetry on but content off), unset these four individually.
+  : "${OTEL_LOG_USER_PROMPTS=1}"
+  : "${OTEL_LOG_TOOL_CONTENT=1}"
+  : "${OTEL_LOG_TOOL_DETAILS=1}"
+  : "${OTEL_LOG_RAW_API_BODIES=1}"
   export CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
          OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
-         OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES
+         OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES \
+         OTEL_LOG_USER_PROMPTS OTEL_LOG_TOOL_CONTENT \
+         OTEL_LOG_TOOL_DETAILS OTEL_LOG_RAW_API_BODIES
 fi
 
 # TEMPORARY: wrap claude in `sg docker -c` so claude + its Bash-tool children
