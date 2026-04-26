@@ -168,30 +168,62 @@ SK=$(kubectl -n langfuse get secret langfuse-init -o jsonpath='{.data.LANGFUSE_I
 if [ -n "$PUB" ] && [ -n "$SK" ]; then
   FROM_ISO=$(date -u -d "@$START_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)
   TO_ISO=$(date -u -d "@$END_EPOCH" +%Y-%m-%dT%H:%M:%S.000Z)
-  TMPFILE="$OUT_DIR/.langfuse-raw.json"
+  AGGFILE="$OUT_DIR/.langfuse-pages.json"
+  : > "$AGGFILE"
   # Langfuse caps `limit` at 100 per page (HTTP 200 + error body if exceeded).
-  # For v1 we accept the 100-trace ceiling per snapshot; pagination is a
-  # follow-up if real workload sweeps exceed it. Time-window filtering is
-  # client-side: Langfuse's `fromTimestamp`/`toTimestamp` URL params don't
-  # always honor in our 1.5.27 chart version (empirically returns empty
-  # data) — safer to filter via jq on .data[].timestamp.
-  if curl -sS -u "$PUB:$SK" "http://127.0.0.1:3001/api/public/traces?limit=100" \
-       -o "$TMPFILE" 2>/dev/null; then
-    if jq --arg from "$FROM_ISO" --arg to "$TO_ISO" \
+  # Paginate via `?page=N` until a page returns empty `.data` or fewer than
+  # 100 items (last page). Hard ceiling of 50 pages = 5000 traces; if a
+  # real sweep exceeds that, the script logs a truncation warning rather
+  # than spinning indefinitely. Per #39.
+  PAGE_CAP=50
+  PAGE=1
+  TOTAL_FETCHED=0
+  PAGINATION_TRUNCATED=0
+  while [ "$PAGE" -le "$PAGE_CAP" ]; do
+    PAGE_FILE="$OUT_DIR/.langfuse-page-$PAGE.json"
+    if ! curl -sS -u "$PUB:$SK" "http://127.0.0.1:3001/api/public/traces?limit=100&page=$PAGE" \
+           -o "$PAGE_FILE" 2>/dev/null; then
+      echo "  (Langfuse page $PAGE curl failed; stopping pagination)"
+      break
+    fi
+    PAGE_COUNT=$(jq -r '(.data // []) | length' "$PAGE_FILE" 2>/dev/null || echo 0)
+    [[ "$PAGE_COUNT" =~ ^[0-9]+$ ]] || PAGE_COUNT=0
+    if [ "$PAGE_COUNT" = "0" ]; then
+      rm -f "$PAGE_FILE"
+      break
+    fi
+    cat "$PAGE_FILE" >> "$AGGFILE"
+    echo >> "$AGGFILE"  # newline separator (jq -s reads JSON sequence)
+    TOTAL_FETCHED=$((TOTAL_FETCHED + PAGE_COUNT))
+    if [ "$PAGE_COUNT" -lt 100 ]; then
+      break  # last page (less than full)
+    fi
+    PAGE=$((PAGE + 1))
+  done
+  if [ "$PAGE" -gt "$PAGE_CAP" ]; then
+    PAGINATION_TRUNCATED=1
+  fi
+
+  # Concatenate pages, apply client-side window + filter via jq -s
+  # (slurp). `fromTimestamp`/`toTimestamp` URL params don't reliably honor
+  # on chart 1.5.27 — verified during PR #38 development.
+  if [ -s "$AGGFILE" ]; then
+    if jq -s --arg from "$FROM_ISO" --arg to "$TO_ISO" \
           --arg key "$FK_DOT" --arg val "$FILTER_VALUE" \
-          '[(.data // [])[]
-            | select(.timestamp >= $from and .timestamp <= $to)
-            | select((.metadata.resourceAttributes[$key] // "") == $val)]' \
-        "$TMPFILE" > "$OUT_DIR/traces-langfuse.json" 2>/dev/null; then
+          '[ .[] | (.data // [])[]
+             | select(.timestamp >= $from and .timestamp <= $to)
+             | select((.metadata.resourceAttributes[$key] // "") == $val)
+           ]' \
+        "$AGGFILE" > "$OUT_DIR/traces-langfuse.json" 2>/dev/null; then
       :
     else
-      echo "  (Langfuse jq filter failed; raw response saved at $TMPFILE)"
+      echo "  (Langfuse jq filter failed; raw pages saved as .langfuse-page-*.json)"
       echo '[]' > "$OUT_DIR/traces-langfuse.json"
     fi
   else
-    echo "  (Langfuse curl failed)"
     echo '[]' > "$OUT_DIR/traces-langfuse.json"
   fi
+  rm -f "$AGGFILE" "$OUT_DIR"/.langfuse-page-*.json 2>/dev/null || true
 else
   echo '[]' > "$OUT_DIR/traces-langfuse.json"
   echo "  (Langfuse credentials not available — empty result)"
@@ -265,6 +297,53 @@ LOKI_STREAMS=$(safe_count "$OUT_DIR/logs-loki.json"        '(.data.result // [])
 CH_ROWS=$(safe_count "$OUT_DIR/logs-clickhouse.json"       '(.data // []) | length')
 PROM_SERIES=$(safe_count "$OUT_DIR/metrics-prom.json"      '(.data.result // []) | length')
 
+# Retention-window warnings (per #39). Backend retention values mirror the
+# values committed in this workspace's chart values:
+#   Loki:           7d   (values/loki.yaml: limits_config.retention_period)
+#   ClickHouse-logs: 7d  (values/langfuse.yaml: clickhouse exporter ttl)
+#   Prometheus:     7d   (values/kube-prometheus-stack.yaml: prometheusSpec.retention)
+#   Tempo:        14d    (chart default; long; rarely a concern)
+# When the snapshot's window age (now - end_epoch) exceeds a backend's
+# retention, that backend's count in `summary` is ambiguous — could be
+# "filter matched no data" OR "data dropped from retention before the
+# snapshot ran." Surface this distinction explicitly via the manifest's
+# warnings array so consumers know to interpret zero-counts cautiously.
+NOW_EPOCH=$(date -u +%s)
+WINDOW_AGE=$((NOW_EPOCH - END_EPOCH))
+WARNINGS_JSON='[]'
+WARNINGS_TMP=$(mktemp)
+echo '[]' > "$WARNINGS_TMP"
+add_warning() {
+  jq --arg msg "$1" '. + [$msg]' "$WARNINGS_TMP" > "$WARNINGS_TMP.new" && mv "$WARNINGS_TMP.new" "$WARNINGS_TMP"
+}
+
+# Per-backend retention thresholds (seconds)
+LOKI_RETENTION=$((7 * 86400))
+CH_RETENTION=$((7 * 86400))
+PROM_RETENTION=$((7 * 86400))
+TEMPO_RETENTION=$((14 * 86400))
+
+if [ "$WINDOW_AGE" -gt "$LOKI_RETENTION" ]; then
+  add_warning "loki: window end is $((WINDOW_AGE / 86400))d old (>7d Loki retention); count of $LOKI_STREAMS may be partial — data likely aged out"
+fi
+if [ "$WINDOW_AGE" -gt "$CH_RETENTION" ]; then
+  add_warning "clickhouse-logs: window end is $((WINDOW_AGE / 86400))d old (>7d ClickHouse logs.otel_logs TTL); count of $CH_ROWS may be partial"
+fi
+if [ "$WINDOW_AGE" -gt "$PROM_RETENTION" ]; then
+  add_warning "prometheus: window end is $((WINDOW_AGE / 86400))d old (>7d Prometheus retention); count of $PROM_SERIES may be partial"
+fi
+if [ "$WINDOW_AGE" -gt "$TEMPO_RETENTION" ]; then
+  add_warning "tempo: window end is $((WINDOW_AGE / 86400))d old (>14d Tempo default retention); count of $TEMPO_HITS may be partial"
+fi
+
+# Pagination truncation warning (Langfuse-specific)
+if [ "${PAGINATION_TRUNCATED:-0}" = "1" ]; then
+  add_warning "langfuse: pagination hit 50-page cap (5000 traces); count of $LANGFUSE_HITS may be partial — narrow filter or split window"
+fi
+
+WARNINGS_JSON=$(cat "$WARNINGS_TMP")
+rm -f "$WARNINGS_TMP"
+
 cat > "$OUT_DIR/manifest.json" <<MANIFEST
 {
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -285,7 +364,8 @@ cat > "$OUT_DIR/manifest.json" <<MANIFEST
     "loki_streams": $LOKI_STREAMS,
     "clickhouse_rows": $CH_ROWS,
     "prometheus_series": $PROM_SERIES
-  }
+  },
+  "warnings": $WARNINGS_JSON
 }
 MANIFEST
 
