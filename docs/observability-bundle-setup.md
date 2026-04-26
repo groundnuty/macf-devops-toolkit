@@ -129,7 +129,9 @@ gh secret list --repo groundnuty/macf-devops-toolkit | grep ARCHIVE_DEPLOY_KEY
 
 # 5. Local keypair files cleaned up
 ls /tmp/archive-deploy /tmp/archive-deploy.pub 2>&1
-# Expected: ls: cannot access '/tmp/archive-deploy': No such file or directory
+# Expected (one line per missing arg):
+#   ls: cannot access '/tmp/archive-deploy': No such file or directory
+#   ls: cannot access '/tmp/archive-deploy.pub': No such file or directory
 ```
 
 If any check fails:
