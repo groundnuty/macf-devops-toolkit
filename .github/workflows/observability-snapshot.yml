@@ -31,6 +31,34 @@ jobs:
       - name: Checkout (this repo's snapshot script lives here)
         uses: actions/checkout@v4
 
+      # Fail-fast precheck (per #57). Catches the silent-fallback-hazard
+      # class where a missing secret renders as empty-string at substitution
+      # time and the downstream tool surfaces a misleading auth-fail error
+      # instead of the actual root cause. See docs/observability-bundle-setup.md
+      # for the runbook documenting these inputs.
+      - name: Precheck — required secrets + variables present
+        env:
+          TAILSCALE_OAUTH_CLIENT_ID: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          TAILSCALE_OAUTH_SECRET:    ${{ secrets.TAILSCALE_OAUTH_SECRET }}
+          OBS_RUNNER_SSH_KEY:        ${{ secrets.OBS_RUNNER_SSH_KEY }}
+          ARCHIVE_DEPLOY_KEY:        ${{ secrets.ARCHIVE_DEPLOY_KEY }}
+          OBS_RUNNER_HOST:           ${{ vars.OBS_RUNNER_HOST }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${TAILSCALE_OAUTH_CLIENT_ID:-}" ] && missing+=("TAILSCALE_OAUTH_CLIENT_ID (secret)")
+          [ -z "${TAILSCALE_OAUTH_SECRET:-}" ]    && missing+=("TAILSCALE_OAUTH_SECRET (secret)")
+          [ -z "${OBS_RUNNER_SSH_KEY:-}" ]        && missing+=("OBS_RUNNER_SSH_KEY (secret)")
+          [ -z "${ARCHIVE_DEPLOY_KEY:-}" ]        && missing+=("ARCHIVE_DEPLOY_KEY (secret)")
+          [ -z "${OBS_RUNNER_HOST:-}" ]           && missing+=("OBS_RUNNER_HOST (variable)")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required workflow inputs:"
+            for m in "${missing[@]}"; do echo "::error::  - $m"; done
+            echo "::error::See docs/observability-bundle-setup.md for the runbook."
+            exit 1
+          fi
+          echo "✓ All 4 secrets + 1 variable present"
+
       - name: Tailscale up (join tailnet so we can reach the cluster VM)
         uses: tailscale/github-action@v2
         with:
