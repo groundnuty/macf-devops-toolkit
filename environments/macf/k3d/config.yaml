@@ -64,14 +64,29 @@ options:
 # endpoint" section + `groundnuty/macf-science-agent:research/2026-04-24-tracing-plumbing-integration-sketch.md`
 # §6 PR A.
 #
-# High host ports (14317/14318) avoid collision with the existing compose
-# collector stack on the same VM (macf-obs-otel-collector-1, binds :4317/:4318).
+# High host ports (14317/14318) avoid collision with the prior-generation
+# compose collector stack (macf-obs-otel-collector-1, binds :4317/:4318).
 # Testers + smoke scripts can `curl http://localhost:14318/v1/traces` directly,
 # no kubectl-port-forward round-trip.
 #
+# **Compatibility-port mapping** (added per groundnuty/macf-devops-toolkit#60,
+# 2026-04-29): also bind 127.0.0.1:4317 + :4318 → cluster's :4317/:4318 so
+# agents whose claude.sh predates `groundnuty/macf` PR #283 (canonical
+# template default flipped from :4318 to :14318) keep working without
+# per-agent re-bootstrap. Compose stack on this host has been retired —
+# :4317/:4318 are free to bind via k3d serverlb.
+#
+# Without these compat ports, OTLP exporters defaulting to `localhost:4318`
+# get connection-refused, retry until backoff, and drop spans silently —
+# producing the silent-fallback-hazard documented as Instance 8 in
+# `groundnuty/macf-science-agent:.claude/rules/silent-fallback-hazards.md`.
+# Detection: see Pattern A defense in `hack/check-tempo-ingestion.sh`.
+#
 # For live cluster adds (no recreate), use:
 #   k3d cluster edit macf --port-add "127.0.0.1:14317:4317@loadbalancer" \
-#                         --port-add "127.0.0.1:14318:4318@loadbalancer"
+#                         --port-add "127.0.0.1:14318:4318@loadbalancer" \
+#                         --port-add "127.0.0.1:4317:4317@loadbalancer" \
+#                         --port-add "127.0.0.1:4318:4318@loadbalancer"
 # These ports entries here make the same mapping persistent on cluster
 # recreate (`make cluster-down && make cluster`).
 ports:
@@ -79,6 +94,12 @@ ports:
     nodeFilters:
       - loadbalancer
   - port: 127.0.0.1:14318:4318
+    nodeFilters:
+      - loadbalancer
+  - port: 127.0.0.1:4317:4317
+    nodeFilters:
+      - loadbalancer
+  - port: 127.0.0.1:4318:4318
     nodeFilters:
       - loadbalancer
 
