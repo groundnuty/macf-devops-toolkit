@@ -228,6 +228,14 @@ argocd-password:  ## Print the ArgoCD admin password (from initial-admin-secret)
 smoke:  ## OTLP round-trip test (needs `make pf-collector` + `make pf-tempo` in other terminals)
 	@bash hack/smoke.sh
 
+.PHONY: check-tempo-ingestion
+check-tempo-ingestion:  ## Pattern A defense (silent-fallback-hazards Instance 8): cluster-side ingestion-vs-search invariant. Override WINDOW_SECONDS=N (default 300).
+	@bash hack/check-tempo-ingestion.sh
+
+.PHONY: doctor-otel
+doctor-otel:  ## Pattern A defense (silent-fallback-hazards Instance 8 Tier 4): per-agent-process traces-emission invariant — detects stuck OTel exporters in long-lived claude processes. Override WINDOW_MINUTES=N (default 30).
+	@bash hack/doctor-otel.sh
+
 .PHONY: langfuse-bootstrap
 langfuse-bootstrap:  ## Generate ALL Langfuse secrets (subchart auth + headless-init + Collector api-keys) + restart pods. ONE-SHOT.
 	@bash hack/langfuse-bootstrap.sh
