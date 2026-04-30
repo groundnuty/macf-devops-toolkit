@@ -220,47 +220,66 @@ clickhouse:
   # → engine_full should contain `TTL event_date + toIntervalDay(7)` (or 30 for part_log).
   extraOverrides: |
     <clickhouse>
+      <!-- Tame ClickHouse self-introspection (devops audit 2026-04-30):
+           clickhouse-server was at 818% CPU on a 16-core VM; investigation
+           showed system.trace_log at 9.97 GiB / 457M rows + system.text_log
+           at 1.85 GiB / 8.92M rows DOMINATING vs application data
+           (logs.otel_logs only 1.42 GiB). Fixes:
+             - trace_log: remove entirely (query-stack profiler — only
+               useful for debugging ClickHouse itself; with ~5 INSERTs/sec
+               from the OTel Collector + Grafana/Langfuse-worker queries,
+               it samples hundreds of stacks/sec → constant merge churn).
+             - logger level: warning instead of trace (chart default emits
+               ~megabytes of trace lines to text_log per minute).
+             - metric_log flush: 60s instead of 7.5s (8x fewer parts to
+               merge for negligible loss in metric resolution at this
+               cluster scale).
+           Per `feedback_use_clickhouse_extraOverrides_to_tame_self_logs`. -->
+
+      <!-- Disable ClickHouse's query-stack profiler entirely. -->
+      <trace_log remove="1"/>
+
+      <!-- Reduce internal logging verbosity (default: trace). Warning still
+           captures issues that need attention without spamming text_log. -->
+      <logger>
+        <level>warning</level>
+      </logger>
+
       <query_log>
         <database>system</database>
         <table>query_log</table>
         <partition_by>event_date</partition_by>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <flush_interval_milliseconds>60000</flush_interval_milliseconds>
       </query_log>
       <text_log>
         <database>system</database>
         <table>text_log</table>
         <partition_by>event_date</partition_by>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <flush_interval_milliseconds>60000</flush_interval_milliseconds>
       </text_log>
       <metric_log>
         <database>system</database>
         <table>metric_log</table>
         <partition_by>event_date</partition_by>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <flush_interval_milliseconds>60000</flush_interval_milliseconds>
+        <collect_interval_milliseconds>60000</collect_interval_milliseconds>
       </metric_log>
       <asynchronous_metric_log>
         <database>system</database>
         <table>asynchronous_metric_log</table>
         <partition_by>event_date</partition_by>
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <flush_interval_milliseconds>60000</flush_interval_milliseconds>
       </asynchronous_metric_log>
-      <trace_log>
-        <database>system</database>
-        <table>trace_log</table>
-        <partition_by>event_date</partition_by>
-        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-      </trace_log>
       <part_log>
         <database>system</database>
         <table>part_log</table>
         <partition_by>event_date</partition_by>
         <ttl>event_date + INTERVAL 30 DAY DELETE</ttl>
-        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <flush_interval_milliseconds>60000</flush_interval_milliseconds>
       </part_log>
     </clickhouse>
 
@@ -277,12 +296,24 @@ clickhouse:
         clickhouse-client --password="$CLICKHOUSE_ADMIN_PASSWORD" -q "SELECT 1" >/dev/null 2>&1 && break
         sleep 3
       done
-      for tbl_ttl in "query_log:7" "text_log:7" "metric_log:7" "asynchronous_metric_log:7" "trace_log:7" "part_log:30"; do
+      for tbl_ttl in "query_log:7" "text_log:7" "metric_log:7" "asynchronous_metric_log:7" "part_log:30"; do
         tbl="${tbl_ttl%:*}"
         days="${tbl_ttl#*:}"
         clickhouse-client --password="$CLICKHOUSE_ADMIN_PASSWORD" -q \
           "ALTER TABLE system.${tbl} MODIFY TTL event_date + INTERVAL ${days} DAY DELETE" 2>/dev/null || true
       done
+
+      # trace_log was disabled in extraOverrides (devops audit 2026-04-30 —
+      # was 9.97 GiB / 457M rows). For pre-existing clusters where the
+      # table predates the disable, drop it explicitly to free disk + stop
+      # background merges. ClickHouse re-creates `system.*` tables on
+      # demand; with the trace_log section now `remove="1"`, no recreation
+      # happens for trace_log specifically. DROP failures suppressed —
+      # table may not exist on fresh installs.
+      clickhouse-client --password="$CLICKHOUSE_ADMIN_PASSWORD" -q \
+        "DROP TABLE IF EXISTS system.trace_log SYNC" 2>/dev/null || true
+      clickhouse-client --password="$CLICKHOUSE_ADMIN_PASSWORD" -q \
+        "DROP TABLE IF EXISTS system.trace_log_0 SYNC" 2>/dev/null || true
 
 # --- MinIO / S3 (event + export blobs) -------------------------------------
 # Two layers of S3 credentials:
