@@ -179,6 +179,21 @@ clickhouse:
     storageClass: local-path
     size: 20Gi
 
+  # Probe timeouts — chart defaults (initialDelay=10s, failureThreshold=3 →
+  # ~40s grace) are too short when ClickHouse needs to load existing data
+  # backlog on startup. Empirically, after the trace_log/text_log purge
+  # commit (devops 2026-04-30), the first ~5min of restarts hit
+  # CrashLoopBackOff because CH took >60s to come ready while processing
+  # existing system table state. Bumped to 300s initialDelay + 10
+  # failureThreshold (~400s grace total) so one-time startup spikes don't
+  # trigger restart cascades.
+  livenessProbe:
+    initialDelaySeconds: 300
+    failureThreshold: 10
+  readinessProbe:
+    initialDelaySeconds: 300
+    failureThreshold: 10
+
   # ClickHouse bundled zookeeper for CH's replication/coordination. With
   # clusterEnabled=false + replicaCount=1 ZK is almost idle; trim to 1.
   zookeeper:
