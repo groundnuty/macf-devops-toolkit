@@ -173,15 +173,30 @@ clickhouse:
       memory: 2Gi
     limits:
       memory: 6Gi
-  # Memory bumped 2Gi → 6Gi 2026-05-01 (devops#62 follow-up after #64+#65):
-  # ClickHouse startup with 470+ accumulated parts (logs.otel_logs alone has
-  # 165, plus ~300 across system tables) was exceeding 60s consistently,
-  # which trips bitnami's hardcoded `wait_for_log_entry "Ready for
-  # connections" "$log_file" 12 5` in libclickhouse.sh:246 (retries=12 ×
-  # interval=5s positional args, no env-var override). 6Gi gives CH enough
-  # cache for parts metadata to load in <60s, sidestepping the wrapper
-  # timeout without invasive script-patching. If 6Gi still trips the wait,
-  # next iteration patches libclickhouse.sh via subPath mount.
+  # Memory bumped 2Gi → 6Gi 2026-05-01 (devops#62 follow-up after #64+#65).
+  # 6Gi alone wasn't enough — bitnami wrapper still timed out at 60s. The
+  # surgical patch below extends the wait via custom entrypoint.
+
+  # Custom entrypoint wrapper that patches libclickhouse.sh's hardcoded
+  # `wait_for_log_entry "Ready for connections" "$log_file"` (positional
+  # arg retries=12, interval=5s = 60s timeout, libfile.sh:119-122) before
+  # chaining to bitnami's original entrypoint. Bumps retries=12 → 120
+  # giving 600s = 10min grace, which is what CH needs to load 470+
+  # accumulated parts on startup.
+  #
+  # Mounted via configmap `clickhouse-entrypoint-wait-patch` injected
+  # through extraDeploy below. defaultMode 0755 makes the script
+  # executable.
+  command:
+    - /custom-entrypoint/entrypoint-patched.sh
+  extraVolumes:
+    - name: bitnami-wait-patch
+      configMap:
+        name: clickhouse-entrypoint-wait-patch
+        defaultMode: 0755
+  extraVolumeMounts:
+    - name: bitnami-wait-patch
+      mountPath: /custom-entrypoint
 
   persistence:
     enabled: true
@@ -202,6 +217,35 @@ clickhouse:
   readinessProbe:
     initialDelaySeconds: 300
     failureThreshold: 10
+
+  # ConfigMap injected via extraDeploy — provides the patched entrypoint
+  # script referenced by `command:` above. Hot-injected here rather than
+  # filed as a separate manifest so the whole CH-subchart contract lives
+  # in one place.
+  extraDeploy:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: clickhouse-entrypoint-wait-patch
+        namespace: langfuse
+      data:
+        entrypoint-patched.sh: |
+          #!/bin/bash
+          # Bitnami clickhouse setup.sh chains through wait_for_log_entry
+          # (libfile.sh:119-122) with hardcoded retries=12 × interval=5s =
+          # 60s timeout. CH startup with 470+ accumulated parts can take
+          # 90-120s; the wait fires before "Ready for connections" appears
+          # → container exits with code 1 → CrashLoopBackoff.
+          #
+          # In-place sed bumps retries 12 → 120 (10min grace) before
+          # chaining to bitnami's original entrypoint.
+          set -e
+          if [ -f /opt/bitnami/scripts/libclickhouse.sh ]; then
+            sed -i 's|wait_for_log_entry "Ready for connections" "$log_file"$|wait_for_log_entry "Ready for connections" "$log_file" 120 5|' \
+              /opt/bitnami/scripts/libclickhouse.sh
+          fi
+          exec /opt/bitnami/scripts/clickhouse/entrypoint.sh \
+            /opt/bitnami/scripts/clickhouse/run.sh
 
   # ClickHouse bundled zookeeper for CH's replication/coordination. With
   # clusterEnabled=false + replicaCount=1 ZK is almost idle; trim to 1.
