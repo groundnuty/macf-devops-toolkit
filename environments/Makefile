@@ -236,6 +236,14 @@ check-tempo-ingestion:  ## Pattern A defense (silent-fallback-hazards Instance 8
 doctor-otel:  ## Pattern A defense (silent-fallback-hazards Instance 8 Tier 4): per-agent-process traces-emission invariant — detects stuck OTel exporters in long-lived claude processes. Override WINDOW_MINUTES=N (default 30).
 	@bash hack/doctor-otel.sh
 
+.PHONY: tailscale-otlp-up
+tailscale-otlp-up:  ## Expose OTLP ports (14317/14318/4317/4318) over the tailnet via tailscale serve. ONE-SHOT operator action; persistent across tailscaled restarts. Use MACF_OTEL_ENDPOINT=http://<machine>.<tailnet>.ts.net:14318 on remote agents.
+	@bash hack/tailscale-otlp-up.sh
+
+.PHONY: tailscale-otlp-down
+tailscale-otlp-down:  ## Tear down `tailscale serve` config (inverse of tailscale-otlp-up).
+	@bash hack/tailscale-otlp-down.sh
+
 .PHONY: langfuse-bootstrap
 langfuse-bootstrap:  ## Generate ALL Langfuse secrets (subchart auth + headless-init + Collector api-keys) + restart pods. ONE-SHOT.
 	@bash hack/langfuse-bootstrap.sh
