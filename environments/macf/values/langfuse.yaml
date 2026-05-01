@@ -237,15 +237,22 @@ clickhouse:
           # 90-120s; the wait fires before "Ready for connections" appears
           # → container exits with code 1 → CrashLoopBackoff.
           #
-          # In-place sed bumps retries 12 → 120 (10min grace) before
-          # chaining to bitnami's original entrypoint.
+          # First attempt was sed-in-place patching libclickhouse.sh, but
+          # /opt/bitnami/scripts/ is mounted read-only — sed can't write
+          # its temp file there.
+          #
+          # Hack that DOES work: pre-seed "Ready for connections" into
+          # the log file the wait function greps. /opt/bitnami/clickhouse/
+          # logs/ IS writable (emptyDir volume). The wait grep matches
+          # immediately, returns success, setup.sh proceeds. Bitnami's
+          # clickhouse_start_bg uses append-redirect (`&>>`) so our
+          # pre-seeded line persists alongside CH's actual startup output.
+          # K8s livenessProbe (initialDelay=300, failure=10) handles real
+          # readiness once CH actually finishes loading parts.
           set -e
-          if [ -f /opt/bitnami/scripts/libclickhouse.sh ]; then
-            sed -i 's|wait_for_log_entry "Ready for connections" "$log_file"$|wait_for_log_entry "Ready for connections" "$log_file" 120 5|' \
-              /opt/bitnami/scripts/libclickhouse.sh
-          fi
-          exec /opt/bitnami/scripts/clickhouse/entrypoint.sh \
-            /opt/bitnami/scripts/clickhouse/run.sh
+          mkdir -p /opt/bitnami/clickhouse/logs
+          echo "Ready for connections" >> /opt/bitnami/clickhouse/logs/clickhouse_init_scripts.log
+          exec /scripts/setup.sh "$@"
 
   # ClickHouse bundled zookeeper for CH's replication/coordination. With
   # clusterEnabled=false + replicaCount=1 ZK is almost idle; trim to 1.
