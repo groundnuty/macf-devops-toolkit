@@ -52,6 +52,7 @@ A k3d cluster named `macf` runs on this VM, managed via argocd-driven GitOps. Ke
 |---|---|---|
 | **Stable OTLP HTTP** | `http://127.0.0.1:14318/v1/traces` | No port-forward needed — host-port-mapped via k3d serverlb to the `central-collector-lb` LoadBalancer Service. Testers + smoke scripts use this. |
 | **Stable OTLP gRPC** | `127.0.0.1:14317` | Same routing |
+| **Tailnet OTLP HTTP** (remote agents) | `http://<machine>.<tailnet>.ts.net:14318/v1/traces` | Requires `make tailscale-otlp-up` once on VM. Same path as stable but reachable from off-VM agents. See `docs/remote-agent-otlp-setup.md`. |
 | Grafana UI | `make pf-grafana` → `http://127.0.0.1:3000` | port-forward; password via `make grafana-password` |
 | Tempo query API | `make pf-tempo` → `http://127.0.0.1:13200` | port-forward; smoke.sh's Tempo leg uses this |
 | Langfuse UI | `make pf-langfuse` → `http://127.0.0.1:3001` | port-forward; admin login printed by `make langfuse-bootstrap` |
