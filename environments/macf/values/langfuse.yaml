@@ -170,9 +170,18 @@ clickhouse:
   resources:
     requests:
       cpu: 500m
-      memory: 1Gi
-    limits:
       memory: 2Gi
+    limits:
+      memory: 6Gi
+  # Memory bumped 2Gi → 6Gi 2026-05-01 (devops#62 follow-up after #64+#65):
+  # ClickHouse startup with 470+ accumulated parts (logs.otel_logs alone has
+  # 165, plus ~300 across system tables) was exceeding 60s consistently,
+  # which trips bitnami's hardcoded `wait_for_log_entry "Ready for
+  # connections" "$log_file" 12 5` in libclickhouse.sh:246 (retries=12 ×
+  # interval=5s positional args, no env-var override). 6Gi gives CH enough
+  # cache for parts metadata to load in <60s, sidestepping the wrapper
+  # timeout without invasive script-patching. If 6Gi still trips the wait,
+  # next iteration patches libclickhouse.sh via subPath mount.
 
   persistence:
     enabled: true
