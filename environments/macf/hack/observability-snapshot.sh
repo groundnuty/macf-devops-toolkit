@@ -150,6 +150,43 @@ START_NS=$((START_EPOCH * 1000000000))
 END_NS=$((END_EPOCH * 1000000000))
 
 # 1. Tempo — TraceQL search by resource attribute
+#
+# Dual-scope note (post-macf#369 A2A Phase 0 — OTel `invoke_agent`
+# rename). For `gen_ai.agent.name` specifically there are now TWO
+# attribute scopes that carry an agent identity, and TraceQL queries
+# need to disambiguate:
+#
+#   - Resource-scoped: `resource.gen_ai.agent.name` — set at agent
+#     bootstrap via OTEL_RESOURCE_ATTRIBUTES (claude.sh OTLP block).
+#     Identifies the **emitting** agent for every span the agent
+#     produces. The `tags=` parameter below queries this scope.
+#
+#   - Span-scoped: `span.gen_ai.agent.name` — set per-span on the
+#     CLIENT-kind `invoke_agent {target}` span (notify-peer.ts after
+#     macf#369). Identifies the **target** peer being invoked. Other
+#     span kinds do not set this.
+#
+# Equivalent TraceQL examples for ad-hoc Tempo queries (not used by the
+# bundle below — this snapshot is emitter-scoped per its primary use
+# case "what did agent X do during this window"):
+#
+#   # Spans emitted BY agent X (emitter scope — what this script does):
+#   { resource.gen_ai.agent.name = "code-agent" }
+#
+#   # Spans TARGETING agent X (invoke_agent spans only):
+#   { span.gen_ai.agent.name = "code-agent" }
+#
+#   # All invoke_agent dispatches in the window (any target,
+#   # including broadcast which has no per-span gen_ai.agent.name):
+#   { name =~ "^invoke_agent" }
+#
+#   # Targeted-only (exclude broadcast):
+#   { name =~ "^invoke_agent " }       # space after `_agent` = "name <target>"
+#
+# Cross-direction snapshot: re-run the script with the actor's name as
+# the value for both scopes, or merge two bundles. Future work if
+# operators ask for it (would inflate per-issue bundles with peer-
+# invocations of the actor — meaningful but not always desired).
 echo "Querying Tempo..."
 curl -sS -G "http://127.0.0.1:13200/api/search" \
   --data-urlencode "tags=${FK_DOT}=${FILTER_VALUE}" \
