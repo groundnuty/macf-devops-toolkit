@@ -6,7 +6,8 @@
     "k3d@latest",
     "grpcurl@latest",
     "yq-go@latest",
-    "jq@latest"
+    "jq@latest",
+    "otel-cli@latest"
   ],
   "env": {
     "KUBECONFIG": "${HOME}/.kube/config"
