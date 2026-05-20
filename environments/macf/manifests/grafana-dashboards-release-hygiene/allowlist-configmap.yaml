@@ -1,0 +1,42 @@
+# AUTO-GENERATED — DO NOT EDIT BY HAND.
+#
+# Source of truth: groundnuty/macf:packages/macf/scripts/check-gh-token.sh,
+# specifically the `MACF_ACTIONS_DISPATCH_ALLOWLIST_REGEX='...'` line.
+#
+# This workspace's `.claude/scripts/check-gh-token.sh` is a synced copy of
+# that canonical (via substrate-sync PRs #73, #76, future rounds). The
+# `.data.regex` value below is extracted from the synced local copy at
+# regeneration time.
+#
+# Regenerate via:
+#   cd environments/macf && make grafana-allowlist-sync
+#
+# Rule per DR-019 Amendment A § "Dispatch allowlist + addition criteria":
+# Allowlist changes flow only through the canonical hook script. The
+# `PrometheusRule` `MacfActionsWriteUnexpectedWorkflowDispatch` alert
+# uses the same regex from this ConfigMap, so the hook-script value is
+# the single author site for both audit-log filtering AND alert firing.
+#
+# DO NOT add allowlist entries by editing this file. Add them upstream
+# via a DR-019 amendment that updates the canonical hook script. The
+# next substrate-sync round (or `make grafana-allowlist-sync`) brings
+# the new value here.
+#
+# Cluster consumers reference: ConfigMap data.regex via Prometheus
+# `external-labels` or expression-time substitution at PrometheusRule
+# render time (see alerts-promrule.yaml for the binding).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: macf-actions-dispatch-allowlist
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: macf-release-hygiene
+    app.kubernetes.io/component: allowlist-ssot
+  annotations:
+    # If you find yourself wanting to edit this directly, you almost
+    # certainly want a DR-019 amendment instead. See header.
+    macf.io/source: "groundnuty/macf:packages/macf/scripts/check-gh-token.sh#MACF_ACTIONS_DISPATCH_ALLOWLIST_REGEX"
+    macf.io/regenerate-cmd: "make grafana-allowlist-sync"
+data:
+  regex: 'npm-deprecate\.yml'

@@ -1,0 +1,241 @@
+# Grafana dashboard: MACF Release-Hygiene Observability.
+#
+# Per DR-019 Amendment A (groundnuty/macf#378) and #74 AC (2).
+# Surfaces the `actions:write` audit-log signals emitted by the
+# canonical PreToolUse hook (`check-gh-token.sh` post-#384 / #388 / #389):
+#
+#   - Span `macf.app.gh_api_call` (CLIENT-kind) in Tempo
+#   - Counter `macf.app.gh_actions_write_total` in Prometheus
+#
+# The ConfigMap label `grafana_dashboard: "1"` is what the kube-prom-stack
+# Grafana sidecar watches for (per values/kube-prometheus-stack.yaml
+# grafana.sidecar.dashboards). The sidecar auto-loads the embedded JSON
+# into Grafana on ConfigMap reconciliation.
+#
+# Panels per #74 thread design (consultation comment 2026-05-19):
+#   1. Recent macf.app.gh_api_call spans (Tempo source; table view)
+#   2. macf.app.gh_actions_write_total rate by action + workflow (Prometheus; time-series)
+#   3. Per-actor breakdown (Prometheus; rate by gh.actor × gh.action — Q1 decision)
+#
+# Datasource UIDs (`prometheus` + `tempo`) match the standard cluster
+# provisioning (kube-prom-stack auto-provisions Prometheus; tempo-datasource
+# ConfigMap registers Tempo).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: macf-release-hygiene-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/name: macf-release-hygiene
+    app.kubernetes.io/component: dashboard
+data:
+  release-hygiene.json: |
+    {
+      "title": "MACF Release-Hygiene Observability",
+      "uid": "macf-release-hygiene",
+      "schemaVersion": 39,
+      "version": 1,
+      "tags": ["macf", "release-hygiene", "actions-write", "audit-log"],
+      "timezone": "",
+      "time": {
+        "from": "now-24h",
+        "to": "now"
+      },
+      "refresh": "1m",
+      "annotations": {
+        "list": []
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "gh_actor",
+            "label": "GitHub actor",
+            "type": "query",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "prometheus"
+            },
+            "query": "label_values(macf_app_gh_actions_write_total, gh_actor)",
+            "includeAll": true,
+            "multi": true,
+            "current": {
+              "selected": true,
+              "text": "All",
+              "value": "$__all"
+            }
+          },
+          {
+            "name": "gh_repo",
+            "label": "GitHub repo",
+            "type": "query",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "prometheus"
+            },
+            "query": "label_values(macf_app_gh_actions_write_total, gh_repo)",
+            "includeAll": true,
+            "multi": true,
+            "current": {
+              "selected": true,
+              "text": "All",
+              "value": "$__all"
+            }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "table",
+          "title": "Recent macf.app.gh_api_call spans",
+          "description": "Most recent actions:write audit-log spans emitted by the PreToolUse hook. Click traceID to drill into Tempo for the full span detail (kind, attributes, resource attrs from claude.sh OTEL_RESOURCE_ATTRIBUTES export).",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "tempo",
+                "uid": "tempo"
+              },
+              "queryType": "traceql",
+              "query": "{ name = \"macf.app.gh_api_call\" }",
+              "limit": 100,
+              "tableType": "spans"
+            }
+          ],
+          "options": {
+            "showHeader": true,
+            "footer": {"show": false}
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "displayMode": "auto"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {"id": "byName", "options": "traceID"},
+                "properties": [
+                  {
+                    "id": "links",
+                    "value": [
+                      {
+                        "title": "View trace",
+                        "url": "/explore?left=%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%7B%22query%22:%22${__value.raw}%22,%22queryType%22:%22traceql%22%7D%5D%7D"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "macf.app.gh_actions_write_total — rate by action × workflow",
+          "description": "Counter rate over the last 24h, split by action (dispatch / cancel / rerun) × workflow. Sustained dispatch outside the allowlist regex (see allowlist-configmap.yaml) fires the MacfActionsWriteUnexpectedWorkflowDispatch alert.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 9, "w": 12, "x": 0, "y": 10},
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (action, workflow) (rate(macf_app_gh_actions_write_total{gh_actor=~\"$gh_actor\", gh_repo=~\"$gh_repo\"}[5m]))",
+              "legendFormat": "{{action}} / {{workflow}}",
+              "interval": ""
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": ["mean", "max"]
+            },
+            "tooltip": {"mode": "multi", "sort": "desc"}
+          }
+        },
+        {
+          "id": 3,
+          "type": "table",
+          "title": "Per-actor breakdown (rate 5m, by gh.actor × gh.action) — Q1 decision",
+          "description": "Mix-shift signal: shows each agent's recent actions:write activity split by action class. Anomalous mix (e.g., an agent that normally only dispatches suddenly canceling lots of runs) surfaces here before the rate-anomaly alert thresholds fire.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {"h": 9, "w": 12, "x": 12, "y": 10},
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "expr": "sum by (gh_actor, action) (rate(macf_app_gh_actions_write_total{gh_actor=~\"$gh_actor\", gh_repo=~\"$gh_repo\"}[5m]))",
+              "format": "table",
+              "instant": true
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "gh_actor": 0,
+                  "action": 1,
+                  "Value": 2
+                },
+                "renameByName": {
+                  "Value": "rate (per s)"
+                }
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "displayMode": "color-background"
+              },
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "options": {
+            "showHeader": true,
+            "footer": {"show": false}
+          }
+        }
+      ]
+    }

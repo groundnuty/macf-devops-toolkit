@@ -1,0 +1,93 @@
+# Alert rules for the release-hygiene observability surface.
+# Per DR-019 Amendment A (groundnuty/macf#378) and the implementation in
+# the canonical PreToolUse hook (groundnuty/macf#384, #388, #389).
+#
+# Two alerts cover the `actions:write` audit-log signals:
+#
+#   1. MacfActionsWriteUnexpectedWorkflowDispatch — fires when a workflow
+#      OUTSIDE the dispatch-allowlist gets dispatched. The allowlist regex
+#      embedded in the `workflow!~"npm-deprecate\\.yml"` matcher below MUST stay in sync
+#      with `allowlist-configmap.yaml` and with the canonical hook's
+#      `MACF_ACTIONS_DISPATCH_ALLOWLIST_REGEX` shell variable. The
+#      `make grafana-allowlist-sync` target keeps all three in sync from
+#      the single author site (the canonical hook script).
+#
+#   2. MacfActionsWriteCancelRerunRateAnomaly — fires on abnormal
+#      cancel/rerun rate. v1 threshold is conservative (>1.0/hr) per
+#      #74 thread Q2 decision (operator preserved option to tighten
+#      after baseline observation).
+#
+# Both alerts route via the standard kube-prom-stack Alertmanager.
+#
+# Label `release: kube-prometheus-stack` is required for the Prometheus
+# CR's `ruleSelector` to discover this PrometheusRule (per the cluster
+# memory `reference_kube_prom_stack_servicemonitor_label.md` — same
+# label discipline applies to PrometheusRule).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: macf-release-hygiene
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: macf-release-hygiene
+    app.kubernetes.io/component: alerts
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: macf-release-hygiene
+      interval: 30s
+      rules:
+        # --------------------------------------------------------------
+        # Alert 1: out-of-allowlist workflow dispatch
+        # --------------------------------------------------------------
+        # The `workflow!~"npm-deprecate\\.yml"` regex is a derived artifact — see header.
+        # Allowlist source of truth lives in:
+        #   groundnuty/macf:packages/macf/scripts/check-gh-token.sh
+        #   variable: MACF_ACTIONS_DISPATCH_ALLOWLIST_REGEX
+        - alert: MacfActionsWriteUnexpectedWorkflowDispatch
+          expr: |
+            sum by (gh_actor, gh_repo, gh_workflow) (
+              rate(macf_app_gh_actions_write_total{
+                action="dispatch",
+                workflow!~"npm-deprecate\\.yml"
+              }[1h])
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+            component: macf-release-hygiene
+          annotations:
+            summary: "MACF agent App dispatched out-of-allowlist workflow: {{ $labels.gh_workflow }}"
+            description: |
+              `{{ $labels.gh_actor }}` dispatched workflow `{{ $labels.gh_workflow }}` on
+              `{{ $labels.gh_repo }}` — not in the DR-019 Amendment A allowlist.
+              Either the dispatch was unintended, or the allowlist needs
+              a DR-019 amendment to add this workflow.
+            runbook_url: "https://github.com/groundnuty/macf/blob/main/design/decisions/DR-019.md#amendment-a"
+
+        # --------------------------------------------------------------
+        # Alert 2: cancel/rerun rate anomaly
+        # --------------------------------------------------------------
+        # Conservative v1 threshold (>1.0/hr) per #74 Q2 decision.
+        # Tighten after baseline observation. cancel/rerun operate on
+        # RUNS not WORKFLOWS so there's no per-workflow allowlist to
+        # apply; this is pure rate-anomaly detection.
+        - alert: MacfActionsWriteCancelRerunRateAnomaly
+          expr: |
+            sum by (gh_actor, gh_repo) (
+              rate(macf_app_gh_actions_write_total{
+                action=~"cancel|rerun"
+              }[1h])
+            ) > 1.0
+          for: 15m
+          labels:
+            severity: info
+            component: macf-release-hygiene
+          annotations:
+            summary: "MACF agent App cancel/rerun rate anomaly: {{ $labels.gh_actor }} on {{ $labels.gh_repo }}"
+            description: |
+              `{{ $labels.gh_actor }}` has been canceling or rerunning workflow
+              runs at >1.0/hr on `{{ $labels.gh_repo }}` for ≥15m. Investigate
+              whether this is expected operator-discretionary activity or
+              an automation loop.
+            runbook_url: "https://github.com/groundnuty/macf/blob/main/design/decisions/DR-019.md#amendment-a"

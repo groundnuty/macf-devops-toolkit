@@ -1,0 +1,39 @@
+# ArgoCD Application for the MACF Release-Hygiene observability surface.
+# Bundles three pieces (per #74 AC (2) consultation on the issue thread):
+#
+#   1. dashboard-configmap.yaml      — Grafana board JSON (auto-loaded by sidecar)
+#   2. alerts-promrule.yaml          — PrometheusRule with 2 alert rules
+#   3. allowlist-configmap.yaml      — AUTO-GENERATED dispatch-allowlist regex
+#                                       (derived from canonical hook script via
+#                                        `make grafana-allowlist-sync`)
+#
+# Sync-wave 2: depends on Grafana (wave 0, via kube-prometheus-stack) +
+# Prometheus (also wave 0) being up first. The Grafana sidecar discovers
+# the dashboard ConfigMap by label `grafana_dashboard: "1"`; the
+# Prometheus operator's ruleSelector discovers the PrometheusRule by
+# the `release: kube-prometheus-stack` label.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: grafana-dashboards-release-hygiene
+  namespace: argocd-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/grafana-dashboards-release-hygiene
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

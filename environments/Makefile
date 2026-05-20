@@ -256,6 +256,31 @@ clickhouse-logs-creds:  ## Copy ClickHouse password to ns/otel for the logs Coll
 archive-sessions:  ## Archive substrate-agent session JSONLs (#33). Override OUT_DIR=<path> to control destination.
 	@bash hack/archive-agent-sessions.sh
 
+.PHONY: grafana-allowlist-sync
+grafana-allowlist-sync:  ## Sync dispatch-allowlist regex into release-hygiene manifests from canonical hook (#74 / DR-019 Amendment A SSOT discipline). Run alongside any substrate-sync round that bumps the canonical's MACF_ACTIONS_DISPATCH_ALLOWLIST_REGEX.
+	@regex=$$(grep -oP "MACF_ACTIONS_DISPATCH_ALLOWLIST_REGEX='\K[^']+" \
+	    ../../.claude/scripts/check-gh-token.sh); \
+	if [ -z "$$regex" ]; then \
+	    echo "ERROR: could not extract MACF_ACTIONS_DISPATCH_ALLOWLIST_REGEX from .claude/scripts/check-gh-token.sh" >&2; \
+	    exit 1; \
+	fi; \
+	echo "Canonical regex (1-backslash, for ConfigMap audit-record): $$regex"; \
+	$(DEVBOX_RUN) yq -i ".data.regex = \"$$regex\"" \
+	    manifests/grafana-dashboards-release-hygiene/allowlist-configmap.yaml; \
+	python3 -c "import sys, re; \
+p = sys.argv[1]; new_for_configmap = sys.argv[2]; \
+new_for_promql = new_for_configmap.replace('\\\\', '\\\\\\\\'); \
+content = open(p).read(); \
+content = re.sub(r'workflow!~\"[^\"]+\"', lambda m: 'workflow!~\"' + new_for_promql + '\"', content); \
+open(p, 'w').write(content); \
+print('PromQL-escaped regex (2-backslash, for alerts-promrule.yaml): ' + new_for_promql)" \
+	    manifests/grafana-dashboards-release-hygiene/alerts-promrule.yaml \
+	    "$$regex"; \
+	echo "Synced into:"; \
+	echo "  - manifests/grafana-dashboards-release-hygiene/allowlist-configmap.yaml (.data.regex, 1-backslash canonical form)"; \
+	echo "  - manifests/grafana-dashboards-release-hygiene/alerts-promrule.yaml (workflow!~\"...\" matcher, PromQL-escaped to 2-backslash)"; \
+	echo "Verify with: git diff manifests/grafana-dashboards-release-hygiene/"
+
 .PHONY: env-test
 env-test:  ## Debug — print inherited vars
 	@echo "ENVIRONMENT=$(ENVIRONMENT)"
