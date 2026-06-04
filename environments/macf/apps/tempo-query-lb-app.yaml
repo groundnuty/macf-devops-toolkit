@@ -1,0 +1,29 @@
+# ArgoCD Application for the Tempo query LoadBalancer service.
+# Sync-wave 1: depends on the tempo chart (wave 0) being up so the pod
+# label-selector resolves + klipper-lb can create the svclb pod claiming
+# node:3200. Same wave as tempo-datasource (also a tempo-dependent add-on).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tempo-query-lb
+  namespace: argocd-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/tempo-query-lb
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: tempo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

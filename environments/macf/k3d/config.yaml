@@ -82,11 +82,21 @@ options:
 # `groundnuty/macf-science-agent:.claude/rules/silent-fallback-hazards.md`.
 # Detection: see Pattern A defense in `hack/check-tempo-ingestion.sh`.
 #
+# Tempo query API on host — 127.0.0.1:13200 → cluster :3200 via the serverlb
+# + the `tempo-query-lb` LoadBalancer Service in ns/tempo (see
+# ../manifests/tempo-query-lb/tempo-query-lb.yaml). Replaces the
+# operator-occasional `make pf-tempo` port-forward with an always-on host
+# endpoint — Tempo query became a recurring need (Phase 5 A2A observations +
+# future paper-evidence passes), so the port-forward-on-demand assumption no
+# longer held (groundnuty/macf#368). High host port :13200 avoids collision
+# with the prior-generation compose stack which binds :3200.
+#
 # For live cluster adds (no recreate), use:
 #   k3d cluster edit macf --port-add "127.0.0.1:14317:4317@loadbalancer" \
 #                         --port-add "127.0.0.1:14318:4318@loadbalancer" \
 #                         --port-add "127.0.0.1:4317:4317@loadbalancer" \
-#                         --port-add "127.0.0.1:4318:4318@loadbalancer"
+#                         --port-add "127.0.0.1:4318:4318@loadbalancer" \
+#                         --port-add "127.0.0.1:13200:3200@loadbalancer"
 # These ports entries here make the same mapping persistent on cluster
 # recreate (`make cluster-down && make cluster`).
 ports:
@@ -100,6 +110,9 @@ ports:
     nodeFilters:
       - loadbalancer
   - port: 127.0.0.1:4318:4318
+    nodeFilters:
+      - loadbalancer
+  - port: 127.0.0.1:13200:3200
     nodeFilters:
       - loadbalancer
 
