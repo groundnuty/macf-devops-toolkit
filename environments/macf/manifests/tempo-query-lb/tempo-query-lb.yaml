@@ -1,0 +1,44 @@
+# LoadBalancer Service for Tempo's query API (:3200), so the host can reach
+# it WITHOUT `make pf-tempo`. Mirrors `../otel-collector/otlp-lb-service.yaml`
+# (the OTLP-ingress equivalent for the collector).
+#
+# Why a SECOND service alongside the chart-created `tempo` ClusterIP:
+# the grafana-community/tempo chart ships a ClusterIP service (right for
+# in-cluster clients — the Grafana datasource, smoke.sh via port-forward).
+# A ClusterIP is not host-reachable; for any host-context consumer to run
+# TraceQL against `:13200` without a kubectl tunnel, we need a LoadBalancer
+# service that k3d's serverlb picks up + exposes via the host-port mapping
+# in `k3d/config.yaml` (`127.0.0.1:13200:3200` on the loadbalancer node).
+#
+# Routing chain host → pod (identical shape to the collector's :14318):
+#   localhost:13200 (host)
+#     → k3d-macf-serverlb:3200 (k3d nginx proxy, added via k3d ports mapping)
+#       → k3d-macf-server-0:3200 (klipper-lb hostPort binding from THIS Service)
+#         → pod label-selector → tempo StatefulSet pod
+#
+# Replaces the operator-occasional `make pf-tempo` with an always-on host
+# endpoint. Filed because Tempo query became a recurring need (Phase 5 A2A
+# observations + future paper-evidence passes), so the "port-forward on
+# demand" assumption no longer held. See groundnuty/macf#368.
+#
+# Selector mirrors the chart-default labels on the tempo StatefulSet pods
+# (`app.kubernetes.io/name=tempo` + `app.kubernetes.io/instance=tempo`).
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo-query-lb
+  namespace: tempo
+  labels:
+    app.kubernetes.io/name: tempo
+    app.kubernetes.io/instance: tempo
+    macf.dev/role: stable-tempo-query
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: tempo
+    app.kubernetes.io/instance: tempo
+  ports:
+    - name: tempo-query
+      port: 3200
+      targetPort: 3200
+      protocol: TCP
