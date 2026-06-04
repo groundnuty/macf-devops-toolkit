@@ -84,9 +84,14 @@ fi
 #                         one service.name family for Issue H per-cell
 #                         tooling queries.
 #
-# Endpoint defaults to OTel canonical `:4318`; this workspace's stable
-# ingress is on `:14318` (avoids collision with a pre-existing compose
-# stack on the same host) so we override via MACF_OTEL_ENDPOINT, set in
+# Endpoint defaults to the stable in-VM ingress `http://127.0.0.1:14318`
+# (host-port-mapped k3d serverlb; avoids collision with the pre-existing
+# compose stack on `:4318`). Use the IPv4 literal `127.0.0.1`, NOT
+# `localhost`: on this host `getent hosts localhost` returns `::1` first
+# and there is no `[::1]:14318` listener, so a `localhost` endpoint can
+# resolve to IPv6 and fail (see the root-cause writeup 2026-06-04; same
+# IPv4-literal convention as MACF_ADVERTISE_HOST in the canonical
+# claude-sh.ts). Override per-session via MACF_OTEL_ENDPOINT, or set it in
 # `.claude/settings.local.json`.
 #
 # `${VAR=default}` semantics: assigns ONLY if VAR is unset; empty stays
@@ -109,7 +114,7 @@ if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
   : "${OTEL_METRICS_EXPORTER=otlp}"
   : "${OTEL_LOGS_EXPORTER=otlp}"
   : "${OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf}"
-  : "${MACF_OTEL_ENDPOINT=http://localhost:4318}"
+  : "${MACF_OTEL_ENDPOINT=http://127.0.0.1:14318}"
   : "${OTEL_EXPORTER_OTLP_ENDPOINT=$MACF_OTEL_ENDPOINT}"
   # Agent name + role parameterized via settings.local.json — defaults
   # below are sane fallbacks for this devops workspace, but the
@@ -165,6 +170,36 @@ if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
          OTEL_LOG_TOOL_DETAILS OTEL_LOG_RAW_API_BODIES
 fi
 
+# Build the env-prefix that must cross BOTH launch boundaries into the
+# `claude` process: (1) `tmux new-session` does NOT propagate this launcher's
+# exported env to the new pane — tmux seeds a new session from the server's
+# frozen global env (the "server-global env semantic" of macf#340), so the
+# OTEL_*/CLAUDE_CODE_* exports above are dropped at the tmux boundary; and
+# (2) `sg docker -c '<cmd>'` starts a fresh shell that only sees what is
+# literally inlined in its command string. GH_TOKEN has always been inlined
+# for exactly this reason. The OTEL_*/CLAUDE_CODE_* vars were exported but
+# NEVER inlined, so Claude Code launched with telemetry effectively disabled
+# (CLAUDE_CODE_ENABLE_TELEMETRY + OTEL_EXPORTER_OTLP_ENDPOINT never reached the
+# binary) and emitted zero spans regardless of endpoint value. This is the
+# OTLP-endpoint silent-drop class (#62, Tier 4); root-caused 2026-06-04 by
+# inspecting /proc/<pid>/environ of the running agent (telemetry vars absent)
+# vs the CV agents (present, via their macf#340 re-exec-inside-session
+# launcher). Fix: inline the OTEL vars the same way GH_TOKEN is — the launcher
+# shell expands them into the literal command string before tmux/sg see it, so
+# they survive both boundaries unconditionally. No value contains a space or
+# single quote, so space-joined `VAR=value` words are shell-safe inside the
+# single-quoted `sg docker -c '...'` argument.
+LAUNCH_ENV="GH_TOKEN=$GH_TOKEN"
+if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
+  for _v in CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
+            OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
+            OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES \
+            OTEL_LOG_USER_PROMPTS OTEL_LOG_TOOL_CONTENT \
+            OTEL_LOG_TOOL_DETAILS OTEL_LOG_RAW_API_BODIES; do
+    LAUNCH_ENV="$LAUNCH_ENV $_v=${!_v:-}"
+  done
+fi
+
 # TEMPORARY: wrap claude in `sg docker -c` so claude + its Bash-tool children
 # inherit the docker gid. Needed because this host's long-running tmux server
 # predates the `ubuntu`→`docker` group addition (/etc/group mtime 2026-04-14),
@@ -175,4 +210,4 @@ fi
 # a new login shell) picks up the docker group natively. Same pattern +
 # rationale as in groundnuty/macf-science-agent:claude.sh.
 tmux new-session -s "$SESSION" -c "$DIR" \
-  "sg docker -c 'GH_TOKEN=$GH_TOKEN claude --permission-mode acceptEdits -c || GH_TOKEN=$GH_TOKEN claude --permission-mode acceptEdits'"
+  "sg docker -c '$LAUNCH_ENV claude --permission-mode acceptEdits -c || $LAUNCH_ENV claude --permission-mode acceptEdits'"
