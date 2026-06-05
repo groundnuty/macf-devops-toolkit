@@ -1,12 +1,16 @@
 name: Agent Router
 
-# Delegates to the reusable workflow in groundnuty/macf-actions@v1.3.0
+# Delegates to the reusable workflow in groundnuty/macf-actions@v1.3.2
 # (see https://github.com/groundnuty/macf-actions for source).
 #
-# Pinned to immutable v1.3.0 — old-school SSH + tmux routing, matching
-# macf's + the rest of the fleet's current production setup. v1.3.0 is
-# the last tag before macf-actions rewrote to v3 (registry-driven mTLS);
-# substrate workspaces stay on v1.x until the whole fleet migrates.
+# Pinned to immutable v1.3.2 — old-school SSH + tmux routing, matching
+# macf's + the rest of the fleet's current production setup. The v1.x
+# line is maintenance-backported: v1.3.0 was the last tag before
+# macf-actions rewrote to v3 (registry-driven mTLS), and v1.3.1 + v1.3.2
+# are later v1.x backports. v1.3.2 adds route-by-pr-review-state so a PR
+# approve / changes-requested review notifies the implementer without a
+# manual @mention (macf#432). Substrate workspaces stay on v1.x until the
+# whole fleet migrates to v3.
 #
 # When macf-actions cuts a new v1.x release, upgrade the `uses:` ref by
 # a dedicated PR on this repo — that gives the upgrade its own
@@ -44,5 +48,5 @@ permissions:
 
 jobs:
   route:
-    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1.3.0
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1.3.2
     secrets: inherit
