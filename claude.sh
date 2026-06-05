@@ -111,6 +111,14 @@ fi
 
 if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
   : "${CLAUDE_CODE_ENABLE_TELEMETRY=1}"
+  # Traces need a SEPARATE beta gate + exporter: CLAUDE_CODE_ENABLE_TELEMETRY
+  # alone enables metrics + logs only; native claude_code.* spans also require
+  # CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 + OTEL_TRACES_EXPORTER=otlp. Dropping
+  # them is why substrate launchers emitted metrics/logs but zero Tempo traces
+  # (macf#418, the #197 hand-port-drift class; canonical claude-sh.ts
+  # otelTelemetryLines carries both — the hand-copied block had lost them).
+  : "${CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1}"
+  : "${OTEL_TRACES_EXPORTER=otlp}"
   : "${OTEL_METRICS_EXPORTER=otlp}"
   : "${OTEL_LOGS_EXPORTER=otlp}"
   : "${OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf}"
@@ -163,7 +171,8 @@ if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
   : "${OTEL_LOG_TOOL_CONTENT=1}"
   : "${OTEL_LOG_TOOL_DETAILS=1}"
   : "${OTEL_LOG_RAW_API_BODIES=1}"
-  export CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
+  export CLAUDE_CODE_ENABLE_TELEMETRY CLAUDE_CODE_ENHANCED_TELEMETRY_BETA \
+         OTEL_TRACES_EXPORTER OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
          OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
          OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES \
          OTEL_LOG_USER_PROMPTS OTEL_LOG_TOOL_CONTENT \
@@ -191,7 +200,8 @@ fi
 # single-quoted `sg docker -c '...'` argument.
 LAUNCH_ENV="GH_TOKEN=$GH_TOKEN"
 if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
-  for _v in CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
+  for _v in CLAUDE_CODE_ENABLE_TELEMETRY CLAUDE_CODE_ENHANCED_TELEMETRY_BETA \
+            OTEL_TRACES_EXPORTER OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
             OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
             OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES \
             OTEL_LOG_USER_PROMPTS OTEL_LOG_TOOL_CONTENT \
