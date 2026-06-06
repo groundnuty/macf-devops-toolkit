@@ -208,7 +208,11 @@ clickhouse:
         - -c
         - |
           set -euo pipefail
-          cp -a /opt/bitnami/scripts/. /patched-scripts/
+          # --no-preserve=ownership,timestamps: the bitnami image runs as
+          # non-root (uid 1001), which can't chown or set times on the emptyDir
+          # — plain `cp -a` aborts with "preserving times … Operation not
+          # permitted". Mode (exec bits) + symlinks are still preserved.
+          cp -a --no-preserve=ownership,timestamps /opt/bitnami/scripts/. /patched-scripts/
           sed -i 's|wait_for_log_entry "Ready for connections" "$log_file"$|wait_for_log_entry "Ready for connections" "$log_file" 120 5|' \
             /patched-scripts/libclickhouse.sh
           # fail loud if the wait line moved in a newer image (sed no-op'd)
