@@ -208,14 +208,21 @@ clickhouse:
         - -c
         - |
           set -euo pipefail
-          # --no-preserve=ownership,timestamps: the bitnami image runs as
-          # non-root (uid 1001), which can't chown or set times on the emptyDir
-          # — plain `cp -a` aborts with "preserving times … Operation not
-          # permitted". Mode (exec bits) + symlinks are still preserved.
-          cp -a --no-preserve=ownership,timestamps /opt/bitnami/scripts/. /patched-scripts/
+          # cp copies all scripts WITH their modes (exec bits preserved), but
+          # as the non-root image user (uid 1001) it can't chown/set-times/chmod
+          # the emptyDir mount ROOT — so it exits non-zero on that final,
+          # harmless dest-root attr step ("preserving permissions for
+          # /patched-scripts/.: Operation not permitted"; tar hits the same
+          # wall). We don't need the mount root's own mode, so tolerate that one
+          # error (|| true) and VERIFY the result fail-loud below instead
+          # (tested in a uid-1001 emptyDir pod: files land with correct modes).
+          cp -a --no-preserve=ownership,timestamps /opt/bitnami/scripts/. /patched-scripts/ || true
           sed -i 's|wait_for_log_entry "Ready for connections" "$log_file"$|wait_for_log_entry "Ready for connections" "$log_file" 120 5|' \
             /patched-scripts/libclickhouse.sh
-          # fail loud if the wait line moved in a newer image (sed no-op'd)
+          # fail loud (set -e) if the copy/sed didn't produce a usable patched
+          # tree — exec entrypoints present + the wait line actually bumped.
+          test -x /patched-scripts/clickhouse/entrypoint.sh
+          test -x /patched-scripts/clickhouse/run.sh
           grep -q 'wait_for_log_entry "Ready for connections" "$log_file" 120 5' \
             /patched-scripts/libclickhouse.sh
       volumeMounts:
