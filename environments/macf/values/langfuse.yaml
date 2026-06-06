@@ -189,14 +189,46 @@ clickhouse:
   # executable.
   command:
     - /custom-entrypoint/entrypoint-patched.sh
+  # initContainer copies the bitnami scripts to a writable emptyDir and seds
+  # the wait-timeout line. The original in-place sed (devops#67) failed because
+  # /opt/bitnami/scripts is read-only at runtime; the pre-seed attempt (devops#68)
+  # couldn't work because clickhouse_start_bg truncates the log right before the
+  # wait. The main container mounts this patched copy over /opt/bitnami/scripts
+  # (extraVolumeMounts below) so the bumped 600s wait is in effect. See macf#418
+  # + reference_bitnami_clickhouse_wait_60s_timeout.
+  initContainers:
+    - name: patch-libclickhouse-wait
+      # MUST match the chart's clickhouse image (langfuse-k8s 1.5.27 →
+      # bitnamilegacy/clickhouse:25.2.1-debian-12-r0). `cp -a` copies the live
+      # image's scripts so only the single sed'd line is version-specific; keep
+      # this tag in sync if the chart's CH image bumps.
+      image: docker.io/bitnamilegacy/clickhouse:25.2.1-debian-12-r0
+      command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          cp -a /opt/bitnami/scripts/. /patched-scripts/
+          sed -i 's|wait_for_log_entry "Ready for connections" "$log_file"$|wait_for_log_entry "Ready for connections" "$log_file" 120 5|' \
+            /patched-scripts/libclickhouse.sh
+          # fail loud if the wait line moved in a newer image (sed no-op'd)
+          grep -q 'wait_for_log_entry "Ready for connections" "$log_file" 120 5' \
+            /patched-scripts/libclickhouse.sh
+      volumeMounts:
+        - name: patched-scripts
+          mountPath: /patched-scripts
   extraVolumes:
     - name: bitnami-wait-patch
       configMap:
         name: clickhouse-entrypoint-wait-patch
         defaultMode: 0755
+    - name: patched-scripts
+      emptyDir: {}
   extraVolumeMounts:
     - name: bitnami-wait-patch
       mountPath: /custom-entrypoint
+    - name: patched-scripts
+      mountPath: /opt/bitnami/scripts
 
   persistence:
     enabled: true
@@ -231,21 +263,19 @@ clickhouse:
       data:
         entrypoint-patched.sh: |
           #!/bin/bash
-          # Bitnami clickhouse setup.sh chains through wait_for_log_entry
-          # (libfile.sh:119-122) with hardcoded retries=12 × interval=5s =
-          # 60s timeout. CH startup with 470+ accumulated parts can take
-          # 90-120s; the wait fires before "Ready for connections" appears
-          # → container exits with code 1 → CrashLoopBackoff.
-          #
-          # In-place sed bumps retries 12 → 120 (10min grace) before
-          # chaining to bitnami's original entrypoint.
+          # Bitnami clickhouse's wait_for_log_entry "Ready for connections"
+          # (libclickhouse.sh:246, libfile.sh) has a hardcoded retries=12 ×
+          # interval=5s = 60s timeout — too short for this CH's startup
+          # (~90-120s with 470+ accumulated parts), so it exits code 1 and
+          # CrashLoopBackoffs. The fix bumps that to 120×5s = 600s, applied by
+          # the `patch-libclickhouse-wait` initContainer (writable scripts copy
+          # + sed; an in-place sed failed on the read-only /opt/bitnami/scripts).
+          # The patched copy is mounted over /opt/bitnami/scripts, so here we
+          # just route through the chart's /scripts/setup.sh (which sets
+          # KEEPER_SERVER_ID, then chains to the bitnami entrypoint + run.sh
+          # using the patched libclickhouse.sh).
           set -e
-          if [ -f /opt/bitnami/scripts/libclickhouse.sh ]; then
-            sed -i 's|wait_for_log_entry "Ready for connections" "$log_file"$|wait_for_log_entry "Ready for connections" "$log_file" 120 5|' \
-              /opt/bitnami/scripts/libclickhouse.sh
-          fi
-          exec /opt/bitnami/scripts/clickhouse/entrypoint.sh \
-            /opt/bitnami/scripts/clickhouse/run.sh
+          exec /scripts/setup.sh "$@"
 
   # ClickHouse bundled zookeeper for CH's replication/coordination. With
   # clusterEnabled=false + replicaCount=1 ZK is almost idle; trim to 1.
