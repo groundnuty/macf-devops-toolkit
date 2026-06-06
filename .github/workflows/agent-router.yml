@@ -1,9 +1,9 @@
 name: Agent Router
 
-# Delegates to the reusable workflow in groundnuty/macf-actions@v1.3.3
+# Delegates to the reusable workflow in groundnuty/macf-actions@v1.3.4
 # (see https://github.com/groundnuty/macf-actions for source).
 #
-# Pinned to immutable v1.3.3 — old-school SSH + tmux routing, matching
+# Pinned to immutable v1.3.4 — old-school SSH + tmux routing, matching
 # macf's + the rest of the fleet's current production setup. The v1.x
 # line is maintenance-backported: v1.3.0 was the last tag before
 # macf-actions rewrote to v3 (registry-driven mTLS); v1.3.1–v1.3.3 are
@@ -12,8 +12,10 @@ name: Agent Router
 # hardens the liveness probe — split has-session/helper probes, retry on
 # SSH error, attempt-on-ambiguity (alive/unknown deliver, only genuine
 # absent skips) — so transient SSH/Tailscale hiccups no longer silently
-# drop routed pings (macf#437). Substrate workspaces stay on v1.x until
-# the whole fleet migrates to v3.
+# drop routed pings (macf#437). v1.3.4 appends the
+# `[macf-route:<run_id>:<agent>]` correlation marker to routed prompts
+# (macf#444 piece 1), read by the substrate turn-receipt hook. Substrate
+# workspaces stay on v1.x until the whole fleet migrates to v3.
 #
 # When macf-actions cuts a new v1.x release, upgrade the `uses:` ref by
 # a dedicated PR on this repo — that gives the upgrade its own
@@ -51,5 +53,5 @@ permissions:
 
 jobs:
   route:
-    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1.3.3
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1.3.4
     secrets: inherit
