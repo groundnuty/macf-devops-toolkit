@@ -28,7 +28,15 @@
 
 set -euo pipefail
 
-ports=(14317 14318 4317 4318)
+# 14317/14318/4317/4318 = OTLP ingest (agents PUSH spans/metrics/logs).
+# 13200 = Tempo query API (READ). The route-receipt reconciler (groundnuty/macf#444)
+# runs in GitHub Actions, joins the tailnet as tag:ci, and queries `turn_processed`
+# spans here to detect dropped routing pings. k3d binds :13200 to 127.0.0.1 only,
+# so — exactly like the ingest ports — the tailnet needs `serve` to bridge it.
+# SECURITY: this exposes the trace-READ side over the tailnet. Gate it in the
+# Tailscale ACL so only the intended consumer reaches it (e.g. allow tag:ci → :13200);
+# the ingest ports and this query port can carry different ACL grants.
+ports=(14317 14318 4317 4318 13200)
 
 # `tailscale serve` write ops require root. Probe by attempting a
 # no-op `serve reset` — silent success means we have access; otherwise
@@ -59,7 +67,7 @@ fi
 echo "Resetting any existing tailscale serve config..."
 $TS serve reset 2>&1 | head -3 || true
 
-echo "Configuring tailscale serve for OTLP ports..."
+echo "Configuring tailscale serve for OTLP ingest + Tempo-query ports..."
 for port in "${ports[@]}"; do
   echo "  ${port} → tcp://localhost:${port}"
   $TS serve --bg --tcp="${port}" "tcp://localhost:${port}"
@@ -70,8 +78,11 @@ echo "Configured. Status:"
 tailscale serve status 2>&1 | head -20
 
 echo ""
+_host="$(tailscale status --self --json 2>/dev/null | jq -r '.Self.DNSName // "<machine>.<tailnet>.ts.net"' | sed 's|\.$||')"
 echo "Laptop agents can now reach OTLP at:"
-echo "  $(tailscale status --self --json 2>/dev/null | jq -r '.Self.DNSName // "<machine>.<tailnet>.ts.net"' | sed 's|\.$||'):14318  (HTTP)"
-echo "  $(tailscale status --self --json 2>/dev/null | jq -r '.Self.DNSName // "<machine>.<tailnet>.ts.net"' | sed 's|\.$||'):14317  (gRPC)"
+echo "  ${_host}:14318  (HTTP)"
+echo "  ${_host}:14317  (gRPC)"
+echo "The route-receipt reconciler (macf#444, CI) can query Tempo at:"
+echo "  http://${_host}:13200  (Tempo query API — set as TEMPO_QUERY_ENDPOINT repo var)"
 echo ""
 echo "Set MACF_OTEL_ENDPOINT=http://<that-hostname>:14318 in laptop's macf init/update."

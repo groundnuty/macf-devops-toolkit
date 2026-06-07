@@ -237,7 +237,7 @@ doctor-otel:  ## Pattern A defense (silent-fallback-hazards Instance 8 Tier 4): 
 	@bash hack/doctor-otel.sh
 
 .PHONY: tailscale-otlp-up
-tailscale-otlp-up:  ## Expose OTLP ports (14317/14318/4317/4318) over the tailnet via tailscale serve. ONE-SHOT operator action; persistent across tailscaled restarts. Use MACF_OTEL_ENDPOINT=http://<machine>.<tailnet>.ts.net:14318 on remote agents.
+tailscale-otlp-up:  ## Expose OTLP ingest (14317/14318/4317/4318) + Tempo query (13200) over the tailnet via tailscale serve. ONE-SHOT operator action; persistent across tailscaled restarts. Agents: MACF_OTEL_ENDPOINT=http://<machine>.<tailnet>.ts.net:14318. Reconciler (macf#444): TEMPO_QUERY_ENDPOINT=http://<machine>.<tailnet>.ts.net:13200 (gate :13200 by ACL).
 	@bash hack/tailscale-otlp-up.sh
 
 .PHONY: tailscale-otlp-down
