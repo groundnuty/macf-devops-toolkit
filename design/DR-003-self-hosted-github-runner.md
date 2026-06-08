@@ -42,7 +42,7 @@ The spike's A/B routes **real** `issue_comment`/PR events through the VM runner 
 2. **Fork-PR toggles OFF** + **fork-approval-required** on `groundnuty/macf` + `groundnuty/macf-actions` (operator — bot is 403). Without this a fork PR's workflow runs on the VM with secrets = RCE.
 3. **Org-scoped registration token** (operator / org-admin — bot is 403).
 4. **Runner group scoped** to `macf` + `macf-actions` only; **egress restricted** to agent host + Tempo (operator / org-admin).
-5. **Inject path reconciled (#52 ↔ #91)** — on self-hosted, routing must inject via the **no-SSH direct-helper** path and `AGENT_SSH_KEY` must NOT be exposed to the runner. See the section below. macf-actions#52 currently ships only the SSH path; until the no-SSH branch lands the low-priv bound does NOT hold on the runner.
+5. **Inject path reconciled (#52 ↔ #91)** — on self-hosted, routing must inject via the **no-SSH direct-helper** path and `AGENT_SSH_KEY` must NOT be exposed to the runner. See the section below. macf-actions#52 currently ships only the SSH path; until the no-SSH branch lands (tracked: **macf-actions#54**) the low-priv bound does NOT hold on the runner.
 
 This PR (scaffolding) wires **none** of register/start — it is inert and reversible until the gates clear.
 
@@ -54,7 +54,7 @@ macf-actions#52 enabled the self-hosted runner (parameterized `runs-on`, skipped
 
 **Requirement (the bound's precondition on the routing side):** on `runner.environment == 'self-hosted'`, routing must inject by calling the helper **locally** — `sudo -u $AGENT_OWNER "$HELPER" "$TARGET" "$PROMPT"` (base64-decoded per #47), the exact invocation #91's single-command sudoers grant authorizes — and must **not** materialize `AGENT_SSH_KEY` on the box. No SSH, no agent-host shell key. This is the no-SSH direct-helper follow-up #52 offered; it is a **hard gate**, not an optimization.
 
-**#91 needs no change** — its sudoers grant (`macf-runner ALL=($AGENT_OWNER) NOPASSWD: $HELPER`) is purpose-built for exactly this local invocation. The reconciliation is on the routing side (code-agent): land the self-hosted no-SSH branch and ensure `AGENT_SSH_KEY` is not exposed to the self-hosted arm.
+**#91 needs no change** — its sudoers grant (`macf-runner ALL=($AGENT_OWNER) NOPASSWD: $HELPER`) is purpose-built for exactly this local invocation. The reconciliation is on the routing side (code-agent): land the self-hosted no-SSH branch and ensure `AGENT_SSH_KEY` is not exposed to the self-hosted arm — **tracked as macf-actions#54**.
 
 ## Ephemeral + respawn
 
