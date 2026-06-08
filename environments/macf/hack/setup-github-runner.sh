@@ -42,6 +42,68 @@ SUDOERS_FILE="/etc/sudoers.d/macf-runner-tmux-send"
 die() { echo "FATAL: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "this phase needs root (run via sudo); current uid=$(id -u)"; }
 
+# --- low-priv bound verification (DR-003 MUST, #91 review) ---------------------
+# The bound rests on one precondition: $RUNNER_USER must not be able to REPLACE the
+# sudoers-allowed helper. If it can (rewrite the file, or write+traverse to a parent
+# dir to swap it), the NOPASSWD grant becomes arbitrary code as $AGENT_OWNER — the
+# bound collapses to full-$AGENT_OWNER, the exact thing this setup prevents.
+#
+# We model standard POSIX perms with TRAVERSAL: an un-searchable ancestor (e.g. a
+# 0750 home dir) makes everything below it unreachable to $RUNNER_USER, so a deeper
+# world-writable dir is not actually exploitable. Pure-bash (no sudo) so it's the
+# same check whether run here in test or as root at setup. (ACLs aren't modelled;
+# this host's chain has none.)
+_runner_in_group() { id -nG "$RUNNER_USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$1"; }
+# Can $RUNNER_USER write (or chmod, if owner) path $1?
+_runner_can_write() {
+  local owner group ugo
+  owner="$(stat -c '%U' "$1" 2>/dev/null)" || return 0   # unstat-able → fail closed
+  group="$(stat -c '%G' "$1" 2>/dev/null)" || return 0
+  ugo="$(stat -c '%a' "$1" 2>/dev/null)" || return 0; ugo="${ugo: -3}"
+  [ "$owner" = "$RUNNER_USER" ] && return 0               # owner can chmod itself writable
+  case "${ugo:2:1}" in 2|3|6|7) return 0 ;; esac          # other-write
+  case "${ugo:1:1}" in 2|3|6|7) _runner_in_group "$group" && return 0 ;; esac
+  return 1
+}
+# Can $RUNNER_USER search (traverse) dir $1?
+_runner_can_search() {
+  local owner group ugo
+  owner="$(stat -c '%U' "$1" 2>/dev/null)" || return 1
+  group="$(stat -c '%G' "$1" 2>/dev/null)" || return 1
+  ugo="$(stat -c '%a' "$1" 2>/dev/null)" || return 1; ugo="${ugo: -3}"
+  [ "$owner" = "$RUNNER_USER" ] && return 0
+  case "${ugo:2:1}" in 1|3|5|7) return 0 ;; esac          # other-exec
+  case "${ugo:1:1}" in 1|3|5|7) _runner_in_group "$group" && return 0 ;; esac
+  return 1
+}
+# Walk / → $1; die if $RUNNER_USER can replace the helper. A writable+reachable dir
+# lets it swap the child (unless sticky — sticky blocks renaming others' entries);
+# the file itself dies if writable+reachable. Writable-but-unreachable dirs are a
+# non-fatal latent-risk note (exploitable only if an ancestor's perms later loosen).
+assert_helper_unreplaceable() {
+  local helper="$1" c i reachable=1 p="$1"
+  local -a comps=()
+  while :; do comps=("$p" "${comps[@]}"); [ "$p" = "/" ] && break; p="$(dirname "$p")"; done
+  local n=${#comps[@]}
+  for ((i=0; i<n; i++)); do
+    c="${comps[$i]}"
+    if [ "$i" -eq $((n-1)) ]; then                        # the helper file itself
+      if [ "$reachable" = 1 ] && _runner_can_write "$c"; then
+        die "SECURITY: helper '$c' is writable by '$RUNNER_USER' → it could rewrite the sudoers-allowed script and run code as '$AGENT_OWNER'. Make it root/$AGENT_OWNER-owned, mode<=0755 (owner not $RUNNER_USER), then re-run."
+      fi
+    else                                                  # an ancestor directory
+      if [ "$reachable" = 1 ]; then
+        if _runner_can_write "$c" && ! [ -k "$c" ]; then
+          die "SECURITY: directory '$c' is writable+reachable by '$RUNNER_USER' → it could swap '$helper' (or its subtree) and run code as '$AGENT_OWNER'. Tighten its perms (root-owned, no group/other write) before re-running."
+        fi
+      elif _runner_can_write "$c" && ! [ -k "$c" ]; then
+        echo "[setup] note: '$c' is writable by '$RUNNER_USER' but currently UNREACHABLE (an ancestor denies traversal). Latent risk only — tighten if that ancestor's perms might loosen." >&2
+      fi
+      [ "$reachable" = 1 ] && { _runner_can_search "$c" || reachable=0; }
+    fi
+  done
+}
+
 print_gates() {
   cat <<'GATES'
 === GATE CHECKLIST — ALL required before register (DR-003) ===
@@ -59,6 +121,14 @@ phase_setup() {
 
   echo "[setup] installing single-command sudoers grant: ${RUNNER_USER} may run ONLY the send-helper as ${AGENT_OWNER}"
   [ -x "$SEND_HELPER" ] || die "send helper not executable at $SEND_HELPER (set SEND_HELPER=)"
+  # MUST (DR-003 / #91 review): assert — don't assume — that RUNNER_USER cannot
+  # replace the sudoers-allowed helper. Check the invoked path AND its resolved
+  # target (symlink repoint) plus every ancestor dir. Runs BEFORE the grant is
+  # written, so a violated precondition never installs the dangerous grant.
+  assert_helper_unreplaceable "$SEND_HELPER"
+  _resolved="$(readlink -f "$SEND_HELPER")" || die "cannot resolve $SEND_HELPER"
+  [ "$_resolved" = "$SEND_HELPER" ] || assert_helper_unreplaceable "$_resolved"
+  echo "[setup] verified: '$RUNNER_USER' cannot replace '$SEND_HELPER' (traversal + write checked up the full path) — low-priv bound holds"
   printf '%s ALL=(%s) NOPASSWD: %s\n' "$RUNNER_USER" "$AGENT_OWNER" "$SEND_HELPER" > "$SUDOERS_FILE"
   chmod 0440 "$SUDOERS_FILE"
   visudo -cf "$SUDOERS_FILE" || { rm -f "$SUDOERS_FILE"; die "sudoers validation failed — removed"; }
@@ -132,24 +202,43 @@ phase_register() {
   if [ "$EPHEMERAL" = "true" ]; then
     echo "[register] ephemeral mode → install the systemd respawn unit (needs RUNNER_TOKEN_CMD in /etc/macf-github-runner.env)"
     [ -f /etc/macf-github-runner.env ] || die "create /etc/macf-github-runner.env with RUNNER_TOKEN_CMD=... first (token-mint credential)"
+    # NOTE 2 (DR-003 / #91 review): the env file holds the org token-mint credential,
+    # reachable by a macf-runner RCE via /proc/self/environ — so it MUST be root-owned
+    # and unreadable by group/other. Assert it (true-by-construction, not by-trust).
+    _env_owner="$(stat -c '%U' /etc/macf-github-runner.env)"
+    _env_mode="$(stat -c '%a' /etc/macf-github-runner.env)"
+    [ "$_env_owner" = "root" ] || die "/etc/macf-github-runner.env must be root-owned (is: $_env_owner) — it holds the token-mint credential (DR-003)"
+    case "${_env_mode: -2}" in 00) : ;; *) die "/etc/macf-github-runner.env must be 0600 / group+other unreadable (is: $_env_mode) — holds the token-mint credential (DR-003)" ;; esac
     systemctl enable --now macf-github-runner.service
   else
     echo "[register] non-ephemeral (spike) → one-shot config + svc.sh install"
-    sudo -u "$RUNNER_USER" bash -c "cd '$RUNNER_DIR' && ./config.sh --unattended --replace --url '$ORG_URL' --token '$REG_TOKEN' --labels '$LABELS' --runnergroup '$RUNNER_GROUP' --name macf-vm-\$(hostname -s)"
+    # MINOR (#91 review): pass REG_TOKEN via preserved env, not interpolated into the
+    # bash -c string, so it isn't visible in the wrapper's argv. (config.sh still takes
+    # --token as an arg → briefly ps-visible during its own short run; the registration
+    # token is short-lived + single-use, so the residual is bounded.)
+    export REG_TOKEN
+    sudo --preserve-env=REG_TOKEN -u "$RUNNER_USER" bash -c '
+      cd "$1" || exit 1
+      ./config.sh --unattended --replace --url "$2" --token "$REG_TOKEN" \
+        --labels "$3" --runnergroup "$4" --name "macf-vm-$(hostname -s)"
+    ' _ "$RUNNER_DIR" "$ORG_URL" "$LABELS" "$RUNNER_GROUP"
     "${RUNNER_DIR}/svc.sh" install "$RUNNER_USER"
     "${RUNNER_DIR}/svc.sh" start
   fi
   echo "[register] DONE."
 }
 
-case "${1:-}" in
-  setup)    phase_setup ;;
-  register) phase_register ;;
-  status)
-    echo "user: $(id "$RUNNER_USER" 2>/dev/null || echo 'NOT created')"
-    echo "runner dir: $([ -f "${RUNNER_DIR}/run.sh" ] && echo "$RUNNER_DIR (installed)" || echo 'NOT installed')"
-    echo "sudoers grant: $([ -f "$SUDOERS_FILE" ] && echo present || echo absent)"
-    echo "systemd unit: $(systemctl list-unit-files macf-github-runner.service 2>/dev/null | grep -q macf && echo installed || echo absent)"
-    ;;
-  *) echo "usage: $0 {setup|register|status}"; echo; print_gates ;;
-esac
+# Sourceable for tests (e.g. the write-protection assert) without running dispatch.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-}" in
+    setup)    phase_setup ;;
+    register) phase_register ;;
+    status)
+      echo "user: $(id "$RUNNER_USER" 2>/dev/null || echo 'NOT created')"
+      echo "runner dir: $([ -f "${RUNNER_DIR}/run.sh" ] && echo "$RUNNER_DIR (installed)" || echo 'NOT installed')"
+      echo "sudoers grant: $([ -f "$SUDOERS_FILE" ] && echo present || echo absent)"
+      echo "systemd unit: $(systemctl list-unit-files macf-github-runner.service 2>/dev/null | grep -q macf && echo installed || echo absent)"
+      ;;
+    *) echo "usage: $0 {setup|register|status}"; echo; print_gates ;;
+  esac
+fi
