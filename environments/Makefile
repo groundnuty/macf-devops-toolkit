@@ -244,6 +244,10 @@ tailscale-otlp-up:  ## Expose OTLP ingest (14317/14318/4317/4318) + Tempo query 
 tailscale-otlp-down:  ## Tear down `tailscale serve` config (inverse of tailscale-otlp-up).
 	@bash hack/tailscale-otlp-down.sh
 
+.PHONY: github-runner-setup
+github-runner-setup:  ## DR-003/#90: host-prep the LOW-PRIV self-hosted GH Actions runner (macf-runner user + single-command sudoers send-helper grant + download + ephemeral respawn wrapper + systemd unit). NEEDS sudo. Does NOT register/start — gated on REG_TOKEN + macf-actions#47 merged + fork-PR toggles off; then: REG_TOKEN=... sudo bash hack/setup-github-runner.sh register
+	@bash hack/setup-github-runner.sh setup
+
 .PHONY: langfuse-bootstrap
 langfuse-bootstrap:  ## Generate ALL Langfuse secrets (subchart auth + headless-init + Collector api-keys) + restart pods. ONE-SHOT.
 	@bash hack/langfuse-bootstrap.sh
