@@ -38,7 +38,7 @@ The grant is unrestricted on arguments (it must be — the router has to reach *
 
 The spike's A/B routes **real** `issue_comment`/PR events through the VM runner during the measurement window — that **is** "serving real routing," at full blast radius for the duration. So these gate the spike, not just "permanent":
 
-1. **T4 — `macf-actions#47`** (`PR_TITLE` injection hardening: pass as data, not interpolated) **landed.** Currently OPEN.
+1. **T4 — the router the runner runs must be hardened AND pinned.** `macf-actions#47` (`PR_TITLE` injection hardening: pass as data, not interpolated) has **merged** (to `release/v1.3.1`). But the merge is not the operative gate: the VM runner executes whatever `agent-router.yml` ref the **macf caller pins**, currently `@v1.3.4` (not yet cut). Gate-1 is satisfied only when **`v1.3.4` is tagged carrying #47 + #49 AND the macf caller is pinned to it with the `runs-on` input set to self-hosted.** Until then the router the runner would run is still pre-T4 / hosted-only. (science-agent is bundling #47 + #49 into `v1.3.4`; see #90 thread 2026-06-08.)
 2. **Fork-PR toggles OFF** + **fork-approval-required** on `groundnuty/macf` + `groundnuty/macf-actions` (operator — bot is 403). Without this a fork PR's workflow runs on the VM with secrets = RCE.
 3. **Org-scoped registration token** (operator / org-admin — bot is 403).
 4. **Runner group scoped** to `macf` + `macf-actions` only; **egress restricted** to agent host + Tempo (operator / org-admin).
