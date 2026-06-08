@@ -8,10 +8,11 @@
 # SECURITY (DR-003): the runner runs workflow code on the VM as its registered
 # user. We run as a DEDICATED LOW-PRIV `macf-runner` user FROM THE START
 # (operator-confirmed 2026-06-08) — NOT `ubuntu` — whose ONLY elevated grant is
-# running the tmux send-helper as the agent owner via a single-command sudoers
-# rule. NO `*.pem` App keys, NO `~/.kube`, NO other agents' /proc. So a workflow
-# RCE (PR_TITLE injection, fork-PR secrets) is bounded to "can send a tmux
-# prompt", not "owns the host + every bot identity".
+# running the tmux send-helper, per on-VM agent, as that agent's ssh_user, via
+# single-command sudoers rules (one helper abspath per agent, enumerated from the
+# agent registry the router reads). NO `*.pem` App keys, NO `~/.kube`, NO other
+# agents' /proc. So a workflow RCE (PR_TITLE injection, fork-PR secrets) is bounded
+# to "can send a tmux prompt to an agent", not "owns the host + every bot identity".
 #
 # GATES — `register`/`start` are intentionally NOT run by `setup`. Do NOT
 # register until ALL hold (see DR-003 "Gates"):
@@ -24,7 +25,7 @@
 #   setup-github-runner.sh setup       # host prep: user + minimal grant + download + wrapper + unit. No token. SAFE/reversible.
 #   REG_TOKEN=<org-reg-token> setup-github-runner.sh register   # config + install service. GATED — prints the checklist, needs REG_TOKEN.
 #   setup-github-runner.sh status      # show what's installed
-# Override via env: RUNNER_USER RUNNER_DIR RUNNER_VERSION ORG_URL LABELS RUNNER_GROUP EPHEMERAL AGENT_OWNER SEND_HELPER
+# Override via env: RUNNER_USER RUNNER_DIR RUNNER_VERSION ORG_URL LABELS RUNNER_GROUP EPHEMERAL AGENT_OWNER SEND_HELPER AGENT_CONFIG
 
 set -euo pipefail
 
@@ -37,7 +38,11 @@ RUNNER_GROUP="${RUNNER_GROUP:-macf-vm-runners}"    # operator scopes this group 
 EPHEMERAL="${EPHEMERAL:-true}"                      # production posture; spike MAY use false for simplicity (DR-003)
 AGENT_OWNER="${AGENT_OWNER:-ubuntu}"               # the user the agent tmux sessions run as
 SEND_HELPER="${SEND_HELPER:-$(cd "$(dirname "$0")/../../.." && pwd)/.claude/scripts/tmux-send-to-claude.sh}"
-SUDOERS_FILE="/etc/sudoers.d/macf-runner-tmux-send"
+# The router (macf-actions#53 no-SSH inject) calls ${workspace_dir}/.claude/scripts/
+# tmux-send-to-claude.sh as each TARGET agent's ssh_user. The grant is derived from
+# this registry (same one the router reads) so it authorizes EXACTLY those abspaths.
+AGENT_CONFIG="${AGENT_CONFIG:-$(cd "$(dirname "$0")/../../.." && pwd)/.github/agent-config.json}"
+SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/macf-runner-tmux-send}"
 
 die() { echo "FATAL: $*" >&2; exit 1; }
 need_root() { [ "$(id -u)" -eq 0 ] || die "this phase needs root (run via sudo); current uid=$(id -u)"; }
@@ -104,6 +109,57 @@ assert_helper_unreplaceable() {
   done
 }
 
+# Install the sudoers grant: $RUNNER_USER may run ONLY the send-helper, as each on-VM
+# agent's ssh_user, for EXACTLY the abspaths the router invokes. The router
+# (macf-actions#53 no-SSH inject) calls `${workspace_dir}/.claude/scripts/tmux-send-to-
+# claude.sh` as the target agent's ssh_user, per target — and these are per-workspace
+# copies at DIFFERENT abspaths. sudo matches the literal command path, so a single-path
+# grant would silently deny inject to every other agent. We enumerate from the same
+# registry the router reads ($AGENT_CONFIG), grant one sudoers line per runas-user
+# (comma-separated helpers), and assert each helper unreplaceable. Local (existing)
+# helpers only — an off-VM agent uses SSH, not this path. Re-run setup when agents change.
+install_sudoers_grant() {
+  declare -A grants=()
+  local count=0 runas wdir helper rp suffix=".claude/scripts/tmux-send-to-claude.sh"
+  if [ -r "$AGENT_CONFIG" ] && command -v jq >/dev/null 2>&1; then
+    echo "[setup] deriving inject-target helpers from agent registry: $AGENT_CONFIG"
+    local rows
+    rows="$(jq -r '.agents | to_entries[] | "\(.value.ssh_user)\t\(.value.workspace_dir)"' "$AGENT_CONFIG")" \
+      || die "failed to parse agent registry $AGENT_CONFIG — refusing to fall back to a single-agent grant (that would silently deny inject to the other agents)"
+    while IFS=$'\t' read -r runas wdir; do
+      [ -n "$runas" ] && [ -n "$wdir" ] || continue
+      helper="${wdir%/}/${suffix}"
+      if [ ! -x "$helper" ]; then
+        echo "[setup] note: skip '$helper' (runas=$runas) — not present locally; an off-VM agent uses SSH, not the direct-helper path" >&2
+        continue
+      fi
+      assert_helper_unreplaceable "$helper"
+      rp="$(readlink -f "$helper")"; [ "$rp" = "$helper" ] || assert_helper_unreplaceable "$rp"
+      if [ -n "${grants[$runas]:-}" ]; then grants[$runas]="${grants[$runas]}, $helper"; else grants[$runas]="$helper"; fi
+      count=$((count + 1))
+      echo "[setup]   + ${runas} may run ${helper}"
+    done <<< "$rows"
+  fi
+  if [ "$count" -eq 0 ]; then
+    echo "[setup] no registry-derived helpers usable; falling back to single grant ${AGENT_OWNER} → ${SEND_HELPER}"
+    [ -x "$SEND_HELPER" ] || die "no usable $AGENT_CONFIG and send helper not executable at $SEND_HELPER (set AGENT_CONFIG= or SEND_HELPER=)"
+    assert_helper_unreplaceable "$SEND_HELPER"
+    rp="$(readlink -f "$SEND_HELPER")"; [ "$rp" = "$SEND_HELPER" ] || assert_helper_unreplaceable "$rp"
+    grants[$AGENT_OWNER]="$SEND_HELPER"
+    count=1
+  fi
+  local tmp="${SUDOERS_FILE}.tmp.$$" u
+  : > "$tmp"
+  for u in "${!grants[@]}"; do
+    printf '%s ALL=(%s) NOPASSWD: %s\n' "$RUNNER_USER" "$u" "${grants[$u]}" >> "$tmp"
+  done
+  chmod 0440 "$tmp"
+  visudo -cf "$tmp" || { rm -f "$tmp"; die "sudoers validation failed — not installed"; }
+  mv "$tmp" "$SUDOERS_FILE"
+  echo "[setup] installed $SUDOERS_FILE — ${count} helper(s) verified unreplaceable + authorized:"
+  sed 's/^/[setup]   /' "$SUDOERS_FILE"
+}
+
 print_gates() {
   cat <<'GATES'
 === GATE CHECKLIST — ALL required before register (DR-003) ===
@@ -119,19 +175,8 @@ phase_setup() {
   echo "[setup] creating low-priv runner user '${RUNNER_USER}' (no login shell, no sudo except the send-helper)"
   id "$RUNNER_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$RUNNER_USER"
 
-  echo "[setup] installing single-command sudoers grant: ${RUNNER_USER} may run ONLY the send-helper as ${AGENT_OWNER}"
-  [ -x "$SEND_HELPER" ] || die "send helper not executable at $SEND_HELPER (set SEND_HELPER=)"
-  # MUST (DR-003 / #91 review): assert — don't assume — that RUNNER_USER cannot
-  # replace the sudoers-allowed helper. Check the invoked path AND its resolved
-  # target (symlink repoint) plus every ancestor dir. Runs BEFORE the grant is
-  # written, so a violated precondition never installs the dangerous grant.
-  assert_helper_unreplaceable "$SEND_HELPER"
-  _resolved="$(readlink -f "$SEND_HELPER")" || die "cannot resolve $SEND_HELPER"
-  [ "$_resolved" = "$SEND_HELPER" ] || assert_helper_unreplaceable "$_resolved"
-  echo "[setup] verified: '$RUNNER_USER' cannot replace '$SEND_HELPER' (traversal + write checked up the full path) — low-priv bound holds"
-  printf '%s ALL=(%s) NOPASSWD: %s\n' "$RUNNER_USER" "$AGENT_OWNER" "$SEND_HELPER" > "$SUDOERS_FILE"
-  chmod 0440 "$SUDOERS_FILE"
-  visudo -cf "$SUDOERS_FILE" || { rm -f "$SUDOERS_FILE"; die "sudoers validation failed — removed"; }
+  echo "[setup] installing single-command sudoers grant: ${RUNNER_USER} may run ONLY the send-helper, per on-VM agent (run-as that agent's ssh_user). MUST (DR-003/#91): each helper is asserted unreplaceable before the grant is written, so a violated precondition never installs the grant."
+  install_sudoers_grant
 
   local ver="$RUNNER_VERSION"
   if [ -z "$ver" ]; then
