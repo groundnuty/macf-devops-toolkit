@@ -290,10 +290,24 @@ clickhouse:
 
   # ClickHouse bundled zookeeper for CH's replication/coordination. With
   # clusterEnabled=false + replicaCount=1 ZK is almost idle; trim to 1.
+  #
+  # Memory: was `resourcesPreset: nano` (192Mi limit), which OOMKilled the ZK
+  # pod repeatedly (observed 2026-06-16: 215 restarts, exit 137 — the JVM heap
+  # + non-heap overhead exceeds 192Mi even when ZK is near-idle). A starved ZK
+  # destabilizes CH's replicated-table coordination on top of the CH startup
+  # crashloop. Replace the preset with an explicit block: 512Mi limit gives the
+  # ZooKeeper JVM comfortable headroom for a single idle coordinator; requests
+  # stay modest so it schedules easily on the dev VM. (An explicit `resources`
+  # block overrides `resourcesPreset` — don't set both.)
   zookeeper:
     enabled: true
     replicaCount: 1
-    resourcesPreset: nano
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
     persistence:
       enabled: true
       storageClass: local-path
