@@ -36,6 +36,17 @@ target/
 *.pem
 *.key
 *.p12
+# Real secret manifests + recovered credentials — NEVER commit.
+# Only the *.example templates are tracked.
+secrets.yaml
+*.secret.yaml
+*-secrets.yaml
+*.recovered.yaml
+recovered-secrets/
+.secrets-recovery/
+# k3s cluster token — real one is gitignored; only .token.example is tracked.
+k3s/.token
+**/k3s/.token
 
 # Logs
 *.log
