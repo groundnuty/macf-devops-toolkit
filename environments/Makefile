@@ -6,8 +6,10 @@
 # Pattern mirrored from groundnuty/onedata/spice-deployments — spice's folder
 # is actually misspelled as `enviroments/` (sic); we corrected the name here
 # to `environments/` without touching any other structural convention.
-# Divergences for this workspace: k3d instead of bare-metal k3s, no airgap
-# image handling, no backup/restore targets (added later if needed).
+# Divergences for this workspace: the OLD VM ran k3d (see ##@ Cluster bootstrap).
+# The NEW monitoring VM runs native k3s with airgap install + etcd backup/restore
+# (see ##@ Native k3s, added in DR-004). Both target sets coexist here during the
+# migration; the k3d set retires once the old VM is decommissioned.
 
 SHELL = /bin/sh
 
