@@ -254,12 +254,23 @@ clickhouse:
   # existing system table state. Bumped to 300s initialDelay + 10
   # failureThreshold (~400s grace total) so one-time startup spikes don't
   # trigger restart cascades.
+  #
+  # timeoutSeconds (added 2026-06-16): the override above tuned *startup*
+  # grace but left timeoutSeconds at the chart default of 1s — the per-attempt
+  # deadline for a single probe. Under steady-state load (background merges +
+  # Grafana/Langfuse-worker queries), a TCP accept on :8123 can take >1s, so
+  # the liveness probe missed 10 attempts in a row and kubelet killed an
+  # otherwise-healthy CH ~every 10min (observed: 28 restarts over 4h46m, all
+  # "Liveness probe failed", while CH was serving queries between flaps).
+  # Bump both probes to 5s so a momentarily-busy-but-alive CH isn't reaped.
   livenessProbe:
     initialDelaySeconds: 300
     failureThreshold: 10
+    timeoutSeconds: 5
   readinessProbe:
     initialDelaySeconds: 300
     failureThreshold: 10
+    timeoutSeconds: 5
 
   # ConfigMap injected via extraDeploy — provides the patched entrypoint
   # script referenced by `command:` above. Hot-injected here rather than
