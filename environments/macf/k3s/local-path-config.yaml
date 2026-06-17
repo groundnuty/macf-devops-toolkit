@@ -1,0 +1,44 @@
+# Reconfigure k3s's bundled local-path-provisioner to write PVC data on the
+# EXTERNAL volume (/mnt/volume1), NOT the default /var/lib/.../storage on the
+# root disk. Applied after k3s install (Makefile: k3s-install -> applies this).
+#
+# Why this approach: k3s ships local-path-provisioner and our charts use
+# `storageClass: local-path`. Rather than disable it and roll our own, we just
+# override its target path via its config ConfigMap. One ConfigMap, PVC
+# manifests untouched. (DR-004 option (a).)
+#
+# The provisioner reads this ConfigMap (name/namespace are fixed by k3s).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: kube-system
+data:
+  # All dynamically-provisioned PVCs land here, on /dev/vdb.
+  config.json: |-
+    {
+      "nodePathMap": [
+        {
+          "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+          "paths": ["/mnt/volume1/k3s-storage"]
+        }
+      ]
+    }
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "$VOL_DIR"
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      containers:
+        - name: helper-pod
+          image: rancher/mirrored-library-busybox:1.36.1
+          imagePullPolicy: IfNotPresent

@@ -1,0 +1,60 @@
+# k3s server config — macf observability VM (orzech-dev-agents-monitoring)
+# Installed to /etc/rancher/k3s/config.yaml by `make k3s-install`.
+#
+# Source-of-truth lives here in git. Modeled on
+# groundnuty/onedata/spice-deployments/enviroments/<env>/k3s/config.yaml, with
+# two deliberate divergences (see DR-004):
+#   1. cluster TOKEN is NOT committed here — installed separately from the
+#      gitignored k3s/.token file (spice-deployments commits it in plaintext;
+#      we do not — this whole migration exists to keep secrets out of VCS).
+#   2. EVERYTHING stateful is pinned to the external /dev/vdb volume
+#      (/mnt/volume1), never the root disk — the OOM/disk incidents taught us
+#      nothing of value may live on the root disk or inside an ephemeral node.
+
+# Embedded etcd instead of sqlite/kine — REQUIRED for etcd snapshots.
+cluster-init: true
+
+# Cluster token read from a file (NOT inlined here — keeps the secret out of
+# git). `make k3s-install` copies the gitignored k3s/.token to this path.
+token-file: /etc/rancher/k3s/.token
+
+# Let the ubuntu user (gid 1000) read the kubeconfig.
+write-kubeconfig-mode: "0660"
+write-kubeconfig-group: 1000
+
+tls-san:
+  - "127.0.0.1"
+  - "localhost"
+  - "orzech-dev-agents-monitoring"
+  - "192.168.102.15"
+  # Add the tailnet MagicDNS name here once `make tailscale-otlp-up` is run,
+  # so off-VM agents can reach the API/OTLP over the tailnet.
+
+# Disable bundled components we replace or don't use:
+#   traefik       — not used (no ingress story in the spike; LoadBalancer Svcs instead)
+#   servicelb     — KEPT (native klipper ServiceLB binds host ports for our
+#                   stable OTLP 14317/14318 + Tempo 13200 endpoints; do NOT disable)
+#   local-storage — KEPT but RECONFIGURED to /mnt/volume1 (see local-path-config
+#                   ConfigMap in manifests/) so PVCs land on the external volume.
+disable: traefik
+
+# ---------------------------------------------------------------------------
+# EVERYTHING ON THE EXTERNAL VOLUME (/dev/vdb -> /mnt/volume1), NOT root disk.
+# ---------------------------------------------------------------------------
+# data-dir holds: embedded etcd db, containerd state, container IMAGES, agent
+# state, the kubelet dir — i.e. all cluster + container storage. Pinning it to
+# /mnt/volume1 keeps the root disk clean and means a root-disk loss never costs
+# cluster state.
+data-dir: /mnt/volume1/k3s
+
+# ---------------------------------------------------------------------------
+# DURABILITY: scheduled etcd snapshots, ON THE EXTERNAL VOLUME of THIS VM.
+# ---------------------------------------------------------------------------
+# Every 6h, keep ~7 days, compressed. Snapshot dir is on /mnt/volume1 so it
+# survives a root-disk wipe and is included in the volume's own backup scope.
+# (An off-box copy target — make etcd-backup-sync — guards against whole-VM
+# loss; see DR-004.)
+etcd-snapshot-schedule-cron: "0 */6 * * *"
+etcd-snapshot-retention: 28
+etcd-snapshot-dir: /mnt/volume1/k3s-etcd-snapshots
+etcd-snapshot-compress: true

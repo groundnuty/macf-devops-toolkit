@@ -263,9 +263,27 @@ clickhouse:
   # otherwise-healthy CH ~every 10min (observed: 28 restarts over 4h46m, all
   # "Liveness probe failed", while CH was serving queries between flaps).
   # Bump both probes to 5s so a momentarily-busy-but-alive CH isn't reaped.
+  #
+  # NOTE (2026-06-17): the bitnami CH subchart in langfuse-k8s 1.5.27 does NOT
+  # expose a `startupProbe` value (verified via helm template — only
+  # livenessProbe/readinessProbe overrides render). A startupProbe would be the
+  # textbook fix for the chronic bg-init/foreground bind-race crashloop (PRs
+  # #87/#98/#99), since it gates liveness/readiness until CH starts once.
+  #
+  # LIVENESS RELAXED (2026-06-17, k3s migration): even an IDLE CH (395Mi/6Gi,
+  # 0 active merges) was failing the tcpSocket :8123 liveness ~every 10min and
+  # getting kubelet-killed — the bitnami wrapper's bg-init/foreground transition
+  # makes :8123 momentarily unreachable for stretches longer than the old
+  # failureThreshold(10)×periodSeconds(10)=100s tolerance. Since a *liveness*
+  # kill on a working CH is pure harm (readiness already removes a flapping CH
+  # from the Service WITHOUT killing it), widen liveness to ride out the blips:
+  # failureThreshold 30 × periodSeconds 30 = 15min before a kill, so only a
+  # genuinely dead CH is restarted. readiness stays tight so traffic still only
+  # routes to a healthy CH.
   livenessProbe:
     initialDelaySeconds: 300
-    failureThreshold: 10
+    periodSeconds: 30
+    failureThreshold: 30
     timeoutSeconds: 5
   readinessProbe:
     initialDelaySeconds: 300

@@ -6,8 +6,10 @@
 # Pattern mirrored from groundnuty/onedata/spice-deployments — spice's folder
 # is actually misspelled as `enviroments/` (sic); we corrected the name here
 # to `environments/` without touching any other structural convention.
-# Divergences for this workspace: k3d instead of bare-metal k3s, no airgap
-# image handling, no backup/restore targets (added later if needed).
+# Divergences for this workspace: the OLD VM ran k3d (see ##@ Cluster bootstrap).
+# The NEW monitoring VM runs native k3s with airgap install + etcd backup/restore
+# (see ##@ Native k3s, added in DR-004). Both target sets coexist here during the
+# migration; the k3d set retires once the old VM is decommissioned.
 
 SHELL = /bin/sh
 
@@ -46,6 +48,23 @@ CLUSTER_STORAGE := $(VOLUME_DIR)/k3d-storage
 # --- k3d identifiers ------------------------------------------------------------
 CLUSTER_NAME  := macf
 REGISTRY_NAME := macf-mirror
+
+# --- Native k3s (new VM — DR-004) -----------------------------------------------
+# Coexists with k3d during migration: the old VM uses the k3d targets above;
+# the new monitoring VM uses the k3s targets below. Everything stateful (etcd,
+# images, PVCs, snapshots) is pinned to $(VOLUME_DIR) — never the root disk.
+K3S_DIR             := k3s
+K3S_VERSION_FILE    := $(K3S_DIR)/version.yaml
+ifneq ($(wildcard $(K3S_VERSION_FILE)),)
+K3S_VERSION := $(shell $(DEVBOX_RUN) yq e '.k3s_version // ""' $(K3S_VERSION_FILE) 2>/dev/null)
+K3S_DATA_DIR := $(shell $(DEVBOX_RUN) yq e '.data-dir // ""' $(K3S_DIR)/config.yaml 2>/dev/null)
+K3S_SNAPSHOT_DIR := $(shell $(DEVBOX_RUN) yq e '.etcd-snapshot-dir // ""' $(K3S_DIR)/config.yaml 2>/dev/null)
+endif
+# Cached airgap artifacts live on the external volume so reset+rebuild is fast/offline.
+K3S_CACHE  := $(VOLUME_DIR)/k3s-airgap/$(K3S_VERSION)
+# Off-box etcd-snapshot mirror target (override on CLI: make etcd-backup-sync ETCD_BACKUP_REMOTE=user@host:/path)
+ETCD_BACKUP_REMOTE ?=
+SUDO ?= sudo
 
 KUBECONFIG ?= $(HOME)/.kube/config
 export KUBECONFIG
@@ -132,8 +151,81 @@ registry-down:  ## Delete the k3d registry + wipe $(REGISTRY_DATA)
 	-@$(DEVBOX_RUN) k3d registry delete k3d-$(REGISTRY_NAME)
 	-@sudo rm -rf $(REGISTRY_DATA)
 
+# ################################################################################
+##@ Native k3s (new monitoring VM — DR-004)
+# ################################################################################
+# Airgap install: pinned k3s binary + airgap images cached on $(VOLUME_DIR) so
+# `make reset-k3s && make k3s-all` rebuilds in minutes, offline. ALL state
+# (etcd, images, PVCs, snapshots) lives on $(VOLUME_DIR), never the root disk.
+
+.PHONY: k3s-prereqs
+k3s-prereqs:  ## Verify /mnt/volume1 mounted + k3s/.token present before install
+	@test -d $(VOLUME_DIR) || { echo "FAIL: $(VOLUME_DIR) not mounted (format+mount /dev/vdb first)"; exit 1; }
+	@test -f $(K3S_DIR)/.token || { echo "FAIL: $(K3S_DIR)/.token missing. Run: cp $(K3S_DIR)/.token.example $(K3S_DIR)/.token && openssl rand -hex 32 > $(K3S_DIR)/.token"; exit 1; }
+	@$(SUDO) mkdir -p $(K3S_DATA_DIR) $(K3S_SNAPSHOT_DIR) $(VOLUME_DIR)/k3s-storage $(K3S_CACHE)
+	@echo "k3s prereqs OK: data-dir=$(K3S_DATA_DIR) snapshots=$(K3S_SNAPSHOT_DIR)"
+
+$(K3S_CACHE)/k3s:
+	@echo "Downloading k3s $(K3S_VERSION) binary -> $(K3S_CACHE) (cached on external volume)..."
+	@$(SUDO) mkdir -p $(K3S_CACHE)
+	@$(SUDO) curl -fL -o $(K3S_CACHE)/k3s "https://github.com/k3s-io/k3s/releases/download/$(subst +,%2B,$(K3S_VERSION))/k3s"
+	@$(SUDO) chmod +x $(K3S_CACHE)/k3s
+
+$(K3S_CACHE)/k3s-airgap-images-amd64.tar.zst:
+	@echo "Downloading k3s $(K3S_VERSION) airgap images -> $(K3S_CACHE)..."
+	@$(SUDO) mkdir -p $(K3S_CACHE)
+	@$(SUDO) curl -fL -o $(K3S_CACHE)/k3s-airgap-images-amd64.tar.zst "https://github.com/k3s-io/k3s/releases/download/$(subst +,%2B,$(K3S_VERSION))/k3s-airgap-images-amd64.tar.zst"
+
+$(K3S_CACHE)/install.sh:
+	@$(SUDO) mkdir -p $(K3S_CACHE)
+	@$(SUDO) curl -fL -o $(K3S_CACHE)/install.sh https://get.k3s.io
+	@$(SUDO) chmod +x $(K3S_CACHE)/install.sh
+
+.PHONY: k3s-install
+k3s-install: k3s-prereqs $(K3S_CACHE)/k3s $(K3S_CACHE)/k3s-airgap-images-amd64.tar.zst $(K3S_CACHE)/install.sh  ## Install native k3s from the committed config (airgap, cached)
+	@:$(call check_defined, K3S_VERSION, set k3s/version.yaml:k3s_version)
+	@echo "Installing k3s $(K3S_VERSION) (airgap, data on $(VOLUME_DIR))..."
+	@$(SUDO) mkdir -p /etc/rancher/k3s $(K3S_DATA_DIR)/agent/images
+	@$(SUDO) cp $(K3S_DIR)/config.yaml /etc/rancher/k3s/config.yaml
+	@$(SUDO) cp $(K3S_DIR)/.token /etc/rancher/k3s/.token
+	@$(SUDO) chmod 600 /etc/rancher/k3s/.token
+	@$(SUDO) cp $(K3S_CACHE)/k3s /usr/local/bin/k3s
+	@$(SUDO) chmod +x /usr/local/bin/k3s
+	@$(SUDO) cp $(K3S_CACHE)/k3s-airgap-images-amd64.tar.zst $(K3S_DATA_DIR)/agent/images/
+	@$(SUDO) INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_VERSION=$(K3S_VERSION) $(K3S_CACHE)/install.sh
+	@echo "Waiting for node Ready + applying local-path override (PVCs -> $(VOLUME_DIR))..."
+	@$(SUDO) k3s kubectl wait --for=condition=Ready node --all --timeout=120s
+	@$(SUDO) k3s kubectl apply -f $(K3S_DIR)/local-path-config.yaml
+	@$(SUDO) k3s kubectl -n kube-system rollout restart deployment/local-path-provisioner
+	@echo "k3s installed. etcd snapshots -> $(K3S_SNAPSHOT_DIR). Verify: sudo k3s etcd-snapshot ls"
+
+.PHONY: reset-k3s
+reset-k3s:  ## Uninstall k3s + wipe its data-dir (cached airgap artifacts survive for fast rebuild)
+	@echo -n "This removes k3s + ALL cluster data on $(K3S_DATA_DIR). PVC data + snapshots on $(VOLUME_DIR) are SEPARATE. Continue? [y/N] " && read a && [ "$${a:-N}" = "y" ] || { echo "Aborted."; exit 1; }
+	-@$(SUDO) /usr/local/bin/k3s-uninstall.sh
+	-@$(SUDO) rm -rf $(K3S_DATA_DIR)
+	@echo "k3s removed. Rebuild: make k3s-install (cached) + make argocd-bootstrap"
+
+.PHONY: k3s-all
+k3s-all: k3s-install argocd-bootstrap  ## = k3s-install + argocd-bootstrap (new VM bring-up)
+
+.PHONY: etcd-snapshot-ls
+etcd-snapshot-ls:  ## List etcd snapshots on the external volume
+	@$(SUDO) k3s etcd-snapshot ls 2>/dev/null || ls -lh $(K3S_SNAPSHOT_DIR) 2>/dev/null || echo "no snapshots yet at $(K3S_SNAPSHOT_DIR)"
+
+.PHONY: etcd-snapshot-now
+etcd-snapshot-now:  ## Take an on-demand etcd snapshot now
+	@$(SUDO) k3s etcd-snapshot save --name on-demand
+	@$(MAKE) etcd-snapshot-ls
+
+.PHONY: etcd-backup-sync
+etcd-backup-sync:  ## rsync etcd snapshots off-box (set ETCD_BACKUP_REMOTE=user@host:/path)
+	@test -n "$(ETCD_BACKUP_REMOTE)" || { echo "FAIL: set ETCD_BACKUP_REMOTE=user@host:/path (off-box dest for whole-VM-loss protection)"; exit 1; }
+	@echo "Syncing $(K3S_SNAPSHOT_DIR) -> $(ETCD_BACKUP_REMOTE) ..."
+	@$(SUDO) rsync -aHAX --numeric-ids --partial --info=progress2 $(K3S_SNAPSHOT_DIR)/ $(ETCD_BACKUP_REMOTE)/
+
 .PHONY: all
-all: cluster argocd-bootstrap  ## = cluster + argocd-bootstrap
+all: cluster argocd-bootstrap  ## = cluster + argocd-bootstrap (k3d / old VM)
 
 # ################################################################################
 ##@ ArgoCD bootstrap
@@ -236,13 +328,13 @@ check-tempo-ingestion:  ## Pattern A defense (silent-fallback-hazards Instance 8
 doctor-otel:  ## Pattern A defense (silent-fallback-hazards Instance 8 Tier 4): per-agent-process traces-emission invariant — detects stuck OTel exporters in long-lived claude processes. Override WINDOW_MINUTES=N (default 30).
 	@bash hack/doctor-otel.sh
 
-.PHONY: tailscale-otlp-up
-tailscale-otlp-up:  ## Expose OTLP ingest (14317/14318/4317/4318) + Tempo query (13200) over the tailnet via tailscale serve. ONE-SHOT operator action; persistent across tailscaled restarts. Agents: MACF_OTEL_ENDPOINT=http://<machine>.<tailnet>.ts.net:14318. Reconciler (macf#444): TEMPO_QUERY_ENDPOINT=http://<machine>.<tailnet>.ts.net:13200 (gate :13200 by ACL).
-	@bash hack/tailscale-otlp-up.sh
-
-.PHONY: tailscale-otlp-down
-tailscale-otlp-down:  ## Tear down `tailscale serve` config (inverse of tailscale-otlp-up).
-	@bash hack/tailscale-otlp-down.sh
+# NOTE (DR-004 / native k3s): the tailscale-otlp-up/down targets are GONE.
+# They were a k3d-era workaround — k3d's serverlb bound host ports to 127.0.0.1
+# only, so `tailscale serve` was needed to ALSO reach OTLP/Tempo over the tailnet.
+# Native k3s ServiceLB (klipper) binds LoadBalancer-service ports on EVERY host
+# interface (private IP + localhost + the tailnet IP) via iptables — so
+# central-collector-lb + tempo-query-lb already cover the tailnet with no extra
+# config. `tailscale serve` is redundant on k3s and was removed.
 
 .PHONY: github-runner-setup
 github-runner-setup:  ## DR-003/#90: host-prep the LOW-PRIV self-hosted GH Actions runner (macf-runner user + single-command sudoers send-helper grant + download + ephemeral respawn wrapper + systemd unit). NEEDS sudo. Does NOT register/start — gated on REG_TOKEN + macf-actions#47 merged + fork-PR toggles off; then: REG_TOKEN=... sudo bash hack/setup-github-runner.sh register

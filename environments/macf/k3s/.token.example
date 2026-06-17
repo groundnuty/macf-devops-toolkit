@@ -1,0 +1,6 @@
+# EXAMPLE — copy to `.token` (gitignored) and put the real cluster token here.
+# `make k3s-install` copies .token -> /etc/rancher/k3s/.token and k3s reads it
+# (via --token-file). NEVER commit the real .token.
+#
+# Generate a fresh token:  openssl rand -hex 32
+REPLACE_WITH_openssl_rand_hex_32

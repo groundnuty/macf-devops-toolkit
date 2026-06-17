@@ -1,0 +1,70 @@
+# LoadBalancer services exposing the observability UIs on EVERY interface of the
+# VM (private IP + localhost + tailnet), via native k3s ServiceLB (klipper).
+#
+# DR-004 / native k3s: on k3d these UIs were port-forward-only (`make pf-*`).
+# On k3s a `type: LoadBalancer` Service binds its port on all host interfaces
+# through klipper's iptables DNAT — no port-forward, no tailscale serve. Reach
+# them at http://<vm-ip>:<port> from anywhere that can route to the VM.
+#
+# Host ports chosen to not collide with the OTLP/Tempo LB ports (4317/4318/3200)
+# or each other:
+#   Grafana  :3000   Langfuse :3001   ArgoCD :8080 (http)
+#
+# These are RAW manifests applied by argocd alongside the charts (same pattern
+# as tempo-query-lb + central-collector-lb). The selectors mirror each chart's
+# Service selector — keep in sync if a chart upgrade changes labels.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-lb
+  namespace: monitoring
+  labels:
+    macf.dev/role: stable-grafana-ui
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/instance: kube-prom-stack
+    app.kubernetes.io/name: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web-lb
+  namespace: langfuse
+  labels:
+    macf.dev/role: stable-langfuse-ui
+spec:
+  type: LoadBalancer
+  selector:
+    app: web
+    app.kubernetes.io/instance: langfuse
+    app.kubernetes.io/name: langfuse
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3000
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: argocd-server-lb
+  namespace: argocd
+  labels:
+    macf.dev/role: stable-argocd-ui
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/instance: argocd
+    app.kubernetes.io/name: argocd-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

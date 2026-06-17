@@ -1,0 +1,32 @@
+# ArgoCD Application for the observability-UI LoadBalancer services
+# (Grafana :3000, Langfuse :3001, ArgoCD :8080), exposing them on every VM
+# interface via native k3s ServiceLB. DR-004.
+#
+# Sync-wave 2: after the charts that own the target pods (kube-prometheus-stack,
+# langfuse, argocd) are up, so the LB svclb pods' label-selectors resolve.
+# The manifest spans 3 namespaces; each Service carries its own namespace, so
+# the Application's destination namespace is nominal (argocd routes per-resource).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: ui-loadbalancers
+  namespace: argocd-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/ui-loadbalancers
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true

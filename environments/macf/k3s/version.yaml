@@ -1,0 +1,9 @@
+# Pinned k3s version — installed by `make k3s-install` (airgap: binary +
+# k3s-airgap-images-amd64.tar.zst downloaded for this exact version, cached on
+# /mnt/volume1 so `make reset-k3s && make all` rebuilds in minutes offline).
+#
+# v1.36.1+k3s1 = latest stable as of 2026-05-20 (live-fetched from
+# k3s-io/k3s releases on 2026-06-16). Operator directive: stay on the latest
+# stable k3s. Re-check before install:
+#   gh api repos/k3s-io/k3s/releases/latest --jq .tag_name
+k3s_version: v1.36.1+k3s1
