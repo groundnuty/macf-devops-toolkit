@@ -84,15 +84,14 @@ fi
 #                         one service.name family for Issue H per-cell
 #                         tooling queries.
 #
-# Endpoint defaults to the stable in-VM ingress `http://127.0.0.1:14318`
-# (host-port-mapped k3d serverlb; avoids collision with the pre-existing
-# compose stack on `:4318`). Use the IPv4 literal `127.0.0.1`, NOT
-# `localhost`: on this host `getent hosts localhost` returns `::1` first
-# and there is no `[::1]:14318` listener, so a `localhost` endpoint can
-# resolve to IPv6 and fail (see the root-cause writeup 2026-06-04; same
-# IPv4-literal convention as MACF_ADVERTISE_HOST in the canonical
-# claude-sh.ts). Override per-session via MACF_OTEL_ENDPOINT, or set it in
-# `.claude/settings.local.json`.
+# Endpoint defaults to the monitoring VM's stable OTLP ingress
+# `http://orzech-dev-agents-monitoring.tail491af.ts.net:4318` (DR-004: the
+# cluster moved to a dedicated VM; native k3s ServiceLB binds :4318 on all
+# interfaces incl. the tailnet, so reach it by the stable MagicDNS FQDN — the
+# LAN IP 192.168.102.15 is DHCP-mutable). NATIVE port, no `+10000` offset (the
+# dedicated VM has no compose-stack collision). Override per-session via
+# MACF_OTEL_ENDPOINT, or set it in `.claude/settings.local.json` (each agent's
+# workspace pins its own — that takes precedence over this default).
 #
 # `${VAR=default}` semantics: assigns ONLY if VAR is unset; empty stays
 # empty. Two preserved override paths:
@@ -122,7 +121,7 @@ if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
   : "${OTEL_METRICS_EXPORTER=otlp}"
   : "${OTEL_LOGS_EXPORTER=otlp}"
   : "${OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf}"
-  : "${MACF_OTEL_ENDPOINT=http://127.0.0.1:14318}"
+  : "${MACF_OTEL_ENDPOINT=http://orzech-dev-agents-monitoring.tail491af.ts.net:4318}"
   : "${OTEL_EXPORTER_OTLP_ENDPOINT=$MACF_OTEL_ENDPOINT}"
   # Agent name + role parameterized via settings.local.json — defaults
   # below are sane fallbacks for this devops workspace, but the

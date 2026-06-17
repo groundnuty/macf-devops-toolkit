@@ -44,7 +44,10 @@ END_EPOCH=""
 OUT_DIR=""
 REPO=""
 ISSUE=""
-GRAFANA_BASE="${GRAFANA_BASE:-http://127.0.0.1:3000}"
+# Grafana drill-in links: default to the monitoring-VM FQDN (DR-004 — Grafana is
+# host-exposed on :3000 via grafana-lb, so links are clickable from anywhere on
+# the tailnet). Override with --grafana-base for a local port-forward (:3000).
+GRAFANA_BASE="${GRAFANA_BASE:-http://orzech-dev-agents-monitoring.tail491af.ts.net:3000}"
 
 usage() {
   cat <<USAGE >&2
@@ -331,7 +334,7 @@ cat > "$OUT_DIR/grafana-urls.json" <<URLS
   "loki": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22${LOKI_URL_QUERY}%22%7D%5D%7D",
   "prometheus": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22prometheus%22,%22queries%22:%5B%7B%22expr%22:%22%7B${FK_UNDERSCORE}%3D%5C%22${FILTER_VALUE}%5C%22%7D%22%7D%5D%7D",
   "clickhouse_logs": "$GRAFANA_BASE/explore?left=%7B%22datasource%22:%22clickhouse-logs%22%7D",
-  "langfuse_native_ui": "http://127.0.0.1:3001/project/macf-dev/traces"
+  "langfuse_native_ui": "http://orzech-dev-agents-monitoring.tail491af.ts.net:3001/project/macf-dev/traces"
 }
 URLS
 

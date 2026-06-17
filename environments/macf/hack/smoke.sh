@@ -2,17 +2,17 @@
 # OTLP round-trip smoke test.
 #
 # Sends a synthetic trace (gen_ai.* attrs) via OTLP-HTTP to the central
-# Collector, then queries Tempo for it. Expects both port-forwards to be
-# running in other terminals (see env vars below).
+# Collector, then queries Tempo for it.
 #
-# Port selection: the existing compose observability stack on this host
-# (macf-obs-*) binds :4317/:4318/:3200/:16686 — so we forward to high ports
-# to avoid collision. Override via env if those are free on your machine.
+# Endpoints (post-DR-004): the monitoring VM exposes NATIVE OTLP/Tempo ports
+# on every interface via k3s ServiceLB — no port-forward needed. Reach by the
+# stable Tailscale FQDN. Override via env to target a different host/port.
 
 set -euo pipefail
 
-COLLECTOR_OTLP_HTTP="${COLLECTOR_OTLP_HTTP:-http://127.0.0.1:14318}"
-TEMPO_URL="${TEMPO_URL:-http://127.0.0.1:13200}"
+MONITORING_HOST="${MONITORING_HOST:-orzech-dev-agents-monitoring.tail491af.ts.net}"
+COLLECTOR_OTLP_HTTP="${COLLECTOR_OTLP_HTTP:-http://${MONITORING_HOST}:4318}"
+TEMPO_URL="${TEMPO_URL:-http://${MONITORING_HOST}:3200}"
 
 # Generate random IDs (traceId = 16 bytes / 32 hex; spanId = 8 bytes / 16 hex)
 TRACE_ID=$(openssl rand -hex 16)

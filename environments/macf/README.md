@@ -59,30 +59,35 @@ make pf-langfuse          # http://127.0.0.1:3001 (Langfuse UI; login from boots
 
 ## Stable OTLP endpoint
 
-Testers + any host-side OTLP producer can push traces directly to the central Collector without `kubectl port-forward`:
+Testers + any host-side OTLP producer push traces directly to the central
+Collector without `kubectl port-forward`. On native k3s (DR-004) the
+`central-collector-lb` LoadBalancer Service is bound on **every** host interface
+by klipper ServiceLB, so reach it by the monitoring VM's Tailscale FQDN on the
+**native** ports (no `+10000` offset — the dedicated VM has no compose-stack
+collision):
 
 ```
-OTLP gRPC:  127.0.0.1:14317
-OTLP HTTP:  http://127.0.0.1:14318/v1/traces
+OTLP gRPC:  orzech-dev-agents-monitoring.tail491af.ts.net:4317
+OTLP HTTP:  http://orzech-dev-agents-monitoring.tail491af.ts.net:4318/v1/traces
 ```
 
-Wired via: `central-collector-lb` LoadBalancer Service (ns/otel) → klipper-lb node-bound ports → k3d serverlb nginx proxy → host ports 14317/14318 (declared in `k3d/config.yaml:ports`).
+Wired via: `central-collector-lb` LoadBalancer Service (ns/otel) → klipper
+ServiceLB binds ports 4317/4318 on all node interfaces (private IP + localhost +
+tailnet). No port-add, no serverlb, no `tailscale serve` — that was the k3d era
+(see CLAUDE.md topology + `docs/remote-agent-otlp-setup.md`).
 
-Live cluster (no recreate) gets the mapping via:
-```
-k3d cluster edit macf \
-  --port-add "127.0.0.1:14317:4317@loadbalancer" \
-  --port-add "127.0.0.1:14318:4318@loadbalancer"
-```
-Fresh clusters pick it up automatically from `k3d/config.yaml`.
+`make pf-collector` (port-forward to the ClusterIP service) and the stable
+endpoint serve **different debugging purposes** — not one supersedes the other:
+- **Stable endpoint** (`:4317`/`:4318` on the FQDN): load-balanced across all
+  Collector replicas via ServiceLB. The right tool for normal tester traffic +
+  smoke tests.
+- **`make pf-collector`**: targets the ClusterIP service which round-robins per
+  kube-proxy iptables; with `--pod-ip-of <pod>` it can target a specific
+  replica. The right tool for comparing pod-A vs pod-B output, debugging a single
+  replica during a crashloop investigation.
 
-High host ports (14317/14318 instead of 4317/4318) avoid collision with the existing compose observability stack on the same VM.
-
-`make pf-collector` (port-forward to the ClusterIP service) and the stable endpoint serve **different debugging purposes** — not one supersedes the other:
-- **Stable endpoint** (`:14317`/`:14318`): load-balanced across all Collector replicas via klipper-lb. The right tool for normal tester traffic + smoke tests.
-- **`make pf-collector`**: targets the ClusterIP service which round-robins per kube-proxy iptables; with `--pod-ip-of <pod>` it can target a specific replica. The right tool for comparing pod-A vs pod-B output, debugging a single replica during a crashloop investigation.
-
-Smoke tests + routine tester OTLP traffic should use the stable endpoint; `make pf-collector` stays as a debugging escape hatch.
+Smoke tests + routine tester OTLP traffic should use the stable endpoint;
+`make pf-collector` stays as a debugging escape hatch.
 
 ## Bootstrap flow (one-time)
 
