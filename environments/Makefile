@@ -328,13 +328,13 @@ check-tempo-ingestion:  ## Pattern A defense (silent-fallback-hazards Instance 8
 doctor-otel:  ## Pattern A defense (silent-fallback-hazards Instance 8 Tier 4): per-agent-process traces-emission invariant — detects stuck OTel exporters in long-lived claude processes. Override WINDOW_MINUTES=N (default 30).
 	@bash hack/doctor-otel.sh
 
-.PHONY: tailscale-otlp-up
-tailscale-otlp-up:  ## Expose OTLP ingest (14317/14318/4317/4318) + Tempo query (13200) over the tailnet via tailscale serve. ONE-SHOT operator action; persistent across tailscaled restarts. Agents: MACF_OTEL_ENDPOINT=http://<machine>.<tailnet>.ts.net:14318. Reconciler (macf#444): TEMPO_QUERY_ENDPOINT=http://<machine>.<tailnet>.ts.net:13200 (gate :13200 by ACL).
-	@bash hack/tailscale-otlp-up.sh
-
-.PHONY: tailscale-otlp-down
-tailscale-otlp-down:  ## Tear down `tailscale serve` config (inverse of tailscale-otlp-up).
-	@bash hack/tailscale-otlp-down.sh
+# NOTE (DR-004 / native k3s): the tailscale-otlp-up/down targets are GONE.
+# They were a k3d-era workaround — k3d's serverlb bound host ports to 127.0.0.1
+# only, so `tailscale serve` was needed to ALSO reach OTLP/Tempo over the tailnet.
+# Native k3s ServiceLB (klipper) binds LoadBalancer-service ports on EVERY host
+# interface (private IP + localhost + the tailnet IP) via iptables — so
+# central-collector-lb + tempo-query-lb already cover the tailnet with no extra
+# config. `tailscale serve` is redundant on k3s and was removed.
 
 .PHONY: github-runner-setup
 github-runner-setup:  ## DR-003/#90: host-prep the LOW-PRIV self-hosted GH Actions runner (macf-runner user + single-command sudoers send-helper grant + download + ephemeral respawn wrapper + systemd unit). NEEDS sudo. Does NOT register/start — gated on REG_TOKEN + macf-actions#47 merged + fork-PR toggles off; then: REG_TOKEN=... sudo bash hack/setup-github-runner.sh register
