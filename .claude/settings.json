@@ -19,7 +19,13 @@
       "WebFetch",
       "WebSearch",
       "Agent",
-      "mcp__*"
+      "mcp__claude_ai_Gmail__*",
+      "mcp__claude_ai_Slack__*",
+      "mcp__claude_ai_PubMed__*",
+      "mcp__claude_ai_Scholar_Gateway__*",
+      "mcp__claude_ai_alphaXiv__*",
+      "mcp__claude_ai_bioRxiv__*",
+      "mcp__claude_ai_PDF_Viewer__*"
     ],
     "deny": [
       "Bash(sudo *)",
