@@ -46,19 +46,35 @@ This is the devops workspace. Layout follows `groundnuty/onedata/spice-deploymen
 
 ## Cluster topology + standard endpoints (live)
 
-A k3d cluster named `macf` runs on this VM, managed via argocd-driven GitOps. Key endpoints:
+A **native k3s** cluster named `macf` runs on the dedicated monitoring VM
+`orzech-dev-agents-monitoring` (per DR-004 — migrated off the old k3d VM after
+the 2026-06 OOM crash). Managed via argocd-driven GitOps. The agents themselves
+run on a *separate* VM and reach the cluster over the tailnet.
+
+**Reach by Tailscale FQDN, NOT the LAN IP** (`192.168.102.15` is DHCP-mutable;
+the MagicDNS name is stable). The host is: `orzech-dev-agents-monitoring.tail491af.ts.net`.
+
+**Native ports — no `+10000` offset.** k3s ServiceLB (klipper) binds the
+LoadBalancer-service ports on *every* host interface (private IP + localhost +
+tailnet) via iptables, so there is no port-forward and no `tailscale serve`
+needed. The old offset (`14317`/`14318`/`13200`) existed only to dodge the old
+VM's legacy compose-stack collision — the dedicated VM has no such collision, so
+the offset rationale is obsolete (see Note below). Key endpoints:
 
 | What | URL | Notes |
 |---|---|---|
-| **Stable OTLP HTTP** | `http://127.0.0.1:14318/v1/traces` | No port-forward needed — host-port-mapped via k3d serverlb to the `central-collector-lb` LoadBalancer Service. Testers + smoke scripts use this. |
-| **Stable OTLP gRPC** | `127.0.0.1:14317` | Same routing |
-| **Tailnet OTLP HTTP** (remote agents) | `http://<machine>.<tailnet>.ts.net:14318/v1/traces` | Requires `make tailscale-otlp-up` once on VM. Same path as stable but reachable from off-VM agents. See `docs/remote-agent-otlp-setup.md`. |
-| Grafana UI | `make pf-grafana` → `http://127.0.0.1:3000` | port-forward; password via `make grafana-password` |
-| **Tempo query API** | `http://127.0.0.1:13200` | No port-forward needed — host-port-mapped via k3d serverlb to the `tempo-query-lb` LoadBalancer Service (ns/tempo). `make pf-tempo` still works as a fallback. |
-| Langfuse UI | `make pf-langfuse` → `http://127.0.0.1:3001` | port-forward; admin login printed by `make langfuse-bootstrap` |
-| ArgoCD UI | `make pf-argocd` → `http://127.0.0.1:8080` | port-forward; password via `make argocd-password` |
+| **Stable OTLP HTTP** | `http://orzech-dev-agents-monitoring.tail491af.ts.net:4318/v1/traces` | `central-collector-lb` LoadBalancer Service; reachable on every VM interface. Testers + smoke scripts + agents use this. |
+| **Stable OTLP gRPC** | `orzech-dev-agents-monitoring.tail491af.ts.net:4317` | Same routing |
+| **Tempo query API** | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3200` | `tempo-query-lb` LoadBalancer Service (ns/tempo). The route-receipt reconciler's `TEMPO_QUERY_ENDPOINT` points here. |
+| Grafana UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3000` | `grafana-lb` Service; password via `make grafana-password`. (`make pf-grafana` still works as a fallback.) |
+| Langfuse UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3001` | `langfuse-web-lb` Service; admin login printed by `make langfuse-bootstrap` |
+| ArgoCD UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:8080` | `argocd-server-lb` Service; password via `make argocd-password` |
+| Prometheus | `make pf-prometheus` → `http://127.0.0.1:9090` | NOT host-exposed — port-forward only |
 
-Persistent state lives on `/mnt/volume1` (`/dev/vdb`, ~200 GiB) — never the root disk. k3d registry data + cluster PVCs both bind-mount there. See `feedback_use_mnt_volume1_for_heavy_storage` memory.
+Persistent state lives on the monitoring VM's `/mnt/volume1` (`/dev/vdb`, ~200 GiB)
+— never the root disk. k3s data-dir (embedded etcd + container images), PVCs
+(local-path), and the 6-hourly etcd snapshots all live there. See
+`feedback_use_mnt_volume1_for_heavy_storage` memory + DR-004.
 
 ## Bootstrap flow summary
 
@@ -85,7 +101,13 @@ make smoke                     # OTLP round-trip — Tempo + Langfuse legs
   - The path is at `langfuse.web.pod.<key>` (web-only) vs `langfuse.<key>` (all deployments).
   - Always verify via `helm template <release> <chart> --version <ver> --values <file>` before committing.
 - **Stale tmux + docker group**: this host's tmux server predates the ubuntu→docker group membership. Wrap docker-touching commands in `sg docker -c "..."` until tmux-server is restarted. `claude.sh` handles this for new-launched sessions automatically. See `reference_docker_sg_workaround_stale_tmux` memory.
-- **Compose stack on the same VM** (`macf-obs-*`) still binds `:4317/:4318/:3200` from the previous-generation observability rollout. Cluster's stable endpoint uses `:14317/:14318/:13200` to avoid collision. Eventually the compose stack gets retired (post-#11 closure) via a cleanup PR on `groundnuty/macf-science-agent:ops/observability/`.
+- **Offset ports are obsolete (post-DR-004).** On the *old* k3d VM a previous-generation
+  compose stack (`macf-obs-*`) bound `:4317/:4318/:3200`, so the cluster used the
+  `+10000` offset (`:14317/:14318/:13200`) to avoid collision. The new dedicated
+  monitoring VM has no compose stack, so the cluster uses the **native** OTLP/Tempo
+  ports (`:4317/:4318/:3200`) directly — see the topology table above. Any lingering
+  `:14318`/`:13200` references in docs/scripts are stale and should point at the
+  monitoring-VM FQDN + native ports (devops#101 sweep).
 
 ## Related repos (read-only reference)
 

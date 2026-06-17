@@ -12,7 +12,9 @@ GitHub Actions on issue/PR close → join Tailscale → SSH to the cluster VM �
 
 - Tailscale account with admin access to the `groundnuty` tailnet (or whichever tailnet the cluster VM lives on).
 - Admin on the `groundnuty` GitHub org (to set org-level secrets + create repos).
-- SSH access to the VM running the cluster (`100.124.163.105` / hostname `orzech-dev-agents`).
+- SSH access to the VM running the cluster — post-DR-004 this is the dedicated
+  monitoring VM `orzech-dev-agents-monitoring`
+  (`orzech-dev-agents-monitoring.tail491af.ts.net`).
 
 ## Step 1 — Tailscale OAuth client
 
@@ -63,9 +65,9 @@ The runner SSHes from inside the tailnet to the VM, runs the snapshot script, sc
 
 3. **Test SSH-via-tailscale-from-laptop** (simulates what the runner will do, before wiring the workflow):
    ```bash
-   ssh -i /tmp/obs-runner-key ubuntu@100.124.163.105 "hostname; echo ok"
+   ssh -i /tmp/obs-runner-key ubuntu@orzech-dev-agents-monitoring.tail491af.ts.net "hostname; echo ok"
    ```
-   Expect: `orzech-dev-agents\nok`.
+   Expect: `orzech-dev-agents-monitoring\nok`.
 
 4. **Store the private half as a REPO-level secret** on `groundnuty/macf-devops-toolkit`:
    - Settings → Secrets and variables → Actions → New repository secret
@@ -73,7 +75,7 @@ The runner SSHes from inside the tailnet to the VM, runs the snapshot script, sc
 
 5. **Store the VM's tailnet hostname as a REPO-level VARIABLE** (vars, not secret — hostnames aren't sensitive given OAuth-gated tailnet access):
    - Settings → Secrets and variables → Actions → Variables tab → New repository variable
-   - `OBS_RUNNER_HOST` = `100.124.163.105` (or the tailnet name `orzech-dev-agents` — both work since `ssh-keyscan` resolves either)
+   - `OBS_RUNNER_HOST` = `orzech-dev-agents-monitoring.tail491af.ts.net` (the monitoring VM's tailnet FQDN — prefer the MagicDNS name over the DHCP-mutable LAN IP). **Operator action post-DR-004: update this variable from the old `orzech-dev-agents` value to the monitoring VM.**
 
 6. **(Optional)** Once first-run validation passes, promote `OBS_RUNNER_SSH_KEY` + `OBS_RUNNER_HOST` to **org-level** so sister-repo PRs don't each need their own copies. Same VM serves all five macf repos.
 

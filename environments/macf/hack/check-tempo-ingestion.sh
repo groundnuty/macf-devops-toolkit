@@ -5,8 +5,11 @@
 # Background: the OTel Collector + Tempo ingestion path can succeed
 # (HTTP 200, `tempo_distributor_spans_received_total` increments) while
 # search-side queries return zero traces. Possible causes:
-#   - Wrong port: agent sends to a port no one listens on, gets retry
-#     backoff, drops spans. (devops-toolkit#60 — :4318 vs :14318.)
+#   - Wrong host/port: agent sends to an endpoint no one listens on, gets
+#     retry backoff, drops spans. Post-DR-004 the cluster is on the dedicated
+#     monitoring VM with NATIVE ports — agents target
+#     orzech-dev-agents-monitoring.tail491af.ts.net:4318 (OTLP) / :3200 (Tempo).
+#     (Historic: devops-toolkit#60 — :4318 vs the old :14318 offset.)
 #   - Pipeline silently broken: Collector accepts but exporter fails
 #     mid-batch.
 #   - Storage backend latency: ingestion ahead of indexing for >5min.
@@ -81,7 +84,7 @@ if [ "$DELTA" -gt 0 ] && [ "$SEARCH_COUNT" -eq 0 ]; then
   echo "  search:    0 traces queryable in the same window"
   echo ""
   echo "Likely causes:"
-  echo "  1. Senders pointing to wrong host port (compose-stack:4318 vs cluster:14318)"
+  echo "  1. Senders pointing at the wrong host/port (should be the monitoring-VM FQDN :4318 — see CLAUDE.md topology)"
   echo "  2. Collector exporter pipeline silently broken (check Collector pod logs)"
   echo "  3. Tempo storage backend write failures (check tempo-0 logs + PVC)"
   echo "  4. Indexing lag > window (rare; widen WINDOW_SECONDS to discriminate)"

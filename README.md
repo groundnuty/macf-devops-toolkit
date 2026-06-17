@@ -20,13 +20,13 @@ Sibling workspaces in the MACF project: [`groundnuty/macf-science-agent`](https:
    │  • science-agent[bot]    │   │  • cv-project-archaeologist│
    │  • code-agent[bot]       │   │  • testers (off-VM future) │
    └────────────┬─────────────┘   └─────────────┬──────────────┘
-                │ OTLP (HTTP/gRPC)              │ OTLP via tailnet
-                │ http://127.0.0.1:14318        │ http://<vm>.<tailnet>.ts.net:14318
-                │                               │ (tailscale serve)
+                │ OTLP (HTTP/gRPC) over tailnet │ OTLP over tailnet
+                │ http://orzech-dev-agents-monitoring.tail491af.ts.net:4318
+                │ (native ports; reach by FQDN) │
                 ▼                               ▼
        ┌──────────────────────────────────────────────────┐
-       │    k3d serverlb (nginx) — host-port 14317/14318  │
-       │      ↕ klipper-lb node-bound ports               │
+       │  k3s ServiceLB (klipper) — native host ports     │
+       │  4317/4318/3200 on ALL interfaces (incl. tailnet)│
        │      ↕ central-collector-lb (LoadBalancer Svc)   │
        └──────────────────────┬───────────────────────────┘
                               │
@@ -194,20 +194,25 @@ make smoke                      # OTLP round-trip — Tempo + Langfuse legs
 
 ## Cluster endpoints
 
-After bootstrap, the stable endpoints are:
+After bootstrap, the stable endpoints are (native k3s on the monitoring VM,
+exposed on every interface — reach by the Tailscale FQDN
+`orzech-dev-agents-monitoring.tail491af.ts.net`; **native ports, no offset**):
 
 | What | URL | Notes |
 |---|---|---|
-| OTLP HTTP (in-VM) | `http://127.0.0.1:14318/v1/traces` | k3d serverlb → `central-collector-lb` |
-| OTLP gRPC (in-VM) | `127.0.0.1:14317` | Same routing |
-| OTLP HTTP (off-VM, tailnet) | `http://<vm>.<tailnet>.ts.net:14318/v1/traces` | Run `make tailscale-otlp-up` once |
-| Compat OTLP (legacy) | `127.0.0.1:4317` / `:4318` | For pre-#61 claude.sh defaults |
-| Grafana UI | `make pf-grafana` → `http://127.0.0.1:3000` | password via `make grafana-password` |
-| Tempo query API | `make pf-tempo` → `http://127.0.0.1:13200` | Trace search + timeline |
-| Langfuse UI | `make pf-langfuse` → `http://127.0.0.1:3001` | Login printed by `make langfuse-bootstrap` |
-| ArgoCD UI | `make pf-argocd` → `http://127.0.0.1:8080` | password via `make argocd-password` |
+| OTLP HTTP | `http://orzech-dev-agents-monitoring.tail491af.ts.net:4318/v1/traces` | `central-collector-lb`; all interfaces |
+| OTLP gRPC | `orzech-dev-agents-monitoring.tail491af.ts.net:4317` | Same routing |
+| Tempo query API | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3200` | Trace search + timeline |
+| Grafana UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3000` | `grafana-lb`; password via `make grafana-password` |
+| Langfuse UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3001` | `langfuse-web-lb`; login via `make langfuse-bootstrap` |
+| ArgoCD UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:8080` | `argocd-server-lb`; password via `make argocd-password` |
+| Prometheus | `make pf-prometheus` → `http://127.0.0.1:9090` | NOT host-exposed — port-forward |
 
-For laptop / off-VM agents, see [`docs/remote-agent-otlp-setup.md`](docs/remote-agent-otlp-setup.md). The short form: run `make tailscale-otlp-up` once on the VM, then on the laptop set `MACF_OTEL_ENDPOINT=http://<vm>.<tailnet>.ts.net:14318` and run `macf update --plugin --yes`.
+The `make pf-*` targets still work as localhost fallbacks. For laptop / off-VM
+agents, see [`docs/remote-agent-otlp-setup.md`](docs/remote-agent-otlp-setup.md):
+the short form is just set
+`MACF_OTEL_ENDPOINT=http://orzech-dev-agents-monitoring.tail491af.ts.net:4318`
+and relaunch — no `tailscale serve` needed on native k3s.
 
 ## ArgoCD sync-wave topology
 
@@ -263,7 +268,11 @@ A few rules the cluster + scripts enforce — useful to know before debugging:
 - **Run `helm template` + `kubectl apply --dry-run=server`** before any PR. Values that lint and template can still fail at admission.
 - **ArgoCD's root-app reverts feature-branch retargets** within ~3 min. Spike-validation pattern: push + merge + let ArgoCD pick up from main.
 - **Stale tmux + docker group**: this host's tmux predates the `ubuntu`→`docker` membership. Use `sg docker -c "..."` until `tmux kill-server` is run; `claude.sh` handles this for new sessions.
-- **Compose stack on the same VM** (`macf-obs-*`) still binds `:4317/:4318/:3200` from the previous-generation rollout. The cluster uses `:14317/:14318/:13200` to avoid collision.
+- **Offset ports retired (DR-004).** The old k3d VM shared a host with a
+  previous-generation compose stack (`macf-obs-*`) on `:4317/:4318/:3200`, so
+  the cluster used the `+10000` offset to avoid collision. The dedicated
+  monitoring VM has no compose stack, so the cluster now uses the **native**
+  ports directly.
 - **Secrets never committed.** `*.key`, `*.pem`, `*.p12`, `.env*` are in `.gitignore`. `.github-app-key.pem` is the GitHub App private key — local-only.
 
 ## Design records & research
