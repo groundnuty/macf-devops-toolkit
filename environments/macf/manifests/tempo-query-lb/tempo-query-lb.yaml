@@ -6,14 +6,19 @@
 # the grafana-community/tempo chart ships a ClusterIP service (right for
 # in-cluster clients — the Grafana datasource, smoke.sh via port-forward).
 # A ClusterIP is not host-reachable; for any host-context consumer to run
-# TraceQL against `:13200` without a kubectl tunnel, we need a LoadBalancer
-# service that k3d's serverlb picks up + exposes via the host-port mapping
-# in `k3d/config.yaml` (`127.0.0.1:13200:3200` on the loadbalancer node).
+# TraceQL without a kubectl tunnel, we need a LoadBalancer service.
 #
-# Routing chain host → pod (identical shape to the collector's :14318):
-#   localhost:13200 (host)
-#     → k3d-macf-serverlb:3200 (k3d nginx proxy, added via k3d ports mapping)
-#       → k3d-macf-server-0:3200 (klipper-lb hostPort binding from THIS Service)
+# Post-DR-004 (native k3s on the dedicated monitoring VM): k3s ServiceLB
+# (klipper) binds this Service's port (3200) on EVERY host interface — private
+# IP, localhost, AND the tailnet — via iptables. No k3d serverlb and no
+# `:13200` offset (the offset was a k3d-VM compose-collision workaround, now
+# obsolete). Reach it at the NATIVE port:
+#   orzech-dev-agents-monitoring.tail491af.ts.net:3200  (Tempo query API)
+#
+# Routing chain host → pod (native k3s; identical shape to the collector LB):
+#   <any-host-interface>:3200
+#     → svclb-tempo-query-lb DaemonSet pod (klipper, hostPort 3200)
+#       → this Service's ClusterIP
 #         → pod label-selector → tempo StatefulSet pod
 #
 # Replaces the operator-occasional `make pf-tempo` with an always-on host

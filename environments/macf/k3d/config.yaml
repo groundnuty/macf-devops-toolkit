@@ -1,4 +1,19 @@
-# k3d cluster declarative config.
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ DEPRECATED — historical artifact, NOT the live cluster config.              │
+# │                                                                             │
+# │ Post-DR-004 the macf observability cluster runs on NATIVE k3s on the        │
+# │ dedicated monitoring VM (orzech-dev-agents-monitoring) — see                │
+# │ ../k3s/config.yaml + ../../../design/DR-004-migrate-to-native-k3s-with-     │
+# │ etcd-backups.md. The native cluster uses k3s ServiceLB (klipper) to bind    │
+# │ LoadBalancer ports on every host interface at their NATIVE values           │
+# │ (:4317/:4318/:3200) — there is no k3d serverlb and no `+10000` offset.      │
+# │                                                                             │
+# │ This file is retained for provenance of the original k3d spike topology     │
+# │ (the `+10000` host-port mappings below predate the native migration). Do    │
+# │ NOT `k3d cluster create` against it on the monitoring VM.                   │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# k3d cluster declarative config (HISTORICAL — see deprecation banner above).
 # Consumed by: `k3d cluster create --config k3d/config.yaml` (Makefile `cluster` target).
 # Schema:      https://k3d.io/v5.8/usage/configfile/ (kind: Simple)
 #
