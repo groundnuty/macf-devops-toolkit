@@ -53,5 +53,13 @@ permissions:
 
 jobs:
   route:
-    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v1.3.4
+    # Stage-3 (mTLS channels) per macf DR-027 phase-1 (devops canary-1) + devops-toolkit DR-005.
+    # Repinned @v1.3.4 (SSH) -> @v3.3.0 (channels). Profile-scoped registry (groundnuty is a
+    # user account; DR-006 Profile mode). The SSH fallback (AGENT_SSH_KEY + the devops-agent
+    # entry in agent-config.json) is RETAINED through the DR-027 2-month bake — revert is a
+    # one-line pin flip @v3.3.0 -> @v1.3.4.
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v3.3.0
+    with:
+      project: macf
+      registry-api-path: /repos/groundnuty/groundnuty
     secrets: inherit
