@@ -55,3 +55,8 @@ k3s/.token
 # Claude local-only state
 .claude/settings.local.json
 .claude/.cache/
+
+# MACF hand-wire local state (substrate channel-server config — DR-005 Decision 6).
+# Certs (keys), the cert-management macf-agent.json marker, and channel logs are
+# per-machine + sensitive; never committed.
+.macf/

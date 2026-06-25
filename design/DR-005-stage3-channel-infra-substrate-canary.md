@@ -108,6 +108,34 @@ Ordered; steps 1–6 are scaffolding (no live route), step 7 needs the operator 
 7. **Launch** `claude.sh` (tmux `macf@auditor`) → the channel server binds `:8700` and self-registers `MACF_AGENT_AUDITOR` on `groundnuty/groundnuty`. **[OPERATOR GATE: the `MACF_ROUTING` App must exist + be installed on `groundnuty/groundnuty` (reads the profile registry) + my devops App must reach the relevant repos — see below.]**
 8. **Acceptance / co-verify with science:** a test mention routes **over channels** (workflow → mTLS `POST /notify` → wake). The route-landed signal is the chain **`notify_received → mcp_pushed → tmux_wake_delivered`** in `<auditor-home>/.macf/logs/channel.log` (there is no log line literally named `turn_processed`; the `processed` receipt is the DR-025 comms-ledger field, backfilled by the reconciler), plus the OTel SERVER span **`macf.server.notify_received`** in Tempo. Confirm SSH+tmux (Stage-2) was *not* used.
 
+## Decision 6 — Substrate hand-wire recipe (phases 1-3: devops → code → science)
+
+Phase-0's auditor was greenfield + `macf init`'d, so its channel server came from the plugin (`claude --plugin-dir .macf/plugin`). The **load-bearing substrate agents are NOT `macf init` consumers** (DR-027 §3 + `macf#273`) — they are **hand-wired**. This is the canonical recipe, validated first on **canary-1 (devops)**; code (phase-2) + science (phase-3) copy it with their own name/port substituted.
+
+**Deployment shape (plugin-minus-plugin):** the channel server is still an MCP stdio child of Claude Code (DR-002), wired via a standalone `mcpServers` entry instead of the full plugin. It self-registers on launch exactly as the auditor's does.
+
+**Per-agent steps** (`<agent>` = the routing label, e.g. `devops-agent`):
+
+1. **Minimal `.macf/macf-agent.json`** — cert-management marker only (`project`, `agent_name=<agent>`, `agent_role`, `agent_type:permanent`, `registry:{type:profile,user:groundnuty}`, `github_app`, `advertise_host`, `versions`). Does **NOT** make the home a `macf init` consumer — no plugin, no env-file regeneration; never run `macf init`/`macf update` here. Gitignored (`.macf/`).
+2. **Leaf cert** — `macf certs rotate --dir <home>` (with `MACF_CA_CERT`/`MACF_CA_KEY` env → the shared CA `~/.macf/certs/macf/ca-{cert,key}.pem`) → `<home>/.macf/certs/agent-{cert,key}.pem`: `CN=<agent>`, **DNS-SAN = the FQDN** (required), EKU server+client.
+3. **`MACF_CA_CERT` Variable on the CALLER repo** — the v3 router reads the CA from the caller repo's GHA `vars` context (`${{ vars.MACF_CA_CERT }}`), NOT the registry (phase-0 learning #2). Plain CA PEM as a repo Variable on each caller repo.
+4. **Caller secrets** — `ROUTING_CLIENT_CERT/KEY` (base64 of the shared `routing-action` cert — identical for all callers), `MACF_ROUTING_APP_*`, `TS_OAUTH_*`.
+5. **Channel-server `mcpServers` entry** — in the home's project `.mcp.json` **or** the `~/.claude.json` project entry (the latter is pre-trusted → no relaunch trust-prompt; pick per the home's existing MCP-config choice). `npx @groundnuty/macf-channel-server@<ver>` with the full `MACF_*` config in `env`:
+   - ⚠️ **`MACF_AGENT_NAME=<agent>` (routing label) — channel-server-scoped override.** The substrate `claude.sh` sets `MACF_AGENT_NAME=<bot-name>` (e.g. `macf-devops-agent`) for the OTEL `gen_ai.agent.name`; the channel server needs the **routing label** for the registry key (`MACF_AGENT_DEVOPS_AGENT`) + cert CN. Overriding it *inside `mcpServers.env`* gives each surface its correct value. The auditor dodged this (name==label==`auditor`); code (`macf-code-agent`/`code-agent`) + science (`macf-science-agent`/`science-agent`) will hit it. *(Framework follow-up: split the overloaded var into `MACF_AGENT_NAME` (OTEL) + `MACF_REGISTRY_NAME` (registry/CN), server falling back to the former — tracked as a code-agent UX issue; this override is the documented interim.)*
+   - `MACF_PROJECT=macf`, the 3 cert paths, `MACF_REGISTRY_TYPE=profile` + `MACF_REGISTRY_USER=groundnuty`, `MACF_HOST=0.0.0.0`, `MACF_ADVERTISE_HOST=<FQDN>`, `MACF_PORT=<Decision-3 map>` (devops=8701), `MACF_WORKSPACE_DIR`, `MACF_LOG_PATH`.
+   - `${GH_TOKEN:-}` + `${APP_ID:-}`/`${INSTALL_ID:-}`/`${KEY_PATH:-}` (self-register + token refresh) + `OTEL_*` passthrough — all `${VAR:-}`-expanded from the claude.sh process env (only these need explicit passing; the literal `MACF_*` above are set in-block).
+
+**Cutover ordering (SAFETY-CRITICAL) + self-restart resume.** The channel server only comes up on a session restart — and **a running agent cannot restart itself.** Order is non-negotiable:
+
+1. Stage steps 1-5 **without** restarting/repinning — Stage-2 (SSH, `@v1.3.4`) stays live.
+2. **Operator (or peer-agent backup) relaunches** the agent's tmux session → loads the channel server → self-registers `MACF_AGENT_<AGENT>`.
+3. **THEN** repin the caller `@v3.3.0` (+ `with:{project,registry-api-path}`). **Never repin before step 2** — a v3 caller pointing at a not-yet-running channel routes to a dead endpoint and the agent stops receiving prompts mid-migration.
+4. Co-verify (`notify_received`→`tmux_wake_delivered`).
+
+**Resume across the restart = the migration issue thread.** Before step 2 the agent leaves a crisp `RESUME: step 3 — repin caller @v3.3.0, then co-verify` note on its migration issue; the relaunched session reads it on SessionStart and continues. The issue *is* the cross-restart memory (also how science's phase-3 self-migration works).
+
+**Stage-2 fallback = revertability, NOT dual-routing (DR-027 §4):** **(b), definitively** — ONE active caller (v3) + **retain the SSH infra** (`AGENT_SSH_KEY`, the agent's `agent-config.json` entry, tmux reachability) so revert is a one-line pin flip `@v3.3.0`→`@v1.3.4`. Do NOT run two live callers (both fire on the same events → double-routing). Stage-2 removal waits for the 2-month all-green bake.
+
 ## Operator prerequisites (gates)
 
 1. **`MACF_ROUTING` App** (read-only: `metadata:read` + `actions_variables:read`) — its `*_APP_ID/_KEY` secrets are **already set per-repo** (verified). It must be **installed on `groundnuty/groundnuty`** so the router can read the profile registry (`#529`'s new operator step), plus confirm the App itself exists.
