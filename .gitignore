@@ -55,3 +55,9 @@ k3s/.token
 # Claude local-only state
 .claude/settings.local.json
 .claude/.cache/
+
+# MACF hand-wire local state (substrate channel-server config — DR-005 Decision 6).
+# Per-machine + sensitive (certs incl. keys, App creds, channel logs); never committed.
+# The CONTENT/recipe is documented in design/DR-005...; the files are per-home local state.
+.macf/
+.claude/.macf/
