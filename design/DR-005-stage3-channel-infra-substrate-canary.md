@@ -1,6 +1,6 @@
 # DR-005 — Stage-3 channel-routing infrastructure for the substrate (auditor canary-zero)
 
-- **Status:** proposed
+- **Status:** accepted (PR #106, science-approved 2026-06-25; amended for configurable registry mode)
 - **Author:** macf-devops-agent
 - **Date:** 2026-06-25
 - **Implements:** `macf` DR-027 §Decision 6 (the devops infra expansion) for the `orzech-dev-agents` host
@@ -79,6 +79,21 @@ CV agents stay on random (different project; their own registry resolves them). 
   - `ROUTING_CLIENT_CERT` / `ROUTING_CLIENT_KEY` — **devops issues** (`macf certs issue-routing-client`) and the operator/we paste as base64 PEM.
   - `TS_OAUTH_CLIENT_ID` / `TS_OAUTH_SECRET`, `AGENT_SSH_KEY` — existing (the Stage-2 fallback path; unchanged in phase-0).
 - **Caller workflow:** `agent-router.yml` pinned **`@v3.3.0`** with `with: { project: macf, registry-api-path: /repos/groundnuty/groundnuty }`.
+
+### Registry mode is a SELECTED config, not hard-coded — the org-flip path (operator's keep-both-paths-open requirement)
+
+Profile is **today's selection**, not a baked-in assumption. The registry mode is a runtime config along two knobs that `macf` DR-006 already defines (`org` / `profile` / `repo`):
+
+1. each agent's **`MACF_REGISTRY_TYPE`** (+ `MACF_REGISTRY_USER` / `MACF_REGISTRY_ORG`) in `env.registry`, read by the channel server when it self-registers;
+2. each caller's **`registry-api-path`** input, read by the v3 router when it resolves the endpoint.
+
+**Migrating to an org install later is a config flip, not a re-architecture.** If MACF is installed into a GitHub **org** (`groundnuty` becomes / is supplemented by an org), switch to org mode by:
+
+- `env.registry` per agent: `MACF_REGISTRY_TYPE=org`, `MACF_REGISTRY_ORG=<org>` (was `profile`/`USER=groundnuty`);
+- each caller's `registry-api-path`: `/orgs/<org>` (was `/repos/groundnuty/groundnuty`);
+- re-home the registry data to the org scope: re-upload `MACF_<PROJ>_CA_CERT` (+ install the `MACF_ROUTING` App on the org with Variables:Read); agents re-self-register their `MACF_AGENT_<NAME>` on next launch.
+
+Everything else is **registry-mode-agnostic and does not change**: the CA + agent leaf + routing-client certs, the channel-server, the mTLS machinery, the caller-workflow shape, and the per-repo secrets (`ROUTING_CLIENT_*`, `MACF_ROUTING_APP_*`, `TS_OAUTH_*` stay per-repo in every mode — the Profile/org distinction is variables-only). So the flip touches two env knobs + the registry data location, nothing structural. Nothing in this DR hard-codes Profile in a way a future org would have to be re-architected around.
 
 ## Decision 5 — Auditor canary-zero stand-up runbook (phase-0)
 
