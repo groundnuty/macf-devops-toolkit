@@ -31,6 +31,17 @@ if [ -d "$SCRIPT_DIR/.claude/.macf" ]; then
   done
 fi
 
+# Channel-server network identity (DR-005 Decisions 2+3). The channel server
+# (MCP child) inherits these from the process env. WITHOUT MACF_ADVERTISE_HOST
+# it defaults the registry-advertised host to 127.0.0.1 — unreachable from the
+# GitHub-hosted router AND a SAN-mismatch against the FQDN leaf cert → route
+# fails. All substrate homes share this host's MagicDNS FQDN; MACF_PORT is the
+# per-agent fixed port from the DR-005 Decision-3 map (devops=8701). MACF_*
+# prefix → captured by the tmux -e passthrough below + inherited by the MCP child.
+export MACF_HOST="${MACF_HOST:-0.0.0.0}"
+export MACF_ADVERTISE_HOST="${MACF_ADVERTISE_HOST:-orzech-dev-agents.tail491af.ts.net}"
+export MACF_PORT="${MACF_PORT:-8701}"
+
 # Tmux self-wrap (macf#313/#340). If launched outside tmux and not opted out,
 # re-exec inside a session named <MACF_PROJECT>@<MACF_AGENT_NAME> = macf@devops-agent.
 # The -e MACF_* passthrough pins this workspace's identity over the tmux
