@@ -1,6 +1,7 @@
 # DR-006: VM cron-watchdog — the devops realization of agent supervision (impl of DR-031)
 
-**Status:** Proposed
+**Status:** Accepted
+**Ratified:** 2026-06-26 by the operator ("I ratify") — as the aligned pair with `macf` DR-031 (the substrate-agnostic supervision contract). Establishes the VM-cron **desired-state reconciler** (Amendment A): reconcile actual→operator-owned desired state — launch-missing (cold-start / reboot-recovery) / heal-deaf (the tiered ladder) / skip desired-down (`paused`); host-installed cron; passive tier reads `/health.last_processed`; scope VM+K8s (cloud out-of-scope, Managed-Agents-self-hosted a future spike).
 **Date:** 2026-06-26
 **Trigger:** The 2026-06-26 Stage-3 off-channels incident (`macf-devops-agent` silently went deaf after a relaunch — the `macf#553` collision-abort left a healthy-looking-but-deaf agent + a stale registry entry; the operator had to hand-relay a peer's review). `macf` **DR-031** ("Agent supervision — liveness contract + portable self-restart") graduated the design (`macf-devops-toolkit#115`, devops + operator session, science + code reviewed). DR-031 defines the **substrate-agnostic contract**; **this DR is its VM-cron realization** + the K8s manifests for when agents move to pods. It is the devops slice of DR-031 §"Ownership".
 
