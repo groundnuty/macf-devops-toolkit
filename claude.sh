@@ -1,222 +1,74 @@
-#!/bin/bash
-# Launcher for macf-devops-agent
-# Generates a GitHub App token, starts tmux session, boots Claude Code.
-#
-# Requires:
-#   - .claude/settings.local.json with env.APP_ID, env.INSTALL_ID, env.KEY_PATH
-#   - .github-app-key.pem (or whatever KEY_PATH points to)
-#   - gh CLI installed (invoked inside macf-gh-token.sh)
-#   - jq, tmux, claude
-
+#!/usr/bin/env bash
 set -euo pipefail
 
-if [ -d /home/linuxbrew/.linuxbrew ]; then
-  eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv bash)"
-fi
-
-DIR="$(cd "$(dirname "$0")" && pwd)"
-SETTINGS="$DIR/.claude/settings.local.json"
-
-if [ ! -f "$SETTINGS" ]; then
-  echo "error: $SETTINGS not found" >&2
-  echo "copy .claude/settings.local.json.example and fill in APP_ID / INSTALL_ID" >&2
-  exit 1
-fi
-
-APP_ID=$(jq -r '.env.APP_ID' "$SETTINGS")
-INSTALL_ID=$(jq -r '.env.INSTALL_ID' "$SETTINGS")
-KEY_PATH=$(jq -r '.env.KEY_PATH' "$SETTINGS")
-
-if [ "$APP_ID" = "null" ] || [ "$INSTALL_ID" = "null" ] || [ "$KEY_PATH" = "null" ]; then
-  echo "error: APP_ID / INSTALL_ID / KEY_PATH missing in $SETTINGS" >&2
-  exit 1
-fi
-
-# Read OTLP-related settings from settings.local.json with shell-default
-# fallbacks. The CC process reads its own .env block on launch, but THIS
-# launcher (which runs before CC starts) needs the values via direct jq
-# lookup. `// empty` returns empty when the key is absent, distinguishing
-# null-from-jq vs missing-key — we treat both as "use default".
-MACF_AGENT_NAME_FROM_SETTINGS=$(jq -r '.env.MACF_AGENT_NAME // empty' "$SETTINGS")
-MACF_AGENT_ROLE_FROM_SETTINGS=$(jq -r '.env.MACF_AGENT_ROLE // empty' "$SETTINGS")
-MACF_OTEL_ENDPOINT_FROM_SETTINGS=$(jq -r '.env.MACF_OTEL_ENDPOINT // empty' "$SETTINGS")
-[ -n "$MACF_AGENT_NAME_FROM_SETTINGS" ] && : "${MACF_AGENT_NAME:=$MACF_AGENT_NAME_FROM_SETTINGS}"
-[ -n "$MACF_AGENT_ROLE_FROM_SETTINGS" ] && : "${MACF_AGENT_ROLE:=$MACF_AGENT_ROLE_FROM_SETTINGS}"
-[ -n "$MACF_OTEL_ENDPOINT_FROM_SETTINGS" ] && : "${MACF_OTEL_ENDPOINT:=$MACF_OTEL_ENDPOINT_FROM_SETTINGS}"
-
-ABS_KEY="$DIR/$KEY_PATH"
-if [ ! -f "$ABS_KEY" ]; then
-  echo "error: private key not found at $ABS_KEY" >&2
-  exit 1
-fi
-
-# Fail-loud token generation — the naive `export GH_TOKEN=$(gh token
-# generate ... | jq)` silently swallows errors (no pipefail), making
-# `GH_TOKEN` the string "null" and letting `gh` fall back to stored
-# user auth. This is the attribution trap (see coordination.md Token
-# & Git Hygiene). The canonical helper surfaces failures.
-GH_TOKEN=$("$DIR/.claude/scripts/macf-gh-token.sh" \
-  --app-id "$APP_ID" --install-id "$INSTALL_ID" --key "$ABS_KEY") || {
-  echo "FATAL: bot token generation failed — see stderr above." >&2
-  exit 1
-}
-
-SESSION="devops-agent"
-
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "session '$SESSION' already exists. attach with: tmux attach -t $SESSION" >&2
-  exit 0
-fi
-
-# --- OTLP telemetry (refs #24, aligned per #26) ----------------------------
-# Wires Claude Code's built-in OpenTelemetry support so every conversation
-# emits traces (per tool call), metrics (token counts, model usage), and
-# logs into the cluster's stable OTLP ingress.
+# MACF Agent Launcher: devops-agent (HAND-WIRED substrate — DR-005 Decision 6).
 #
-# Resource-attr naming follows OTel GenAI semantic conventions:
-#   gen_ai.agent.name   — semconv-compliant agent identity (vs the informal
-#                         flat `agent.id` from PR #25, corrected per code-
-#                         agent's review of macf#245).
-#   gen_ai.agent.role   — extension of the gen_ai.* namespace; same
-#                         convention code-agent uses in the canonical
-#                         `claude-sh.ts` template.
-#   OTEL_SERVICE_NAME   — `macf-agent-<role>` groups all MACF agents under
-#                         one service.name family for Issue H per-cell
-#                         tooling queries.
+# This launcher is RECONCILED to the framework generation (groundnuty/macf
+# src/cli/claude-sh.ts) but maintained by hand: this is a substrate workspace,
+# NOT a `macf init` consumer (macf#273). Do NOT run `macf init`/`macf update`
+# here. Changes that should be canonical graduate UP into the framework
+# template (DR-029); genuine host-specifics live in host-prelude.sh / env.local.*.
 #
-# Endpoint defaults to the monitoring VM's stable OTLP ingress
-# `http://orzech-dev-agents-monitoring.tail491af.ts.net:4318` (DR-004: the
-# cluster moved to a dedicated VM; native k3s ServiceLB binds :4318 on all
-# interfaces incl. the tailnet, so reach it by the stable MagicDNS FQDN — the
-# LAN IP 192.168.102.15 is DHCP-mutable). NATIVE port, no `+10000` offset (the
-# dedicated VM has no compose-stack collision). Override per-session via
-# MACF_OTEL_ENDPOINT, or set it in `.claude/settings.local.json` (each agent's
-# workspace pins its own — that takes precedence over this default).
-#
-# `${VAR=default}` semantics: assigns ONLY if VAR is unset; empty stays
-# empty. Two preserved override paths:
-#   - Opt-out for one session:
-#       MACF_OTEL_DISABLED=1 ./claude.sh
-#       (or the more general: CLAUDE_CODE_ENABLE_TELEMETRY= ./claude.sh)
-#   - Endpoint override for one session:
-#       MACF_OTEL_ENDPOINT=http://other.ci:4318 ./claude.sh
-#
-# `gen_ai.agent.name` + `gen_ai.agent.role` are the load-bearing paper-dim
-# resource attrs. The Collector's `resource/paper-dims` processor (in env
-# macf) does NOT default these — agents that fail to stamp them are
-# visibly absent in queries (fail-loud-on-absent), which is the right
-# shape for the measurement apparatus. See PR #12 review thread + the
-# central Collector CR's `resource/paper-dims` block for the rationale.
+# Thin launcher (macf#342): per-concern env exports live in .claude/.macf/env.*
+# and are sourced via the loop below. The minimal channel-server plugin
+# (.macf/plugin-cs, mcpServers-only — macf#533, proven loadable) brings up the
+# Stage-3 channel server as claude's MCP child via --plugin-dir.
 
-if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
-  : "${CLAUDE_CODE_ENABLE_TELEMETRY=1}"
-  # Traces need a SEPARATE beta gate + exporter: CLAUDE_CODE_ENABLE_TELEMETRY
-  # alone enables metrics + logs only; native claude_code.* spans also require
-  # CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1 + OTEL_TRACES_EXPORTER=otlp. Dropping
-  # them is why substrate launchers emitted metrics/logs but zero Tempo traces
-  # (macf#418, the #197 hand-port-drift class; canonical claude-sh.ts
-  # otelTelemetryLines carries both — the hand-copied block had lost them).
-  : "${CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1}"
-  : "${OTEL_TRACES_EXPORTER=otlp}"
-  : "${OTEL_METRICS_EXPORTER=otlp}"
-  : "${OTEL_LOGS_EXPORTER=otlp}"
-  : "${OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf}"
-  : "${MACF_OTEL_ENDPOINT=http://orzech-dev-agents-monitoring.tail491af.ts.net:4318}"
-  : "${OTEL_EXPORTER_OTLP_ENDPOINT=$MACF_OTEL_ENDPOINT}"
-  # Agent name + role parameterized via settings.local.json — defaults
-  # below are sane fallbacks for this devops workspace, but the
-  # MACF_AGENT_NAME / MACF_AGENT_ROLE jq-reads above populate them from
-  # settings, so changing identity is a one-line settings edit.
-  : "${MACF_AGENT_NAME:=macf-devops-agent}"
-  : "${MACF_AGENT_ROLE:=devops}"
-  : "${OTEL_SERVICE_NAME=macf-agent-${MACF_AGENT_ROLE}}"
-  : "${OTEL_RESOURCE_ATTRIBUTES=gen_ai.agent.name=${MACF_AGENT_NAME},gen_ai.agent.role=${MACF_AGENT_ROLE}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-  # --- Conversation-content logging (#32, experimental on devops only) ----
-  # Enables the four content-capture knobs documented in
-  # https://code.claude.com/docs/en/monitoring-usage:
-  #   OTEL_LOG_USER_PROMPTS=1   — full user-prompt text as `user_prompt`
-  #                               log events (default: redacted)
-  #   OTEL_LOG_TOOL_CONTENT=1   — full tool input/output as span events
-  #                               (60 KB inline cap)
-  #   OTEL_LOG_TOOL_DETAILS=1   — Bash command names, MCP names, skill
-  #                               names on tool_result + user_prompt events
-  #   OTEL_LOG_RAW_API_BODIES=1 — full Anthropic Messages API request +
-  #                               response bodies (60 KB inline cap; the
-  #                               only path to capture model COMPLETIONS,
-  #                               since there's no separate _COMPLETIONS
-  #                               env var)
-  # Together: full conversation transparency (prompts + completions +
-  # tool I/O). Lands in Loki + ClickHouse-logs via the central Collector's
-  # logs pipeline (per #28). Per-event 60 KB inline cap means very long
-  # prompts (e.g. cached 900k contexts) get truncated; flip
-  # OTEL_LOG_RAW_API_BODIES to `=file:/var/log/claude-api-bodies/` for
-  # untruncated capture if needed.
-  #
-  # Stage 1 scope per #32: experimental, devops-agent only. After one
-  # session of observation + sample inspection, decide whether to
-  # propagate to science / code / tester via sister PRs.
-  #
-  # Privacy: conversation content includes EVERYTHING the agent saw
-  # (file contents, env vars, GH tokens if mishandled, internal
-  # reasoning). Stored in Loki/CH (7d retention per #19). Anyone with
-  # cluster access reads everything. Acceptable for this single-VM dev
-  # spike; production deployment needs scrubbing + access controls.
-  #
-  # Opt-out at the same MACF_OTEL_DISABLED gate above (turning off
-  # telemetry entirely also disables this). For finer-grained opt-out
-  # (telemetry on but content off), unset these four individually.
-  : "${OTEL_LOG_USER_PROMPTS=1}"
-  : "${OTEL_LOG_TOOL_CONTENT=1}"
-  : "${OTEL_LOG_TOOL_DETAILS=1}"
-  : "${OTEL_LOG_RAW_API_BODIES=1}"
-  export CLAUDE_CODE_ENABLE_TELEMETRY CLAUDE_CODE_ENHANCED_TELEMETRY_BETA \
-         OTEL_TRACES_EXPORTER OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
-         OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
-         OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES \
-         OTEL_LOG_USER_PROMPTS OTEL_LOG_TOOL_CONTENT \
-         OTEL_LOG_TOOL_DETAILS OTEL_LOG_RAW_API_BODIES
-fi
+# Host-local prelude FIRST — before the env.* loop, because env.github mints the
+# bot token via brew-installed openssl/curl on this VM. (host-prelude.sh is the
+# DR-005 early host-specific slot; the framework env.local.*/env.zz.* slots sort
+# POST-canonical, too late for tools env.github needs.)
+[ -f "$SCRIPT_DIR/.claude/.macf/host-prelude.sh" ] && source "$SCRIPT_DIR/.claude/.macf/host-prelude.sh"
 
-# Build the env-prefix that must cross BOTH launch boundaries into the
-# `claude` process: (1) `tmux new-session` does NOT propagate this launcher's
-# exported env to the new pane — tmux seeds a new session from the server's
-# frozen global env (the "server-global env semantic" of macf#340), so the
-# OTEL_*/CLAUDE_CODE_* exports above are dropped at the tmux boundary; and
-# (2) `sg docker -c '<cmd>'` starts a fresh shell that only sees what is
-# literally inlined in its command string. GH_TOKEN has always been inlined
-# for exactly this reason. The OTEL_*/CLAUDE_CODE_* vars were exported but
-# NEVER inlined, so Claude Code launched with telemetry effectively disabled
-# (CLAUDE_CODE_ENABLE_TELEMETRY + OTEL_EXPORTER_OTLP_ENDPOINT never reached the
-# binary) and emitted zero spans regardless of endpoint value. This is the
-# OTLP-endpoint silent-drop class (#62, Tier 4); root-caused 2026-06-04 by
-# inspecting /proc/<pid>/environ of the running agent (telemetry vars absent)
-# vs the CV agents (present, via their macf#340 re-exec-inside-session
-# launcher). Fix: inline the OTEL vars the same way GH_TOKEN is — the launcher
-# shell expands them into the literal command string before tmux/sg see it, so
-# they survive both boundaries unconditionally. No value contains a space or
-# single quote, so space-joined `VAR=value` words are shell-safe inside the
-# single-quoted `sg docker -c '...'` argument.
-LAUNCH_ENV="GH_TOKEN=$GH_TOKEN"
-if [ "${MACF_OTEL_DISABLED:-}" != "1" ]; then
-  for _v in CLAUDE_CODE_ENABLE_TELEMETRY CLAUDE_CODE_ENHANCED_TELEMETRY_BETA \
-            OTEL_TRACES_EXPORTER OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
-            OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT \
-            OTEL_SERVICE_NAME OTEL_RESOURCE_ATTRIBUTES \
-            OTEL_LOG_USER_PROMPTS OTEL_LOG_TOOL_CONTENT \
-            OTEL_LOG_TOOL_DETAILS OTEL_LOG_RAW_API_BODIES; do
-    LAUNCH_ENV="$LAUNCH_ENV $_v=${!_v:-}"
+# Source per-concern env files (macf#342). env._helpers (underscore) sorts first
+# and defines macf_settings_get used by env.identity/env.telemetry.
+if [ -d "$SCRIPT_DIR/.claude/.macf" ]; then
+  for f in "$SCRIPT_DIR/.claude/.macf"/env.*; do
+    [ -f "$f" ] && source "$f"
   done
 fi
 
-# TEMPORARY: wrap claude in `sg docker -c` so claude + its Bash-tool children
-# inherit the docker gid. Needed because this host's long-running tmux server
-# predates the `ubuntu`→`docker` group addition (/etc/group mtime 2026-04-14),
-# so panes spawned by the server lack the supplementary group. Without this,
-# `docker ps` / `docker compose` / k3s's containerd-shim interactions fail
-# with "permission denied while trying to connect to the docker API". Remove
-# this wrapper after a fresh tmux server (`tmux kill-server` + relaunch from
-# a new login shell) picks up the docker group natively. Same pattern +
-# rationale as in groundnuty/macf-science-agent:claude.sh.
-tmux new-session -s "$SESSION" -c "$DIR" \
-  "sg docker -c '$LAUNCH_ENV claude --permission-mode acceptEdits -c || $LAUNCH_ENV claude --permission-mode acceptEdits'"
+# Channel-server network identity (DR-005 Decisions 2+3). The channel server
+# (MCP child) inherits these from the process env. WITHOUT MACF_ADVERTISE_HOST
+# it defaults the registry-advertised host to 127.0.0.1 — unreachable from the
+# GitHub-hosted router AND a SAN-mismatch against the FQDN leaf cert → route
+# fails. All substrate homes share this host's MagicDNS FQDN; MACF_PORT is the
+# per-agent fixed port from the DR-005 Decision-3 map (devops=8701). MACF_*
+# prefix → captured by the tmux -e passthrough below + inherited by the MCP child.
+export MACF_HOST="${MACF_HOST:-0.0.0.0}"
+export MACF_ADVERTISE_HOST="${MACF_ADVERTISE_HOST:-orzech-dev-agents.tail491af.ts.net}"
+export MACF_PORT="${MACF_PORT:-8701}"
+
+# Tmux self-wrap (macf#313/#340). If launched outside tmux and not opted out,
+# re-exec inside a session named <MACF_PROJECT>@<MACF_AGENT_NAME> = macf@devops-agent.
+# The -e MACF_* passthrough pins this workspace's identity over the tmux
+# server-global env (macf#340 collision guard). The inner invocation has $TMUX
+# set, re-sources env.* fresh (so OTEL_*/GH_TOKEN are re-derived in-session — no
+# manual cross-boundary inlining needed; that + the sg-docker wrap are dropped).
+#
+# Opt-out: MACF_NO_TMUX_WRAP=1 ./claude.sh
+if [ -z "${TMUX:-}" ] && [ "${MACF_NO_TMUX_WRAP:-}" != "1" ]; then
+  SESSION_NAME="${MACF_PROJECT}@${MACF_AGENT_NAME}"
+  if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+    exec tmux attach -t "$SESSION_NAME"
+  else
+    MACF_TMUX_E_ARGS=()
+    while IFS= read -r macf_env_line; do
+      MACF_TMUX_E_ARGS+=("-e" "$macf_env_line")
+    done < <(env | grep -E "^MACF_" || true)
+    exec tmux new-session "${MACF_TMUX_E_ARGS[@]}" -s "$SESSION_NAME" -c "$SCRIPT_DIR" "$0" "$@"
+  fi
+fi
+
+# Inside the session: launch Claude Code with the minimal channel-server plugin.
+# --plugin-dir loads .macf/plugin-cs (mcpServers-only) → spawns the channel
+# server as the MCP child, which self-registers MACF_AGENT_DEVOPS_AGENT.
+if [ -n "${MACF_TEST:-}" ]; then
+  exec claude --permission-mode acceptEdits --plugin-dir "$SCRIPT_DIR/.macf/plugin-cs" "$@"
+else
+  claude --permission-mode acceptEdits -c --plugin-dir "$SCRIPT_DIR/.macf/plugin-cs" "$@" \
+    || exec claude --permission-mode acceptEdits --plugin-dir "$SCRIPT_DIR/.macf/plugin-cs" "$@"
+fi

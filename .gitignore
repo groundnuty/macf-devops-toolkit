@@ -57,6 +57,7 @@ k3s/.token
 .claude/.cache/
 
 # MACF hand-wire local state (substrate channel-server config — DR-005 Decision 6).
-# Certs (keys), the cert-management macf-agent.json marker, and channel logs are
-# per-machine + sensitive; never committed.
+# Per-machine + sensitive (certs incl. keys, App creds, channel logs); never committed.
+# The CONTENT/recipe is documented in design/DR-005...; the files are per-home local state.
 .macf/
+.claude/.macf/
