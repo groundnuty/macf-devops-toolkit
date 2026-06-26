@@ -18,6 +18,8 @@ This DR does **not** re-specify the contract or re-implement detection — it co
 
 ## Decision — a stateless cron one-shot that *consumes* DR-030's detection
 
+> **Refined by Amendment A** (2026-06-26, below): the watchdog is a **desired-state reconciler**, not a bare liveness-restarter — that reframe is what gives cold-start / one-command launch-all / reboot-recovery and the *don't-fight-a-deliberate-exit* guarantee. The §"Decision" mechanics below are the per-agent-**heal** branch (the tiered ladder); Amendment A is the reconciler model that wraps them.
+
 ### 1. The watchdog is a stateless cron one-shot
 
 A single script: **probe → act → exit**. No long-lived daemon (the "who watches the watchdog" regress is terminated by the trigger being the OS scheduler, not a bespoke process — DR-031 §"Triggers"). It is fired by **user-level `cron`** on the VM (proven on real cron — §"Empirics"). The watchdog does **not** re-implement detection: it shells out to
@@ -111,6 +113,47 @@ The watchdog's detection-consumption depends on the two DR-030 `--json` CLIs (wh
 2. **Devops VM v1 (on `macf fleet doctor --json` — mesh-detection, landing now):** the cron watchdog with **Tier-1 (gated inject) + Tier-3 (alert) + the self-heartbeat**; idempotent cron registration on launch. **Hold Tier-2 (auto-restart) behind operator sign-off.** The full probe-chain (adding `macf routing doctor --json` registration-freshness) completes when DR-030 **phase 2** lands — v1 is not blocked on it.
 3. **Upgrade dual-use:** the version-check driver (DR-029 `versions`) + the rolling sequencer (restart one → verify green via `macf fleet doctor` → next) — the automated form of the manual Stage-3 hand-relaunch.
 4. **K8s:** the liveness/`restartPolicy` manifests when agents become pods; the agent contract is unchanged.
+
+## Amendment A (2026-06-26): desired-state reconciler + cold-start + substrate scope
+
+*From the operator's heterogeneous-fleet review + the cloud-substrate research (`research/2026-06-26-claude-code-on-anthropic-cloud-for-macf-agents.md`). Refines the Decision: the watchdog is a desired-state reconciler, not a bare liveness-restarter. Mirrors the DR-031 model amendment proposed on `macf-devops-toolkit#115`.*
+
+### A.1 The watchdog is a desired-state reconciler
+
+Reframe the cron one-shot from *"probe → if deaf, tiered-response"* to **"reconcile actual → desired state"** (the Kubernetes model). **Desired = the set of agents that should run on this host, operator-controlled.** Each sweep:
+
+1. read **desired** (the per-host manifest, A.2) + **actual** (`macf fleet doctor --json` + a local process/tmux check);
+2. desired-and-**not-running** → **launch** it (cold-start / reboot / first-bring-up);
+3. desired-and-running-but-**deaf** → the tiered ladder (§"Tiered response": inject → `restart-self` → alarm);
+4. **desired-down** (A.3) → **do nothing** (never resurrect).
+
+This subsumes the four cases the operator raised: **cold-start / one-command launch-all** = reconcile from empty; **VM-reboot recovery** = the first post-boot sweep (A.4, automatic); **per-agent heal** = case 3 (the existing ladder); **don't-fight-the-operator** = case 4 (A.3). It is the K8s model (desired replicas vs running pods), so K8s realizes it natively (a Deployment); the VM cron is the tiny reconciler. **Launch (case 2) ≠ `restart-self` (case 3):** a never-started agent has no process to self-restart, so the reconciler **launches** it (detached `claude.sh`, same `host-prelude`); a present-but-deaf agent uses the verb.
+
+### A.2 The desired-agents manifest (the new state the reconciler needs)
+
+The reconciler needs a declarative **per-host desired-agents** source — the VM analog of a K8s Deployment spec: a small operator-owned manifest (e.g. `~/.macf/desired-agents.yaml`, `{agent, workspace}` per entry). **NOT derived from the registry** — that's *runtime* state (who's *currently* registered), not *desired* state. This is genuinely new config (which agents run on which host); on K8s it's the replica set.
+
+### A.3 The intent signal — why the reconciler never fights a deliberate exit ("will cron fight me?")
+
+**A bare liveness watchdog *would* fight you** — it can't tell "operator stopped it on purpose" from "it crashed," so it would relaunch a deliberately-exited agent. The reconciler doesn't, because **a deliberate stop updates desired state.** Mechanism: a per-agent **`paused`** marker (a manifest flag, or a `~/.macf/paused/<agent>` sentinel the operator drops). Paused = desired-down → the reconciler skips it (no launch, no restart) — exactly `kubectl scale deploy/<x> --replicas=0`. So **to stop an agent without a fight, pause it** (or remove it from desired); un-pause to resume. A plain `claude.sh` exit *without* pausing is still treated as a fault (relaunched) — correct, since "exited and didn't pause" is indistinguishable from a crash and the safe default is to restore the desired agent.
+
+### A.4 Host-installed cron — survives reboot, runs on a cold box ("does the cron survive a VM restart?")
+
+**Yes** — a user crontab persists in the cron spool across reboot and the cron daemon runs it at boot. But the catch *is* the launch-all use case: a rebooted VM has **zero agents**, and `restart-self` can't help (no agent alive to trigger it) — the reconciler must **launch**. So the watchdog cron must be **host-installed** (a one-time host-setup, persisting independently of any agent), **not** only "installed by `claude.sh` on agent launch" (§3 as written) — because on cold-boot nothing launches to install it. With the host-installed reconciler cron, the **first post-boot sweep launches the whole desired set automatically** — so the reconciler *is* the one-command launch-all **and** the auto-recovery-after-reboot, no separate mechanism. (§3's idempotent-on-launch registration stays as a self-heal for the entry; the host-install is what makes cold-boot work.)
+
+### A.5 Passive tier reads `/health.last_processed` (local-receipt path — macf#581 / increment 1e)
+
+The §"Tiered response" passive-delivery signal reads **`/health.last_processed`** — a true *local* mesh self-report (the channel server surfaces it from the local `processed-receipts.jsonl` the turn-receipt hook now writes, per DR-030 amendment macf#581 / increment 1e). This resolves the earlier locality precondition: passive is a real mesh self-report needing **no backend** (no Tempo round-trip), and `--inject` verifies against the same field.
+
+### A.6 Substrate scope — VM + Kubernetes; Anthropic-cloud out-of-scope-*with-rationale*
+
+This DR's reconciler/watchdog targets **VM (this DR) + Kubernetes** (the §6 manifests). **Anthropic-cloud substrates are out-of-scope with rationale** (not unsupported-by-accident), per the research doc: interactive cloud-code can't be a push-routed peer (no inbound / tailnet / persistence). **Managed Agents self-hosted** is a noted *future* path — it inverts delivery to a poll-queue (no inbound; tool-execution on our infra) and natively provides `workers_polling` liveness + `work.stop` + agent-versioning, so it could **replace much of this watchdog** for that substrate. A separate strategic spike, not in scope here.
+
+### A.7 Upgrade is substrate-specific (mirrors the DR-031 capability matrix)
+
+The §11-style upgrade-dual-use (`restart-self` + version-check + sequencer) is **VM-specific**. On K8s, upgrade is **GitOps** (bump the image → the controller reconciles a new Deployment revision; the agent is *passive*, just replaceable) — not a self-triggered restart. So the watchdog's *upgrade* role exists only on the VM substrate; on K8s the upgrade reconciler is GitOps, outside this DR. (Restart is universal — VM detached relauncher / K8s kubelet — but the *driver* differs.)
+
+**Unification (per the DR-031 model, science's point):** "desired version" is just another facet of *desired state* — so the VM upgrade-driver (version-check → `restart-self` with new bits) is **the reconciler applied to the *version* dimension**, and the rolling sequencer is reconcile-one → verify-green → the-next. On K8s, desired-version is reconciled by GitOps (a new image) exactly as desired-replicas are. So the reconciler reconciles desired-**{set, version}** — the *set* on every substrate, the *version* via that substrate's upgrade mechanism.
 
 ## Consequences
 
