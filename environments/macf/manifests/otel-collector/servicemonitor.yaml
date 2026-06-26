@@ -22,7 +22,7 @@
 #   query `up{job=~".*central-collector.*"}` — both jobs (8889 + 8888) → 1
 #
 # Smoke for the :8889 surface (agent metrics):
-#   curl -X POST http://127.0.0.1:14318/v1/metrics \
+#   curl -X POST http://127.0.0.1:4318/v1/metrics \
 #     -H 'Content-Type: application/json' \
 #     -d '{"resourceMetrics":[{"resource":{"attributes":[]},"scopeMetrics":[
 #       {"scope":{"name":"smoke"},"metrics":[

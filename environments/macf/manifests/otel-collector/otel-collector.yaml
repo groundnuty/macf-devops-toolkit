@@ -236,7 +236,7 @@ spec:
       # Loki + ClickHouse exporters added per #28 — central Collector
       # gains a `logs:` pipeline so agents' OTLP-emitted logs route to
       # the same backends the DaemonSet's filelog scrapes go to. Without
-      # these, CC's OTLP log records arrive at :14318 + are silently
+      # these, CC's OTLP log records arrive at :4318 + are silently
       # dropped (no logs pipeline = no exporter = drop). Same exporter
       # config + retry tuning as the DaemonSet's logs-Collector.
       otlphttp/loki:
