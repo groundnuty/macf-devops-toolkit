@@ -27,7 +27,9 @@ macf fleet doctor --json      # mesh-Reachable (is each agent's channel up over 
 macf routing doctor --json    # registration-freshness (right key, instance_id/port match, no stale entry)
 ```
 
-parses the verdict, and acts. **DR-030's `--json` schema IS the watchdog's input contract** (this is who that `--json` is *for*). The watchdog runs from cron — i.e. **outside Claude Code's sandbox**, which is exactly DR-030 §7's required execution context; the `host-prelude` (§5) makes the CLI runnable from cron's bare env.
+parses the verdict, and acts. **DR-030's `--json` schema IS the watchdog's input contract** (this is who that `--json` is *for*) — and the watchdog's `jq` parser **pins to the _shipped_ schema** (code posts the exact shape when `macf fleet doctor --json` merges) with a **schema-version assertion**, *not* a hand-authored guess: a field rename that silently broke the parser would blind the supervisor itself — a silent-fallback (the watcher going dark). The watchdog runs from cron — i.e. **outside Claude Code's sandbox**, which is exactly DR-030 §7's required execution context; the `host-prelude` (§5) makes the CLI runnable from cron's bare env.
+
+**Two `--json` inputs, two DR-030 phases (sequence accordingly):** the probe-chain consumes **both** `macf fleet doctor --json` (mesh-Reachable — DR-030 **phase 1**, in active build now) **and** `macf routing doctor --json` (registration-freshness: caller-pins / #538 / `instance_id`+port staleness — DR-030 **phase 2**, not yet built). So VM v1 starts on `macf fleet doctor --json` (mesh-detection) the moment it merges and is **not blocked** waiting on `macf routing doctor`; the **full probe-chain completes when DR-030 phase 2 lands.**
 
 **Free detection via the router** (DR-031): the v3 router reads the registry on *every* route, so a stale heartbeat / failed `/health` already surfaces "this agent looks deaf" as a side effect of normal traffic — covering *routed* agents. The cron sweep then only has to cover the **idle gap** (agents nobody is currently routing to — the case the agent itself cannot self-detect).
 
@@ -47,6 +49,8 @@ Per DR-031's load-bearing doctrine (*every rung must be delivery-confirmed or fa
 ### 4. The watchdog self-heartbeat — terminating the who-watches-the-cron regress
 
 The cron sweep covers the idle gap **only if cron itself runs.** So the watchdog **stamps its own heartbeat** each run (registry field or a known path). Its *absence* is then detectable — and the thing that checks it is the **operator/auditor monitoring layer, where Tier-3 escalation already lives**: watchdog-silent ⇒ heartbeat-stale ⇒ Tier-3 alarm. **The regress terminates at the human** (correct — the operator is the top of the escalation chain). On the VM, `cron` itself is the OS-level dead-man's-switch; if *cron* dies the host is in trouble, which is separately monitored.
+
+This watchdog self-heartbeat is a **distinct signal** from the framework's *agent* registry heartbeat/TTL (DR-031): the agent stamps *"I am alive"*, the watchdog stamps *"the sweep ran"*. Both eye the registry, so to avoid **compounding** the App-token write-budget + the `macf#439` If-Match TOCTOU, the watchdog self-heartbeat writes a **distinct registry field on the _same_ If-Match path** as the agent heartbeat, at a coarse cadence — the two coexist without doubling write-contention.
 
 ### 5. `host-prelude` — re-establish the toolchain, don't inherit it
 
@@ -88,7 +92,7 @@ The pre-kill commit Tier-2 triggers must be a **WIP-on-a-restart-marker** shape 
 
 ## Sequencing (code's framework note 1)
 
-The watchdog's detection-consumption depends on `macf fleet doctor --json` / `macf routing doctor --json` existing (DR-030 build, code) and on `restart-self` + graceful-deregister + TTL (DR-031 build, code). The **`/health` foundation is already merged** (`macf#572`, `/health` `state`+`otel`, 2026-06-26). So the order is: **framework lands the `--json` CLI + the DR-031 contract → then the devops watchdog consumes them.** The watchdog VM v1 (Tier-1 gated inject + Tier-3 alert + self-heartbeat) is buildable as soon as the `--json` CLI exists; Tier-2 auto-restart is held behind operator sign-off regardless.
+The watchdog's detection-consumption depends on the two DR-030 `--json` CLIs (which land in **two phases** — §1) and on `restart-self` + graceful-deregister + TTL (DR-031 build, code). The **`/health` foundation is already merged** (`macf#572`, `/health` `state`+`otel`, 2026-06-26), and **`macf fleet doctor --json` (mesh) is in active build now** (DR-030 phase 1). So the order is: **framework lands `macf fleet doctor --json` + the DR-031 contract → the devops watchdog VM v1 consumes the mesh half → `macf routing doctor --json` (DR-030 phase 2) completes the full probe-chain.** VM v1 (Tier-1 gated inject + Tier-3 alert + self-heartbeat) is buildable as soon as `macf fleet doctor --json` merges — **not blocked on phase 2**; Tier-2 auto-restart is held behind operator sign-off regardless.
 
 ## Boundaries
 
@@ -104,7 +108,7 @@ The watchdog's detection-consumption depends on `macf fleet doctor --json` / `ma
 ## Phasing (the devops slice)
 
 1. **(framework first)** DR-030 `--json` CLI + DR-031 graceful-deregister/TTL/`restart-self`/`host-prelude` generator.
-2. **Devops VM v1:** the cron watchdog with **Tier-1 (gated inject) + Tier-3 (alert) + the self-heartbeat**; idempotent cron registration on launch. **Hold Tier-2 (auto-restart) behind operator sign-off.**
+2. **Devops VM v1 (on `macf fleet doctor --json` — mesh-detection, landing now):** the cron watchdog with **Tier-1 (gated inject) + Tier-3 (alert) + the self-heartbeat**; idempotent cron registration on launch. **Hold Tier-2 (auto-restart) behind operator sign-off.** The full probe-chain (adding `macf routing doctor --json` registration-freshness) completes when DR-030 **phase 2** lands — v1 is not blocked on it.
 3. **Upgrade dual-use:** the version-check driver (DR-029 `versions`) + the rolling sequencer (restart one → verify green via `macf fleet doctor` → next) — the automated form of the manual Stage-3 hand-relaunch.
 4. **K8s:** the liveness/`restartPolicy` manifests when agents become pods; the agent contract is unchanged.
 
