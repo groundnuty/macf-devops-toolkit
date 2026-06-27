@@ -120,5 +120,19 @@ assert_exit fleet-healthy.json 2 --routing-json "$ALERTS/rbad.json"
 # without --with-routing → mesh-only (routing ignored) — back-compat.
 assert_decision fleet-healthy.json devops-agent OK
 
+echo "== probe exit-code handling (live-command path; the bug live-dry-run caught) =="
+# the real fleet/routing-doctor exits 1 on DEGRADED but emits valid JSON — NOT a
+# probe failure. --fleet-json bypasses the command, so exercise the live path via
+# MACF_FLEET_DOCTOR_CMD → a fake doctor that exits 1 with valid JSON.
+FAKE="$PWD/fleet/testdata/fake-doctor.sh"
+out="$(MACF_FLEET_DOCTOR_CMD="$FAKE degraded" "$REC" "${BASE[@]}" 2>&1 || true)"
+if printf '%s\n' "$out" | awk '$1=="devops-agent"{print $2}' | grep -q HEAL; then
+  echo "  ok: DEGRADED+exit1 PROCESSED (devops HEAL, not bailed)"; pass=$((pass+1))
+else echo "  FAIL: DEGRADED+exit1 bailed (regression of the live-dry-run bug)"; fail=$((fail+1)); fi
+# a GENUINE failure (non-JSON + exit 1, e.g. auth error) must still fail-loud → exit 2
+rc=0; MACF_FLEET_DOCTOR_CMD="$FAKE fail" "$REC" "${BASE[@]}" >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then echo "  ok: genuine probe-failure (non-JSON) → exit 2"; pass=$((pass+1))
+else echo "  FAIL: probe-failure rc=$rc want 2"; fail=$((fail+1)); fi
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
