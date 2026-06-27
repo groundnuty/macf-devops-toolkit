@@ -50,19 +50,27 @@ the explicit `paused` sentinel: **desired-down = `paused` OR `last-exit==0`**.
 ## Status — incremental build (macf#118)
 
 - **Increment 1 (merged):** the reconcile **engine** — decisions, report-only.
-- **Increment 2 (this):** **action execution** — the exit-code intent layer +
+- **Increment 2 (merged):** **action execution** — the exit-code intent layer +
   LAUNCH (detached, exit-code-captured tmux session) + the tiered HEAL ladder
   (Tier-1 inject gated by the Pattern-C `session_activity` check vs the Instance-3
   RC-bound-tmux hazard → Tier-2 graceful-restart **held behind `--allow-restart`** →
-  Tier-3 dedup'd alert). **DRY-RUN BY DEFAULT** — constructs + prints commands;
-  `--execute` actually acts, `--allow-restart` enables Tier-2.
-- **Increment 3 (next):** host-installed cron + idempotent registration on launch +
-  the watchdog self-heartbeat + the `macf routing doctor --json` routing-infra probe
+  Tier-3 dedup'd alert). **DRY-RUN BY DEFAULT**; `--execute` acts.
+- **Increment 3 (this):** the **periodic / cross-sweep** layer —
+  - **`install-cron.sh`** — idempotent **host-installed** cron (survives reboot;
+    the first post-boot sweep launches the desired fleet, §A.4). Sources
+    `host-prelude.sh` first (cron's bare env). **Installs report-only by default**;
+    `--execute` / `--allow-restart` opt in. `--uninstall` / `--print` too.
+  - **Cross-sweep escalation** — the consecutive-deaf-sweep counter drives the tier:
+    sweep 1 → Tier-1; sweep 2+ → escalate (Tier-2 if allowed + Tier-3). So a Tier-1
+    that "delivered" (the `session_activity` heuristic — not a true receipt) but did
+    NOT recover the agent escalates instead of re-injecting forever. Reset on OK.
+  - **Self-heartbeat** (`--heartbeat-file`) — stamped each real sweep; its absence
+    is the who-watches-the-cron signal (→ Tier-3/operator). Execute-gated.
+- **Increment 4 (next):** the `macf routing doctor --json` routing-infra probe
   (treating `session_ok`/`pins_consistent` as known false-positives per macf#610/#614,
-  keying on the real per-agent invariants).
-- **Increment 4:** the K8s liveness/`restartPolicy` manifests (the substrate-native
-  equivalent — `restartPolicy: OnFailure` consumes the *same* exit-code contract;
-  the agent contract `/health` + be-replaceable + exit-code-intent is unchanged).
+  keying on the real per-agent invariants) + the K8s liveness/`restartPolicy`
+  manifests (`restartPolicy: OnFailure` consumes the *same* exit-code contract; the
+  agent contract `/health` + be-replaceable + exit-code-intent is unchanged).
 
 ## Run
 
@@ -75,6 +83,12 @@ the explicit `paused` sentinel: **desired-down = `paused` OR `last-exit==0`**.
 
 # also enable Tier-2 graceful-restart (operator sign-off; default OFF):
 ./fleet/reconcile.sh --manifest ~/.macf/desired-agents.yaml --execute --allow-restart
+
+# install the host cron (report-only first — watch the log, then re-run --execute):
+./fleet/install-cron.sh                       # report-only, every 10 min, logs to ~/.macf/watchdog.log
+./fleet/install-cron.sh --execute             # once trusted: acting (Tier-2 still held)
+./fleet/install-cron.sh --execute --allow-restart   # full auto-restart
+./fleet/install-cron.sh --uninstall
 
 # offline / tests:
 ./fleet/test-reconcile.sh
