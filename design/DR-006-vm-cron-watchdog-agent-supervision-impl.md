@@ -156,6 +156,44 @@ The §11-style upgrade-dual-use (`restart-self` + version-check + sequencer) is 
 
 **Unification (per the DR-031 model, science's point):** "desired version" is just another facet of *desired state* — so the VM upgrade-driver (version-check → `restart-self` with new bits) is **the reconciler applied to the *version* dimension**, and the rolling sequencer is reconcile-one → verify-green → the-next. On K8s, desired-version is reconciled by GitOps (a new image) exactly as desired-replicas are. So the reconciler reconciles desired-**{set, version}** — the *set* on every substrate, the *version* via that substrate's upgrade mechanism.
 
+## Amendment B (2026-06-27): the intent signal is the EXIT CODE — empirically validated; no Claude-Code coupling
+
+*From an operator design review + a throwaway-agent experiment series. Refines §A.3's `paused`/intent signal with a concrete, measured mechanism, and rejects a fragile alternative. Operator directive: minimize custom solutions, never couple to fast-moving AI-tool internals; **"just tmux, no systemd."***
+
+### B.1 The deliberate-stop signal is `claude`'s exit code (0), not the SessionEnd hook reason
+
+The §A.3 "a deliberate stop updates desired state" needs a concrete signal. The operator interacts via the TUI and exits by typing `/exit` — we **cannot** enforce a wrapper command. So the signal must ride the native exit. Two candidates were measured (throwaway agent, real channel-server, driven via `tmux send-keys`):
+
+- **REJECTED — the SessionEnd hook `reason`** (`prompt_input_exit` for `/exit`, `other` for signals): it *does* distinguish, but the reason strings are **undocumented and Claude-Code-version-coupled** — exactly the "custom solution riding a fast-moving AI tool with no backwards-compat guarantee" the operator warned against. Don't build supervision on it.
+- **CHOSEN — the process exit code** (stable POSIX, decades-stable, not a Claude Code internal):
+
+  | termination | `claude` exit code |
+  |---|---|
+  | **typed `/exit`** (operator's deliberate stop) | **0** |
+  | SIGTERM (operational restart / fleet-update / maintenance) | 143 |
+  | SIGHUP (terminal hangup) | 129 |
+  | SIGKILL (crash) | 137 |
+
+**`0` = the operator typed `/exit` → stay down; non-zero (128+N) = any signal/crash → restore.** This cleanly distinguishes the operator's deliberate stop from *every* operational termination (the sharp operator worry: a fleet-update or maintenance SIGTERM must NOT be mistaken for a deliberate stop — it isn't, it's non-zero → relaunch).
+
+### B.2 Mechanism — a thin exit-code-capture launch wrapper (the only new custom bit)
+
+The tmux launch wraps `claude` to capture its exit code: `claude; echo $? > ~/.macf/last-exit/<agent>`. The reconciler (§A.1) then reads it for a not-running desired agent:
+- `last-exit == 0` (typed `/exit`) → **desired-down → SKIP** (don't-fight-the-operator);
+- `last-exit != 0` or absent (signal / crash / operational restart) → **LAUNCH / restore**.
+
+This is the entire intent layer: one-line wrapper + a file read. No systemd, no daemon, no hook-reason parsing. (Operational stop-and-stay-down, if ever needed, sets the `paused` sentinel explicitly — not a faked keystroke.)
+
+### B.3 Restart with a GRACEFUL signal — and the watchdog keys on liveness, not registry-presence
+
+Measured hook + deregister behavior under each kill:
+- **SessionEnd hooks** (telemetry, archiver) fire on graceful kills (`/exit`/SIGTERM/SIGHUP) within a **~1.5s** budget; **SIGKILL fires nothing**. So restart via **SIGTERM** (hooks get their chance); SIGKILL last-resort. Shutdown hooks must be fast (<1.5s).
+- **graceful-deregister (#586) does NOT fire on TUI-exit** — both `/exit` and SIGTERM leave a **stale registry entry** (verified real-agent; filed `macf#627`). Stale entries are cleaned by the **registry TTL (#589)** or relaunch-overwrite, NOT by deregister. **Therefore the reconciler keys on LIVENESS** — `fleet doctor` reachability + heartbeat freshness + `instance_id` match — **never on registry-presence** (which goes stale). §A.1/§"Decision" already do this; B.3 records *why* it's load-bearing.
+
+### B.4 Substrate scope (operator: "just tmux, no systemd")
+
+The supervision stays a thin **tmux-based** cron watchdog + the B.2 exit-code wrapper — no external supervisor (systemd/s6) on the VM. (A standard supervisor keyed on the same exit code would also work, but the operator scoped us to tmux; the exit-code signal is supervisor-agnostic, so a future K8s `restartPolicy: OnFailure` consumes the identical `0`-vs-non-zero contract natively.)
+
 ## Consequences
 
 - A silent fleet-block becomes a loud, escalating alarm — and most cases self-heal (Tier-1/2) before a human is involved.
