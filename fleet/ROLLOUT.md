@@ -21,6 +21,12 @@ no agent (read-only / report-only). Stage 4+ acts; do it **with the operator**.
    - **#627** — a real-agent `/exit` now deregisters cleanly (no stale entry until
      TTL). Re-run the throwaway-agent `/exit` test against the deployed cs →
      confirm deregister → **close #627** (reporter).
+   - **bare-ping fix (`macf#620`/`#630`)** — the relaunch is this fix's keystone too
+     (the receivers now carry the anchorless-mention reject). Verify: an anchorless
+     `type:mention` POST is now **400-rejected**, not surfaced as a bare "You were
+     mentioned" with no content. (This is the operator-worried bare-ping bug —
+     verifiable only post-relaunch.) So the relaunch closes **three** things at once:
+     #590 + #627 + the bare-ping reject.
 
 ## Stage 1 — desired-state manifest (operator/devops, one-time)
 
@@ -60,7 +66,16 @@ The one **unvalidated-live** path is the LAUNCH wrapper (it spawns a real
 
    Confirm it launches `macf@<agent>` correctly (identity, cert, registration),
    the agent comes back healthy, and the exit-code wrapper wrote `~/.macf/last-exit/<agent>`.
-   **Mind the auditor carve-out:** its `role` must stay `auditor` through any relaunch.
+   - **Auditor carve-out — EXPLICITLY ASSERT, don't just mind it (the one
+     safety-critical case):** a watchdog-LAUNCH'd auditor must come up with
+     `MACF_AGENT_ROLE=auditor` (bare) so the `check-auditor-never-acts` hook is
+     intact — a LAUNCH that drifted its role would **silently disable the
+     write-boundary** (a safety regression, not cosmetic). After a controlled
+     LAUNCH of the auditor, assert `sudo grep MACF_AGENT_ROLE /proc/<auditor-pid>/environ`
+     shows `auditor` (bare) AND the never-acts hook is wired (`.claude/settings.json`
+     references `check-auditor-never-acts.sh`). The LAUNCH wrapper runs `claude.sh`
+     → sources `env.identity` (bare role), so this should hold — but assert it,
+     because the auditor is the one agent where role-drift is a safety bug.
 2. **Confirm the don't-fight-the-operator path:** `/exit` an agent yourself →
    confirm the next sweep SKIPs it (last-exit==0 → desired-down), does NOT relaunch.
 3. Once both pass, install the acting cron:
