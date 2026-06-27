@@ -99,15 +99,24 @@ if [ -n "$FLEET_JSON" ]; then
   [ -f "$FLEET_JSON" ] || { echo "FATAL: --fleet-json file not found: $FLEET_JSON" >&2; exit 2; }
   ACTUAL_RAW="$(cat "$FLEET_JSON")"
 else
-  ACTUAL_RAW="$($FLEET_DOCTOR_CMD)" \
-    || { echo "FATAL: '$FLEET_DOCTOR_CMD' failed (mesh probe)" >&2; exit 2; }
+  # NB: `fleet doctor` is a health-check CLI — it exits NON-ZERO on a DEGRADED/EMPTY
+  # verdict but still emits valid JSON. A DEGRADED fleet (some agents unhealthy) is
+  # exactly what the reconciler must ACT on, NOT a probe failure. So capture the
+  # output regardless of exit code; the schema-assert below distinguishes a real
+  # probe result (valid JSON + schema_version) from a genuine failure (auth/network/
+  # crash → non-JSON). [bug caught by live dry-run 2026-06-27; offline tests via
+  # --fleet-json bypass the command's exit code.]
+  ACTUAL_RAW="$($FLEET_DOCTOR_CMD 2>/dev/null || true)"
 fi
 
 # HARD schema-version assert (a silent field-rename would blind the supervisor —
-# itself a silent-fallback; macf#118). Fail LOUD on unknown version.
-GOT_SCHEMA="$(printf '%s' "$ACTUAL_RAW" | jq -r '.schema_version // "missing"')"
+# itself a silent-fallback; macf#118). Doubles as the probe-ran-vs-failed gate: a
+# genuine failure (auth/network/crash) yields non-JSON → "missing" → fail LOUD.
+GOT_SCHEMA="$(printf '%s' "$ACTUAL_RAW" | jq -r '.schema_version // "missing"' 2>/dev/null || echo "missing")"
 [ "$GOT_SCHEMA" = "$EXPECTED_SCHEMA" ] || {
-  echo "FATAL: fleet doctor --json schema_version=$GOT_SCHEMA, expected $EXPECTED_SCHEMA — refusing to parse a drifted schema" >&2
+  echo "FATAL: '$FLEET_DOCTOR_CMD' did not return schema_version=$EXPECTED_SCHEMA (got '$GOT_SCHEMA')." >&2
+  echo "       → probe FAILED (auth/network/crash → non-JSON) OR the schema DRIFTED." >&2
+  echo "       (A DEGRADED verdict is NORMAL — doctor exits 1 with valid JSON — NOT a failure.)" >&2
   exit 2
 }
 
@@ -134,13 +143,17 @@ if [ "$USE_ROUTING" -eq 1 ]; then
     [ -f "$ROUTING_JSON" ] || { echo "FATAL: --routing-json file not found: $ROUTING_JSON" >&2; exit 2; }
     ROUTING_RAW="$(cat "$ROUTING_JSON")"
   else
-    ROUTING_RAW="$($ROUTING_DOCTOR_CMD)" \
-      || { echo "WARN: '$ROUTING_DOCTOR_CMD' failed — proceeding mesh-only" >&2; ROUTING_RAW=""; }
+    # routing-doctor also exits 1 on DEGRADED (the substrate is perpetually DEGRADED
+    # via the known FPs) but emits valid JSON — so capture regardless of exit code;
+    # the schema-assert below gates probe-ran-vs-failed. (Same live-dry-run fix as
+    # fleet-doctor; treating exit-1 as failure would drop routing data every sweep.)
+    ROUTING_RAW="$($ROUTING_DOCTOR_CMD 2>/dev/null || true)"
+    [ -n "$ROUTING_RAW" ] || echo "WARN: '$ROUTING_DOCTOR_CMD' produced no output — proceeding mesh-only" >&2
   fi
   if [ -n "$ROUTING_RAW" ]; then
-    R_SCHEMA="$(printf '%s' "$ROUTING_RAW" | jq -r '.schema_version // "missing"')"
+    R_SCHEMA="$(printf '%s' "$ROUTING_RAW" | jq -r '.schema_version // "missing"' 2>/dev/null || echo "missing")"
     [ "$R_SCHEMA" = "$EXPECTED_SCHEMA" ] || {
-      echo "FATAL: routing doctor --json schema_version=$R_SCHEMA, expected $EXPECTED_SCHEMA — refusing drifted schema" >&2
+      echo "FATAL: '$ROUTING_DOCTOR_CMD' did not return schema_version=$EXPECTED_SCHEMA (got '$R_SCHEMA') — probe failed or schema drifted" >&2
       exit 2
     }
     # -> "<label>\t<routable>\t<freshness>\t<reg_iid>\t<health_iid>"
