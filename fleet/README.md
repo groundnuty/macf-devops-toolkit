@@ -34,25 +34,47 @@ it does not re-implement detection. Identity keys on the per-agent **`ack_agent`
 - **`test-reconcile.sh`** — offline unit tests (canned fixtures, no live fleet).
 - **`testdata/`** — `fleet doctor --json` fixtures.
 
+## Intent signal — the exit code (DR-006 Amendment B)
+
+A not-running desired agent is reconciled by **`claude`'s last exit code** (captured
+by the LAUNCH wrapper into `~/.macf/last-exit/<agent>`):
+
+- `last-exit == 0` (the operator typed `/exit`) → **desired-DOWN → SKIP** (don't-fight).
+- `last-exit != 0` or **absent** (SIGTERM / crash / never-ran) → **LAUNCH** (restore).
+
+This is POSIX-stable (not coupled to Claude Code internals — empirically: `/exit`=0,
+SIGTERM=143, SIGHUP=129, SIGKILL=137) and **fails safe toward restore** (ambiguity
+always restores; even a SIGKILL'd wrapper leaves no `0` → restore). It composes with
+the explicit `paused` sentinel: **desired-down = `paused` OR `last-exit==0`**.
+
 ## Status — incremental build (macf#118)
 
-- **Increment 1 (this):** the reconcile **engine** — read desired → schema-pinned
-  probe → compute + report per-agent decisions. **Report-only** (no kills/launches).
-- **Increment 2 (next):** action execution — the tiered ladder (Tier-1 inject
-  gated by the Pattern-C `session_activity` check vs the Instance-3 RC-bound-tmux
-  hazard → Tier-2 `restart-self` **held behind operator sign-off** → Tier-3 alert)
-  + LAUNCH (detached `claude.sh`) + the watchdog self-heartbeat.
-- **Increment 3:** host-installed cron + idempotent registration on launch +
-  the `macf routing doctor --json` routing-infra probe (treating its `session_ok`
-  as assert-if-present per macf#610, NOT faulting on the substrate false-positive).
+- **Increment 1 (merged):** the reconcile **engine** — decisions, report-only.
+- **Increment 2 (this):** **action execution** — the exit-code intent layer +
+  LAUNCH (detached, exit-code-captured tmux session) + the tiered HEAL ladder
+  (Tier-1 inject gated by the Pattern-C `session_activity` check vs the Instance-3
+  RC-bound-tmux hazard → Tier-2 graceful-restart **held behind `--allow-restart`** →
+  Tier-3 dedup'd alert). **DRY-RUN BY DEFAULT** — constructs + prints commands;
+  `--execute` actually acts, `--allow-restart` enables Tier-2.
+- **Increment 3 (next):** host-installed cron + idempotent registration on launch +
+  the watchdog self-heartbeat + the `macf routing doctor --json` routing-infra probe
+  (treating `session_ok`/`pins_consistent` as known false-positives per macf#610/#614,
+  keying on the real per-agent invariants).
 - **Increment 4:** the K8s liveness/`restartPolicy` manifests (the substrate-native
-  equivalent; the agent contract `/health` + be-replaceable is unchanged).
+  equivalent — `restartPolicy: OnFailure` consumes the *same* exit-code contract;
+  the agent contract `/health` + be-replaceable + exit-code-intent is unchanged).
 
 ## Run
 
 ```sh
-# report (against the live mesh):
+# dry-run (default — reports decisions + prints the commands it WOULD run):
 ./fleet/reconcile.sh --manifest ~/.macf/desired-agents.yaml
+
+# actually act (launch missing agents, run the HEAL ladder):
+./fleet/reconcile.sh --manifest ~/.macf/desired-agents.yaml --execute
+
+# also enable Tier-2 graceful-restart (operator sign-off; default OFF):
+./fleet/reconcile.sh --manifest ~/.macf/desired-agents.yaml --execute --allow-restart
 
 # offline / tests:
 ./fleet/test-reconcile.sh
