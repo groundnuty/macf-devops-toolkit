@@ -66,11 +66,21 @@ the explicit `paused` sentinel: **desired-down = `paused` OR `last-exit==0`**.
     NOT recover the agent escalates instead of re-injecting forever. Reset on OK.
   - **Self-heartbeat** (`--heartbeat-file`) — stamped each real sweep; its absence
     is the who-watches-the-cron signal (→ Tier-3/operator). Execute-gated.
-- **Increment 4 (next):** the `macf routing doctor --json` routing-infra probe
-  (treating `session_ok`/`pins_consistent` as known false-positives per macf#610/#614,
-  keying on the real per-agent invariants) + the K8s liveness/`restartPolicy`
-  manifests (`restartPolicy: OnFailure` consumes the *same* exit-code contract; the
-  agent contract `/health` + be-replaceable + exit-code-intent is unchanged).
+- **Increment 4 (this):** the **`routing doctor --json` second probe** (`--with-routing`)
+  — registration-freshness on top of mesh-reachability. Catches the **macf#553
+  stale-registration** case mesh alone misses (the agent answers mTLS but the registry
+  points at a dead/old instance → the router dials the wrong port): a mesh-OK agent
+  with `registry_instance_id != health_instance_id` (or not-`routable`, or `freshness:
+  stale`) → **HEAL (stale-registration)**. **Deliberately IGNORES the two known
+  false-positives** on the hand-wired substrate — per-agent `session_ok` (vestigial
+  agent-config, macf#610) and the aggregate `verdict`/`pins_consistent` (non-fleet
+  repos, macf#614) — keying only on the real per-agent invariants (silent-fallback
+  Pattern A: assert load-bearing invariants, don't trust a composite carrying a
+  calibration FP). Schema-pinned like fleet-doctor. Optional (mesh-only without the flag).
+- **Increment 5 (next):** the K8s liveness/`restartPolicy` manifests (the
+  substrate-native equivalent — `restartPolicy: OnFailure` consumes the *same*
+  exit-code contract; the agent contract `/health` + be-replaceable + exit-code-intent
+  is unchanged). Plus the heartbeat external consumer (devops-toolkit#123).
 
 ## Run
 

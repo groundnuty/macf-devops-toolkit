@@ -104,5 +104,21 @@ if printf '%s\n' "$CRON_OUT" | grep -qF -- '--execute'; then
   echo "  FAIL: default cron line has --execute (should be report-only)"; fail=$((fail+1))
 else echo "  ok: default cron line is report-only (no --execute)"; pass=$((pass+1)); fi
 
+echo "== routing-doctor 2nd probe (increment 4) — FP-ignore + stale-registration =="
+# routing-fresh CARRIES the known FPs (session_ok=false, verdict=DEGRADED, pins_consistent
+# =false); a mesh-OK agent must stay OK → proves the reconciler ignores those FPs.
+assert_decision fleet-healthy.json devops-agent OK --routing-json "$FX/routing-fresh.json"
+assert_decision fleet-healthy.json code-agent   OK --routing-json "$FX/routing-fresh.json"
+# routing-stale (registry_iid != health_iid — the macf#553 shape) → mesh-OK → HEAL.
+assert_decision fleet-healthy.json devops-agent  HEAL --routing-json "$FX/routing-stale.json"
+assert_decision fleet-healthy.json science-agent OK   --routing-json "$FX/routing-stale.json"
+assert_contains "stale-registration HEAL is labelled routing-plane" \
+  "registration STALE (routing-plane)" -- --fleet-json "$FX/fleet-healthy.json" --routing-json "$FX/routing-stale.json"
+# routing-doctor schema drift → fail-loud (same guard as fleet-doctor).
+printf '{"schema_version":2,"agents":[]}' > "$ALERTS/rbad.json"
+assert_exit fleet-healthy.json 2 --routing-json "$ALERTS/rbad.json"
+# without --with-routing → mesh-only (routing ignored) — back-compat.
+assert_decision fleet-healthy.json devops-agent OK
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

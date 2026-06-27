@@ -27,7 +27,7 @@ PRELUDE="${MACF_HOST_PRELUDE:-$HOME/.claude/.macf/host-prelude.sh}"
 LOG="${MACF_WATCHDOG_LOG:-$HOME/.macf/watchdog.log}"
 RECON="$(cd "$(dirname "$0")" && pwd)/reconcile.sh"
 MANIFEST_ARG=""
-EXECUTE_ARG="" ; RESTART_ARG="" ; UNINSTALL=0
+EXECUTE_ARG="" ; RESTART_ARG="" ; ROUTING_ARG="" ; UNINSTALL=0
 
 usage() {
   cat <<USAGE
@@ -37,6 +37,7 @@ install-cron.sh — idempotently install/remove the DR-006 watchdog cron (DR-006
   --interval "<cron>" schedule (default: "$INTERVAL")
   --execute           install an ACTING line (default: report-only/dry-run)
   --allow-restart     also enable Tier-2 graceful-restart (implies a careful operator)
+  --with-routing      also run the routing-doctor probe (registration-freshness)
   --uninstall         remove the macf-watchdog cron line
   --print             print the line that WOULD be installed, don't touch crontab
   -h, --help
@@ -53,6 +54,7 @@ while [ $# -gt 0 ]; do
     --interval)      INTERVAL="$2"; shift 2 ;;
     --execute)       EXECUTE_ARG="--execute"; shift ;;
     --allow-restart) RESTART_ARG="--allow-restart"; shift ;;
+    --with-routing)  ROUTING_ARG="--with-routing"; shift ;;
     --uninstall)     UNINSTALL=1; shift ;;
     --print)         PRINT_ONLY=1; shift ;;
     -h|--help)       usage; exit 0 ;;
@@ -73,7 +75,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 # the cron command: source prelude (toolchain) → run reconcile, append to the log
-CMD="[ -f $PRELUDE ] && . $PRELUDE; $RECON $MANIFEST_ARG $EXECUTE_ARG $RESTART_ARG >> $LOG 2>&1"
+CMD="[ -f $PRELUDE ] && . $PRELUDE; $RECON $MANIFEST_ARG $ROUTING_ARG $EXECUTE_ARG $RESTART_ARG >> $LOG 2>&1"
 LINE="$INTERVAL $CMD $MARKER"
 
 if [ "$PRINT_ONLY" -eq 1 ]; then

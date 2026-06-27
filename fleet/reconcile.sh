@@ -34,6 +34,9 @@ STATE_DIR="${MACF_WATCHDOG_STATE:-$HOME/.macf/watchdog-state}"   # cross-sweep e
 HEARTBEAT_FILE="${MACF_WATCHDOG_HEARTBEAT:-$HOME/.macf/watchdog-heartbeat}"
 FLEET_JSON=""            # optional: read fleet-doctor output from a file (tests/offline)
 FLEET_DOCTOR_CMD="${MACF_FLEET_DOCTOR_CMD:-macf fleet doctor --json}"
+ROUTING_JSON=""          # optional: read routing-doctor output from a file (tests/offline)
+ROUTING_DOCTOR_CMD="${MACF_ROUTING_DOCTOR_CMD:-macf routing doctor --json}"
+USE_ROUTING=0            # --with-routing: also consume routing-doctor (registration-freshness)
 EXPECTED_SCHEMA=1
 EXECUTE=0                # 0 = dry-run (print commands); 1 = actually act (--execute)
 ALLOW_RESTART=0          # Tier-2 graceful-restart gate (--allow-restart); default OFF
@@ -44,6 +47,8 @@ reconcile.sh — DR-006 desired-state reconciler (increment 2: action execution)
 
   --manifest <path>     desired-agents.yaml (default: \$HOME/.macf/desired-agents.yaml)
   --fleet-json <file>   read 'fleet doctor --json' from a file (tests/offline)
+  --with-routing        also probe 'routing doctor --json' (registration-freshness)
+  --routing-json <file> read 'routing doctor --json' from a file (implies --with-routing)
   --paused-dir <dir>    paused-sentinel dir (default: \$HOME/.macf/paused)
   --last-exit-dir <dir> per-agent last-exit-code dir (default: \$HOME/.macf/last-exit)
   --state-dir <dir>     cross-sweep escalation-counter dir (default: \$HOME/.macf/watchdog-state)
@@ -63,6 +68,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --manifest)      MANIFEST="$2"; shift 2 ;;
     --fleet-json)    FLEET_JSON="$2"; shift 2 ;;
+    --with-routing)  USE_ROUTING=1; shift ;;
+    --routing-json)  ROUTING_JSON="$2"; USE_ROUTING=1; shift 2 ;;
     --paused-dir)    PAUSED_DIR="$2"; shift 2 ;;
     --last-exit-dir) LAST_EXIT_DIR="$2"; shift 2 ;;
     --state-dir)     STATE_DIR="$2"; shift 2 ;;
@@ -110,6 +117,47 @@ ACTUAL="$(printf '%s' "$ACTUAL_RAW" \
 
 actual_field() { # $1=agent $2=col(2|3) -> reachable|accepted, "" if absent
   printf '%s\n' "$ACTUAL" | awk -F'\t' -v a="$1" -v c="$2" '$1==a{print $c; f=1} END{if(!f) print ""}'
+}
+
+# --- 2b. OPTIONAL second probe: routing doctor --json (registration-freshness) -
+# Catches the macf#553 stale-registration case that mesh-reachability alone misses
+# (registry points at a dead/old instance while the live one is up, or vice versa).
+# IGNORES the two KNOWN false-positives on the hand-wired substrate:
+#   - per-agent `session_ok` (vestigial agent-config → assert-if-present, macf#610)
+#   - the aggregate `verdict`/`pins_consistent` (non-fleet repos, macf#614)
+# Keys on the REAL per-agent invariants only: `routable` + `freshness` +
+# `registry_instance_id == health_instance_id`. (silent-fallback Pattern A: assert
+# the load-bearing invariants, don't trust a composite that carries a calibration FP.)
+ROUTING=""
+if [ "$USE_ROUTING" -eq 1 ]; then
+  if [ -n "$ROUTING_JSON" ]; then
+    [ -f "$ROUTING_JSON" ] || { echo "FATAL: --routing-json file not found: $ROUTING_JSON" >&2; exit 2; }
+    ROUTING_RAW="$(cat "$ROUTING_JSON")"
+  else
+    ROUTING_RAW="$($ROUTING_DOCTOR_CMD)" \
+      || { echo "WARN: '$ROUTING_DOCTOR_CMD' failed — proceeding mesh-only" >&2; ROUTING_RAW=""; }
+  fi
+  if [ -n "$ROUTING_RAW" ]; then
+    R_SCHEMA="$(printf '%s' "$ROUTING_RAW" | jq -r '.schema_version // "missing"')"
+    [ "$R_SCHEMA" = "$EXPECTED_SCHEMA" ] || {
+      echo "FATAL: routing doctor --json schema_version=$R_SCHEMA, expected $EXPECTED_SCHEMA — refusing drifted schema" >&2
+      exit 2
+    }
+    # -> "<label>\t<routable>\t<freshness>\t<reg_iid>\t<health_iid>"
+    ROUTING="$(printf '%s' "$ROUTING_RAW" | jq -r '.agents[] |
+      [(.label // "?"), (.routable|tostring), (.freshness // "?"),
+       (.registry_instance_id // "?"), (.health_instance_id // "?")] | @tsv')"
+  fi
+fi
+
+# routing_stale <agent> -> "1" if routing-doctor says this agent has a registration
+# problem (NOT routable, OR stale freshness, OR registry/health instance_id mismatch);
+# "" if routing-OK or no routing data for it. session_ok/verdict deliberately ignored.
+routing_stale() {
+  [ -n "$ROUTING" ] || return 1
+  printf '%s\n' "$ROUTING" | awk -F'\t' -v a="$1" '
+    $1==a { if ($2!="true" || $3=="stale" || $4!=$5) print "1"; f=1 }
+    END { if (!f) exit 1 }' | grep -q 1
 }
 
 # --- action helpers (dry-run by default; EXECUTE=1 runs) ---------------------
@@ -245,8 +293,17 @@ while IFS=$'\t' read -r agent workspace; do
     printf '%-16s %-10s %s\n' "$agent" "LAUNCH" "not running, last-exit!=0/absent → cold-start (ws: $workspace)"
     do_launch "$agent" "$workspace"; rc=1
   elif [ "$reachable" = "true" ] && [ "$accepted" = "true" ]; then
-    printf '%-16s %-10s %s\n' "$agent" "OK" "reachable + accepting"
-    reset_agent_state "$agent"
+    if routing_stale "$agent"; then
+      # mesh-reachable but the routing-plane registration is stale (macf#553 shape):
+      # the agent answers mTLS, but the registry points at a dead/old instance → the
+      # router may dial the wrong port. A relaunch re-registers it. (session_ok /
+      # aggregate-verdict false-positives are NOT what triggered this — real invariants.)
+      printf '%-16s %-10s %s\n' "$agent" "HEAL" "reachable but registration STALE (routing-plane) → ladder"
+      do_heal "$agent" "$workspace" "stale-registration"; rc=1
+    else
+      printf '%-16s %-10s %s\n' "$agent" "OK" "reachable + accepting"
+      reset_agent_state "$agent"
+    fi
   elif [ "$reachable" = "true" ]; then
     printf '%-16s %-10s %s\n' "$agent" "HEAL" "reachable but NOT accepting → ladder"
     do_heal "$agent" "$workspace" "reachable-not-accepting"; rc=1

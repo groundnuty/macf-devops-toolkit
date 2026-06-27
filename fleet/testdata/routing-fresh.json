@@ -1,0 +1,6 @@
+{"schema_version":1,"project":"macf","summary":{"verdict":"DEGRADED","pins_consistent":false,"agents_total":4,"agents_routing_ok":0,"ca_ok":true},
+"agents":[
+ {"label":"devops-agent","routable":true,"session_ok":false,"freshness":"fresh","registry_instance_id":"a","health_instance_id":"a"},
+ {"label":"science-agent","routable":true,"session_ok":false,"freshness":"fresh","registry_instance_id":"b","health_instance_id":"b"},
+ {"label":"auditor-agent","routable":true,"session_ok":false,"freshness":"fresh","registry_instance_id":"c","health_instance_id":"c"},
+ {"label":"code-agent","routable":true,"session_ok":false,"freshness":"fresh","registry_instance_id":"d","health_instance_id":"d"}]}
