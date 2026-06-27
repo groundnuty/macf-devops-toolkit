@@ -30,6 +30,8 @@ MANIFEST="${MACF_DESIRED_AGENTS:-$HOME/.macf/desired-agents.yaml}"
 PAUSED_DIR="${MACF_PAUSED_DIR:-$HOME/.macf/paused}"
 LAST_EXIT_DIR="${MACF_LAST_EXIT_DIR:-$HOME/.macf/last-exit}"
 ALERT_DIR="${MACF_ALERT_DIR:-$HOME/.macf/alerts}"
+STATE_DIR="${MACF_WATCHDOG_STATE:-$HOME/.macf/watchdog-state}"   # cross-sweep escalation counter
+HEARTBEAT_FILE="${MACF_WATCHDOG_HEARTBEAT:-$HOME/.macf/watchdog-heartbeat}"
 FLEET_JSON=""            # optional: read fleet-doctor output from a file (tests/offline)
 FLEET_DOCTOR_CMD="${MACF_FLEET_DOCTOR_CMD:-macf fleet doctor --json}"
 EXPECTED_SCHEMA=1
@@ -44,6 +46,8 @@ reconcile.sh — DR-006 desired-state reconciler (increment 2: action execution)
   --fleet-json <file>   read 'fleet doctor --json' from a file (tests/offline)
   --paused-dir <dir>    paused-sentinel dir (default: \$HOME/.macf/paused)
   --last-exit-dir <dir> per-agent last-exit-code dir (default: \$HOME/.macf/last-exit)
+  --state-dir <dir>     cross-sweep escalation-counter dir (default: \$HOME/.macf/watchdog-state)
+  --heartbeat-file <f>  watchdog self-heartbeat file (default: \$HOME/.macf/watchdog-heartbeat)
   --execute             ACTUALLY act (launch/inject/restart/alert). Default: dry-run.
   --allow-restart       enable Tier-2 graceful-restart (held behind operator sign-off).
   -h, --help
@@ -61,6 +65,8 @@ while [ $# -gt 0 ]; do
     --fleet-json)    FLEET_JSON="$2"; shift 2 ;;
     --paused-dir)    PAUSED_DIR="$2"; shift 2 ;;
     --last-exit-dir) LAST_EXIT_DIR="$2"; shift 2 ;;
+    --state-dir)     STATE_DIR="$2"; shift 2 ;;
+    --heartbeat-file) HEARTBEAT_FILE="$2"; shift 2 ;;
     --execute)       EXECUTE=1; shift ;;
     --allow-restart) ALLOW_RESTART=1; shift ;;
     -h|--help)       usage; exit 0 ;;
@@ -180,12 +186,40 @@ tier3_alert() {
     bash -c "echo '$why' > '$ALERT_DIR/$agent'"
 }
 
-# HEAL ladder: Tier-1 (gated) → if not delivered, Tier-2 (if allowed) → Tier-3.
+# HEAL with CROSS-SWEEP escalation (increment 3). The consecutive-deaf-sweep count
+# drives the tier — so a Tier-1 inject that "delivered" (session_activity advanced,
+# a heuristic, not a true receipt) but did NOT actually recover the agent escalates
+# on the NEXT sweep instead of re-injecting forever (science's #121 review note 2):
+#   sweep 1        → Tier-1 gated inject (the agent self-heals if it can)
+#   sweep 2+       → escalate: Tier-2 (if --allow-restart) + Tier-3 alert
+# The counter is reset when the agent recovers to OK (reset_agent_state). This needs
+# the cross-sweep memory the cron model (this increment) provides; within one sweep
+# it would loop. NOTE: session_activity is a heuristic — it advances on any pane
+# activity, so an RC-buffering-but-deaf TUI can false-pass Tier-1; the sweep-counter
+# is the backstop that escalates it regardless.
 do_heal() {
   local agent="$1" ws="$2" why="$3"
-  tier1_inject "$agent" && return 0
-  tier2_restart "$agent" "$ws" && { tier3_alert "$agent" "restarted after deaf: $why"; return 0; }
-  tier3_alert "$agent" "$why"
+  local sf="$STATE_DIR/$agent" n
+  n=$(( $(cat "$sf" 2>/dev/null || echo 0) + 1 ))
+  if [ "$EXECUTE" -eq 1 ]; then mkdir -p "$STATE_DIR"; echo "$n" > "$sf"; fi
+  if [ "$n" -le 1 ]; then
+    echo "    [sweep $n] first deaf sweep → Tier-1 (gated inject)"
+    tier1_inject "$agent" || true
+  else
+    echo "    [sweep $n] still deaf after $((n-1)) prior sweep(s) → escalate (Tier-1 did not recover)"
+    if tier2_restart "$agent" "$ws"; then tier3_alert "$agent" "restarted after $n deaf sweeps: $why"
+    else tier3_alert "$agent" "$why (deaf $n sweeps; Tier-2 held)"; fi
+  fi
+}
+
+# Reset per-agent escalation + alert state when an agent recovers to OK, so a
+# future deaf episode starts a fresh ladder (sweep 1 → Tier-1) and re-alerts.
+reset_agent_state() {
+  local agent="$1"
+  [ "$EXECUTE" -eq 1 ] || return 0
+  [ -e "$STATE_DIR/$agent" ] && { rm -f "$STATE_DIR/$agent"; echo "    [recovered] $agent OK → escalation state reset"; }
+  [ -e "$ALERT_DIR/$agent" ] && rm -f "$ALERT_DIR/$agent"
+  return 0
 }
 
 # --- 3. reconcile: decide + act ----------------------------------------------
@@ -212,6 +246,7 @@ while IFS=$'\t' read -r agent workspace; do
     do_launch "$agent" "$workspace"; rc=1
   elif [ "$reachable" = "true" ] && [ "$accepted" = "true" ]; then
     printf '%-16s %-10s %s\n' "$agent" "OK" "reachable + accepting"
+    reset_agent_state "$agent"
   elif [ "$reachable" = "true" ]; then
     printf '%-16s %-10s %s\n' "$agent" "HEAL" "reachable but NOT accepting → ladder"
     do_heal "$agent" "$workspace" "reachable-not-accepting"; rc=1
@@ -223,6 +258,16 @@ done <<< "$DESIRED"
 
 echo
 mode="dry-run"; [ "$EXECUTE" -eq 1 ] && mode="EXECUTE"; restart="off"; [ "$ALLOW_RESTART" -eq 1 ] && restart="on"
+
+# Self-heartbeat (§A.4) — stamp that THIS sweep ran. The watchdog's ABSENCE is what
+# the operator/auditor monitoring layer detects (who-watches-the-cron → terminates
+# at Tier-3/operator). Written on real (--execute) sweeps; dry-run stays
+# side-effect-free. Guarded so a read-only path can't fail the run.
+if [ "$EXECUTE" -eq 1 ]; then
+  { mkdir -p "$(dirname "$HEARTBEAT_FILE")" \
+    && printf '%s reconcile rc=%s restart=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$restart" > "$HEARTBEAT_FILE"; } || true
+fi
+
 if [ "$rc" -eq 0 ]; then
   echo "reconcile [$mode, restart:$restart]: all desired agents OK / down — no action."
 else
