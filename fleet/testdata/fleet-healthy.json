@@ -1,0 +1,6 @@
+{"schema_version":1,"project":"macf","summary":{"total":4,"reachable":4,"accepting":4,"verdict":"HEALTHY"},
+"agents":[
+ {"name":"DEVOPS_AGENT","ack_agent":"devops-agent","reachable":true,"accepted":true,"instance_id":"a"},
+ {"name":"SCIENCE_AGENT","ack_agent":"science-agent","reachable":true,"accepted":true,"instance_id":"b"},
+ {"name":"AUDITOR_AGENT","ack_agent":"auditor-agent","reachable":true,"accepted":true,"instance_id":"c"},
+ {"name":"CODE_AGENT","ack_agent":"code-agent","reachable":true,"accepted":true,"instance_id":"d"}]}

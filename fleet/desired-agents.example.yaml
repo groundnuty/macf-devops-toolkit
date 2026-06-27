@@ -1,0 +1,28 @@
+# desired-agents.yaml — the operator-owned DESIRED state for this host (DR-006 §A.2)
+#
+# This is the VM analogue of a Kubernetes Deployment spec: it declares WHICH
+# agents should be running on THIS host. The reconciler (reconcile.sh) drives
+# actual → desired:
+#   - desired & not-running        → LAUNCH   (cold-start / reboot-recovery)
+#   - desired & running-but-deaf   → HEAL     (the tiered ladder)
+#   - desired-down (paused, §A.3)  → SKIP     (never resurrect — don't-fight-the-operator)
+#
+# NOT derived from the registry — the registry is *actual/runtime* state (who is
+# currently registered), this is *desired* state (who should be). Separate homes
+# (check-before-propose §4 / DR-006 A.2). Copy to ~/.macf/desired-agents.yaml and edit.
+#
+# `agent` is the ROUTING-LABEL — it must match `fleet doctor --json`'s per-agent
+# `ack_agent` field (the kebab routing-label the agent self-reports), NOT the
+# uppercased `name` (which is the registry-key form). See DR-006 §A.1 + macf#118.
+
+agents:
+  - agent: devops-agent
+    workspace: /home/ubuntu/repos/groundnuty/macf-devops-toolkit
+  - agent: science-agent
+    workspace: /home/ubuntu/repos/groundnuty/macf-science-agent
+  - agent: auditor-agent
+    workspace: /home/ubuntu/repos/groundnuty/macf-auditor-agent
+  # code-agent's home is the framework repo `macf`, NOT `macf-code-agent`
+  # (agent↔workspace is not 1:1 with the handle — see macf#605).
+  - agent: code-agent
+    workspace: /home/ubuntu/repos/groundnuty/macf

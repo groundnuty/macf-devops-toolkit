@@ -1,0 +1,5 @@
+{"schema_version":1,"project":"macf","summary":{"total":3,"reachable":1,"accepting":1,"verdict":"DEGRADED"},
+"agents":[
+ {"name":"DEVOPS_AGENT","ack_agent":"devops-agent","reachable":false,"accepted":false,"instance_id":"a"},
+ {"name":"SCIENCE_AGENT","ack_agent":"science-agent","reachable":true,"accepted":false,"instance_id":"b"},
+ {"name":"AUDITOR_AGENT","ack_agent":"auditor-agent","reachable":true,"accepted":true,"instance_id":"c"}]}
