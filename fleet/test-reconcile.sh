@@ -103,6 +103,15 @@ done
 if printf '%s\n' "$CRON_OUT" | grep -qF -- '--execute'; then
   echo "  FAIL: default cron line has --execute (should be report-only)"; fail=$((fail+1))
 else echo "  ok: default cron line is report-only (no --execute)"; pass=$((pass+1)); fi
+# token-mint baked by default (cron needs GH_TOKEN for fleet-doctor's registry read);
+# fail-loud `|| exit 1`; cron-time-evaluated `$(`. --no-token omits it.
+if printf '%s\n' "$CRON_OUT" | grep -qE 'GH_TOKEN=\$\(.*macf-gh-token\.sh.*\) \|\| exit 1'; then
+  echo "  ok: cron bakes fail-loud GH_TOKEN mint by default"; pass=$((pass+1))
+else echo "  FAIL: cron missing the fail-loud GH_TOKEN mint"; fail=$((fail+1)); fi
+NT_OUT="$(fleet/install-cron.sh --print --no-token 2>/dev/null || true)"
+if printf '%s\n' "$NT_OUT" | grep -qF 'GH_TOKEN='; then
+  echo "  FAIL: --no-token still baked a token mint"; fail=$((fail+1))
+else echo "  ok: --no-token omits the token mint"; pass=$((pass+1)); fi
 
 echo "== routing-doctor 2nd probe (increment 4) — FP-ignore + stale-registration =="
 # routing-fresh CARRIES the known FPs (session_ok=false, verdict=DEGRADED, pins_consistent
