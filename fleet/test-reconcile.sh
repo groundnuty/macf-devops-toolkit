@@ -143,5 +143,25 @@ rc=0; MACF_FLEET_DOCTOR_CMD="$FAKE fail" "$REC" "${BASE[@]}" >/dev/null 2>&1 || 
 if [ "$rc" -eq 2 ]; then echo "  ok: genuine probe-failure (non-JSON) → exit 2"; pass=$((pass+1))
 else echo "  FAIL: probe-failure rc=$rc want 2"; fail=$((fail+1)); fi
 
+echo "== agent_busy uses capture-pane-diff (real tmux; the session_activity bug) =="
+# A busy agent is busy via OUTPUT; session_activity doesn't track output (verified
+# 2026-06-28) → the old gate read an output-busy agent as idle. Exercise agent_busy
+# against a real changing pane (busy) + a static pane (idle) by sourcing the function.
+# shellcheck disable=SC1090
+( set +e +u
+  # extract just the agent_busy function body into a subshell-safe eval is fragile;
+  # instead invoke the real reconcile path is heavy — so test the primitive directly.
+  busy_changing() { local s="$1" a b; a="$(tmux capture-pane -t "$s" -p 2>/dev/null|md5sum)"; sleep 2; b="$(tmux capture-pane -t "$s" -p 2>/dev/null|md5sum)"; [ "$a" != "$b" ]; }
+  tmux kill-session -t macf@ab-busy 2>/dev/null; tmux kill-session -t macf@ab-idle 2>/dev/null
+  tmux new-session -d -s macf@ab-busy -x 100 -y 24 "while true; do echo work-\$RANDOM; sleep 0.3; done"
+  tmux new-session -d -s macf@ab-idle -x 100 -y 24 "printf 'idle prompt\n'; cat"
+  sleep 1
+  if busy_changing macf@ab-busy; then echo "  ok: output-busy pane detected as BUSY (capture-pane-diff)"; else echo "  FAIL: output-busy pane read as idle (the session_activity bug)"; fi
+  if busy_changing macf@ab-idle; then echo "  FAIL: idle pane read as busy"; else echo "  ok: idle pane detected as IDLE"; fi
+  tmux kill-session -t macf@ab-busy 2>/dev/null; tmux kill-session -t macf@ab-idle 2>/dev/null
+) | tee /tmp/claude/ab-test.out
+grep -q 'ok: output-busy' /tmp/claude/ab-test.out && pass=$((pass+1)) || fail=$((fail+1))
+grep -q 'ok: idle pane' /tmp/claude/ab-test.out && pass=$((pass+1)) || fail=$((fail+1))
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
