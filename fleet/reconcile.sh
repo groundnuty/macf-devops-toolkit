@@ -202,14 +202,17 @@ tier1_inject() {
     echo "    [dry-run] Tier-1 inject → $sess (gated by session_activity advance)"
     return 1   # dry-run can't confirm delivery → reports fall-through path
   fi
+  # Verify via CAPTURE-PANE-DIFF (not session_activity — same output-vs-input issue):
+  # a landed inject changes the pane (the message echoes into the input line, then the
+  # agent starts working), while a dropped one (RC-bound, Instance 3) leaves it unchanged.
   local pre post
-  pre="$(tmux display -p -t "$sess" '#{session_activity}' 2>/dev/null || echo '')"
-  [ -n "$pre" ] || { echo "    [EXECUTE] Tier-1: no tmux session $sess — cannot inject"; return 1; }
+  tmux has-session -t "$sess" 2>/dev/null || { echo "    [EXECUTE] Tier-1: no tmux session $sess — cannot inject"; return 1; }
+  pre="$(tmux capture-pane -t "$sess" -p 2>/dev/null | md5sum)"
   tmux send-keys -t "$sess" "$msg" Enter 2>/dev/null || true
   sleep 2
-  post="$(tmux display -p -t "$sess" '#{session_activity}' 2>/dev/null || echo "$pre")"
-  if [ "$post" -gt "$pre" ] 2>/dev/null; then
-    echo "    [EXECUTE] Tier-1 inject DELIVERED to $sess (activity advanced)"; return 0
+  post="$(tmux capture-pane -t "$sess" -p 2>/dev/null | md5sum)"
+  if [ "$pre" != "$post" ]; then
+    echo "    [EXECUTE] Tier-1 inject DELIVERED to $sess (pane changed)"; return 0
   fi
   echo "    [EXECUTE] Tier-1 inject NOT confirmed on $sess (RC-bound?) → fall through"; return 1
 }
@@ -221,13 +224,23 @@ tier1_inject() {
 # and working. So before any Tier-2 kill, confirm the agent is genuinely idle, else a
 # "down → restart" interrupts active work. (Motivated by a real near-miss: a `reachable=
 # false` agent whose captured pane showed it mid-task.)
+#
+# Detection uses CAPTURE-PANE-DIFF, not tmux `session_activity`: `session_activity`
+# is NOT a reliable busy/liveness signal — verified empirically 2026-06-28 (devops
+# + science, controlled tmux): an output-loop leaves session_activity STABLE while
+# capture-pane CONTENT changes. (It also did not move on a send-keys in science's
+# test, so the precise mechanism is murky — the FIRM conclusion is "not reliable for
+# busy-detection," not a claim about input-vs-output.) A working Claude agent is busy
+# via pane OUTPUT (spinner / streaming / tool renders), so session_activity would read
+# it as IDLE → the gate would FAIL to protect it (the exact bug it exists to prevent).
+# Pane-content changing over the window = busy.
 agent_busy() {
   local sess="macf@$1" a b
-  a="$(tmux display -p -t "$sess" '#{session_activity}' 2>/dev/null || echo '')"
-  [ -n "$a" ] || return 1            # no session → genuinely gone, not busy
+  tmux has-session -t "$sess" 2>/dev/null || return 1   # gone → not busy
+  a="$(tmux capture-pane -t "$sess" -p 2>/dev/null | md5sum)"
   sleep 3
-  b="$(tmux display -p -t "$sess" '#{session_activity}' 2>/dev/null || echo "$a")"
-  [ "$b" -gt "$a" ] 2>/dev/null      # activity advanced → busy
+  b="$(tmux capture-pane -t "$sess" -p 2>/dev/null | md5sum)"
+  [ "$a" != "$b" ]                                       # pane changed → busy
 }
 
 # Tier 2 — graceful restart of a deaf agent (the external equivalent of
