@@ -1,0 +1,16 @@
+[
+  {
+    "name": "rate-limit",
+    "signature": "(temporarily limiting requests|Rate limited|API Error.*limiting)",
+    "nudge": "You appear to have stalled on a transient API rate-limit (server-side, not your usage quota). The limit should have cleared — please continue your work where you left off.",
+    "max_fires": 4,
+    "comment": "Anthropic server-side capacity throttle (NOT the account quota). Leaves the agent idle mid-flow. Nudge resumes the SAME session (preserves work); restart would lose it + re-hit the limit. verify-resumed self-corrects a nudge into a still-active throttle (back off + retry)."
+  },
+  {
+    "name": "turn-aborted",
+    "signature": "(Request was aborted|aborted by user|API Error: Connection error)",
+    "nudge": "Your last turn aborted before completing. Please continue your work where you left off.",
+    "max_fires": 3,
+    "comment": "A turn that died on a transient connection/abort error, leaving the agent idle. Same resume-not-restart logic."
+  }
+]
