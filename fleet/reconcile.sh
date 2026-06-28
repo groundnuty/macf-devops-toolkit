@@ -40,6 +40,11 @@ USE_ROUTING=0            # --with-routing: also consume routing-doctor (registra
 EXPECTED_SCHEMA=1
 EXECUTE=0                # 0 = dry-run (print commands); 1 = actually act (--execute)
 ALLOW_RESTART=0          # Tier-2 graceful-restart gate (--allow-restart); default OFF
+# Rate-limit backoff (#129): the throttle signature (single source of truth = the
+# stall-signatures allowlist resume.sh nudges on) + the fleet-wide-stop threshold.
+SIG_FILE="${MACF_STALL_SIGNATURES:-$(dirname "${BASH_SOURCE[0]}")/stall-signatures.json}"
+FLEET_THROTTLE_MIN="${MACF_FLEET_THROTTLE_MIN:-2}"   # ≥N agents throttled ⇒ fleet-wide backoff
+RATE_LIMIT_PANE_LINES="${MACF_RATE_LIMIT_PANE_LINES:-40}"
 
 usage() {
   cat <<USAGE
@@ -83,6 +88,13 @@ done
 
 command -v jq >/dev/null || { echo "FATAL: jq not found (cron needs host-prelude)" >&2; exit 2; }
 [ -f "$MANIFEST" ] || { echo "FATAL: desired-agents manifest not found: $MANIFEST" >&2; exit 2; }
+
+# Rate-limit signature (#129): resolve from the stall-signatures allowlist (the SAME
+# pattern resume.sh nudges on — one source of truth). FAIL-OPEN to a literal fallback
+# if the file/jq read fails, so a missing allowlist degrades the backoff guard safely
+# rather than fataling the whole sweep.
+RATE_LIMIT_PATTERN="$(jq -r '.[] | select(.name=="rate-limit") | .signature' "$SIG_FILE" 2>/dev/null || true)"
+[ -n "$RATE_LIMIT_PATTERN" ] || RATE_LIMIT_PATTERN='(temporarily limiting requests|Rate limited|API Error.*limiting)'
 
 # --- 1. read DESIRED state ---------------------------------------------------
 # Minimal awk parse of the fixed manifest shape (no yq dependency — cron-light).
@@ -243,6 +255,30 @@ agent_busy() {
   [ "$a" != "$b" ]                                       # pane changed → busy
 }
 
+# agent_rate_limited <agent> -> 0 (true) if the agent's recent pane shows the
+# server-side rate-limit signature (#129). A POSITIVE throttle signal — distinct
+# from "deaf" (no signal) and from "busy" (pane changing): a throttled agent that
+# has GIVEN UP sits IDLE at a "Rate limited" error, so the aliveness-gate (agent_busy)
+# would read it as not-busy and would NOT protect it. This guard catches that case.
+# (An agent still inside CC's auto-retry COUNTDOWN has a ticking pane → agent_busy
+# already aborts it; this complements that for the idle-stuck-throttled case.)
+#
+# Test seam: when MACF_TEST_RATELIMITED is DEFINED, it is the AUTHORITATIVE throttle
+# set (space-list of agents) and the live-pane read is skipped entirely — the offline
+# harness has no real panes, and on a host with real sessions a live read would be
+# non-deterministic (same injection spirit as --fleet-json). Never DEFINE it on the cron.
+agent_rate_limited() {
+  local agent="$1"
+  if [ "${MACF_TEST_RATELIMITED+set}" = set ]; then
+    case " $MACF_TEST_RATELIMITED " in *" $agent "*) return 0 ;; *) return 1 ;; esac
+  fi
+  local sess="macf@$agent" pane
+  tmux has-session -t "$sess" 2>/dev/null || return 1   # gone → not throttled (deaf, not rate-limited)
+  pane="$(tmux capture-pane -t "$sess" -p -S -"$RATE_LIMIT_PANE_LINES" 2>/dev/null || echo '')"
+  [ -n "$pane" ] || return 1
+  printf '%s' "$pane" | grep -qiE "$RATE_LIMIT_PATTERN"
+}
+
 # Tier 2 — graceful restart of a deaf agent (the external equivalent of
 # restart-self): SIGTERM the agent's claude process (graceful → hooks/deregister
 # get their ~1.5s, exit 143 → non-zero → next reconcile relaunches), then launch.
@@ -296,6 +332,23 @@ tier3_alert() {
 # is the backstop that escalates it regardless.
 do_heal() {
   local agent="$1" ws="$2" why="$3"
+  # ── Rate-limit backoff guard (#129) — sibling to the Tier-2 aliveness-gate ──────
+  # A throttled agent is a DISTINCT recovery-cause, not deaf/crashed. Healing it is
+  # wrong at EVERY tier: Tier-1's "you're off-channels" inject MISDIAGNOSES it; Tier-2
+  # restart RE-HITS the limit AND loses in-progress work (and across a throttled fleet
+  # a restart-storm AMPLIFIES the very load that caused the throttle). So BACK OFF:
+  # log it distinctly, leave the agent be — it recovers via CC's own auto-retry or
+  # resume.sh's nudge (devops#131) when the limit clears. Signal-driven (re-checked
+  # each sweep; clears when the signature leaves the pane) — no timer state needed.
+  # Don't advance the deaf-sweep counter: a throttle episode ≠ a deaf episode, so a
+  # genuinely-deaf agent post-throttle starts a fresh ladder rather than escalating
+  # off counts accrued while it was only throttled.
+  if [ "${FLEET_THROTTLE:-0}" -eq 1 ] || agent_rate_limited "$agent"; then
+    local scope="rate-limit signature in pane"
+    [ "${FLEET_THROTTLE:-0}" -eq 1 ] && scope="fleet-wide throttle"
+    echo "    [BACKOFF] $agent RATE-LIMITED ($scope) → rate-limited-backoff: NO inject, NO restart (would re-hit the limit + lose work). Recovers via CC auto-retry / resume.sh nudge."
+    return 0
+  fi
   local sf="$STATE_DIR/$agent" n
   n=$(( $(cat "$sf" 2>/dev/null || echo 0) + 1 ))
   if [ "$EXECUTE" -eq 1 ]; then mkdir -p "$STATE_DIR"; echo "$n" > "$sf"; fi
@@ -318,6 +371,24 @@ reset_agent_state() {
   [ -e "$ALERT_DIR/$agent" ] && rm -f "$ALERT_DIR/$agent"
   return 0
 }
+
+# --- 2c. fleet-wide throttle pre-pass (#129) ---------------------------------
+# Count desired agents currently showing the rate-limit signature. ≥FLEET_THROTTLE_MIN
+# ⇒ a SHARED server-side throttle (the review-storm shape: agents stop near-
+# simultaneously) — NOT N independent crashes ⇒ back off the WHOLE sweep (restarting
+# anyone amplifies the load that caused the throttle). Pure detection (no side
+# effects); the per-agent backoff in do_heal reads FLEET_THROTTLE. Signal-driven:
+# re-evaluated every sweep, clears automatically when the signatures leave the panes.
+FLEET_THROTTLE=0; _throttled_n=0; _throttled_list=""
+while IFS=$'\t' read -r _a _; do
+  [ -n "$_a" ] || continue
+  if agent_rate_limited "$_a"; then _throttled_n=$((_throttled_n+1)); _throttled_list="$_throttled_list $_a"; fi
+done <<< "$DESIRED"
+if [ "$_throttled_n" -ge "$FLEET_THROTTLE_MIN" ]; then
+  FLEET_THROTTLE=1
+  echo "⚠️  FLEET-WIDE RATE-LIMIT: $_throttled_n agents throttled ($(echo $_throttled_list)) ≥ $FLEET_THROTTLE_MIN → fleet-wide backoff (rate-limited-backoff; NO restarts this sweep)."
+  echo
+fi
 
 # --- 3. reconcile: decide + act ----------------------------------------------
 rc=0
