@@ -214,14 +214,37 @@ tier1_inject() {
   echo "    [EXECUTE] Tier-1 inject NOT confirmed on $sess (RC-bound?) → fall through"; return 1
 }
 
+# agent_busy <agent> -> 0 (true) if the agent's tmux pane shows activity over a short
+# window (the agent is actively working). THE LIVENESS PROBE MEASURES THE CHANNEL-SERVER,
+# NOT THE AGENT (DR-031): a channel-unreachable reading is NOT proof the agent is dead —
+# the #642 stdio-starvation mode kills the channel-server while the agent TUI stays alive
+# and working. So before any Tier-2 kill, confirm the agent is genuinely idle, else a
+# "down → restart" interrupts active work. (Motivated by a real near-miss: a `reachable=
+# false` agent whose captured pane showed it mid-task.)
+agent_busy() {
+  local sess="macf@$1" a b
+  a="$(tmux display -p -t "$sess" '#{session_activity}' 2>/dev/null || echo '')"
+  [ -n "$a" ] || return 1            # no session → genuinely gone, not busy
+  sleep 3
+  b="$(tmux display -p -t "$sess" '#{session_activity}' 2>/dev/null || echo "$a")"
+  [ "$b" -gt "$a" ] 2>/dev/null      # activity advanced → busy
+}
+
 # Tier 2 — graceful restart of a deaf agent (the external equivalent of
 # restart-self): SIGTERM the agent's claude process (graceful → hooks/deregister
 # get their ~1.5s, exit 143 → non-zero → next reconcile relaunches), then launch.
-# HELD behind --allow-restart (operator sign-off, DR-006 §"Tiered response").
+# HELD behind --allow-restart (operator sign-off, DR-006 §"Tiered response") AND an
+# execute-time aliveness-gate (never kill a busy agent — the #642 mode, DR-031 §16).
 tier2_restart() {
   local agent="$1" ws="$2"
   if [ "$ALLOW_RESTART" -ne 1 ]; then
     echo "    [held] Tier-2 graceful-restart of $agent SUPPRESSED (no --allow-restart; operator sign-off required)"
+    return 1
+  fi
+  # Execute-time aliveness-gate: a channel-unreachable agent may be ALIVE + working
+  # (#642 — channel-server dead, agent fine). Never SIGTERM a busy pane.
+  if [ "$EXECUTE" -eq 1 ] && agent_busy "$agent"; then
+    echo "    [ABORT] Tier-2: macf@$agent pane is ACTIVE — agent ALIVE despite channel-unreachable (#642 mode). NOT killing a working agent (DR-031 idle-gate)."
     return 1
   fi
   local pid=""
