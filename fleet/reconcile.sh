@@ -225,13 +225,15 @@ tier1_inject() {
 # "down → restart" interrupts active work. (Motivated by a real near-miss: a `reachable=
 # false` agent whose captured pane showed it mid-task.)
 #
-# Detection uses CAPTURE-PANE-DIFF, not tmux `session_activity`: a working Claude
-# agent is busy via pane OUTPUT (spinner / streaming / tool renders), and
-# session_activity tracks INPUT, not output — verified empirically 2026-06-28
-# (an output-loop leaves session_activity STABLE while the pane content CHANGES).
-# Using session_activity here would read an output-busy agent as IDLE → the gate
-# would FAIL to protect it (the exact bug it exists to prevent). Pane-content
-# changing over the window = busy.
+# Detection uses CAPTURE-PANE-DIFF, not tmux `session_activity`: `session_activity`
+# is NOT a reliable busy/liveness signal — verified empirically 2026-06-28 (devops
+# + science, controlled tmux): an output-loop leaves session_activity STABLE while
+# capture-pane CONTENT changes. (It also did not move on a send-keys in science's
+# test, so the precise mechanism is murky — the FIRM conclusion is "not reliable for
+# busy-detection," not a claim about input-vs-output.) A working Claude agent is busy
+# via pane OUTPUT (spinner / streaming / tool renders), so session_activity would read
+# it as IDLE → the gate would FAIL to protect it (the exact bug it exists to prevent).
+# Pane-content changing over the window = busy.
 agent_busy() {
   local sess="macf@$1" a b
   tmux has-session -t "$sess" 2>/dev/null || return 1   # gone → not busy
