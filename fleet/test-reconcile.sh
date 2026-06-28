@@ -163,5 +163,45 @@ echo "== agent_busy uses capture-pane-diff (real tmux; the session_activity bug)
 grep -q 'ok: output-busy' /tmp/claude/ab-test.out && pass=$((pass+1)) || fail=$((fail+1))
 grep -q 'ok: idle pane' /tmp/claude/ab-test.out && pass=$((pass+1)) || fail=$((fail+1))
 
+echo "== rate-limit backoff (#129) — distinguish throttle from deaf, never restart-storm =="
+# fleet-degraded: devops-agent + science-agent are HEAL (deaf), code-agent LAUNCH.
+# MACF_TEST_RATELIMITED is the authoritative throttle-set seam (skips live panes).
+RLSTATE="$(mktemp -d)"
+# a throttled HEAL agent BACKS OFF (rate-limited-backoff), not climbing the ladder
+MACF_TEST_RATELIMITED="devops-agent" assert_contains \
+  "throttled agent → BACKOFF (not heal)" \
+  "[BACKOFF] devops-agent RATE-LIMITED" -- --fleet-json "$FX/fleet-degraded.json" --state-dir "$RLSTATE"
+# the guard is PER-AGENT: a non-throttled HEAL agent in the same sweep still heals
+MACF_TEST_RATELIMITED="devops-agent" assert_contains \
+  "non-throttled agent still heals (per-agent guard)" \
+  "first deaf sweep → Tier-1" -- --fleet-json "$FX/fleet-degraded.json" --state-dir "$RLSTATE"
+# backoff overrides escalation: even pre-seeded n=1 + --allow-restart → no SIGTERM
+echo 1 > "$RLSTATE/devops-agent"
+MACF_TEST_RATELIMITED="devops-agent" assert_contains \
+  "throttled agent backs off even at escalation + --allow-restart" \
+  "[BACKOFF] devops-agent RATE-LIMITED" -- --fleet-json "$FX/fleet-degraded.json" --state-dir "$RLSTATE" --allow-restart
+echo 1 > "$RLSTATE/devops-agent"
+rl_out="$(MACF_TEST_RATELIMITED="devops-agent" run --fleet-json "$FX/fleet-degraded.json" --state-dir "$RLSTATE" --allow-restart)"
+if printf '%s\n' "$rl_out" | grep -qF "Tier-2 graceful-restart devops-agent"; then
+  echo "  FAIL: throttled agent was restarted (restart-storm not prevented)"; fail=$((fail+1))
+else echo "  ok: throttled agent NOT restarted — no SIGTERM (restart-storm guard)"; pass=$((pass+1)); fi
+# fleet-wide: ≥FLEET_THROTTLE_MIN (2) throttled → fleet-wide backoff banner + all back off
+MACF_TEST_RATELIMITED="devops-agent science-agent" assert_contains \
+  "fleet-wide throttle banner (≥2 agents)" \
+  "FLEET-WIDE RATE-LIMIT:" -- --fleet-json "$FX/fleet-degraded.json" --state-dir "$RLSTATE"
+MACF_TEST_RATELIMITED="devops-agent science-agent" assert_contains \
+  "fleet-wide backoff applies to science too (scope label)" \
+  "[BACKOFF] science-agent RATE-LIMITED (fleet-wide throttle)" -- --fleet-json "$FX/fleet-degraded.json" --state-dir "$RLSTATE"
+# below threshold (1 < 2) → NO fleet-wide banner (per-agent backoff only)
+one_out="$(MACF_TEST_RATELIMITED="devops-agent" run --fleet-json "$FX/fleet-degraded.json" --state-dir "$RLSTATE")"
+if printf '%s\n' "$one_out" | grep -qF "FLEET-WIDE RATE-LIMIT"; then
+  echo "  FAIL: single throttle triggered fleet-wide (threshold not honored)"; fail=$((fail+1))
+else echo "  ok: single throttle stays per-agent (no fleet-wide banner)"; pass=$((pass+1)); fi
+# the throttle pattern resolves from stall-signatures.json (shared source of truth)
+sig_pat="$(jq -r '.[]|select(.name=="rate-limit")|.signature' fleet/stall-signatures.json 2>/dev/null || echo MISSING)"
+if [ "$sig_pat" != "MISSING" ] && [ -n "$sig_pat" ]; then
+  echo "  ok: rate-limit signature present in stall-signatures.json (shared source)"; pass=$((pass+1))
+else echo "  FAIL: rate-limit signature missing from stall-signatures.json"; fail=$((fail+1)); fi
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
