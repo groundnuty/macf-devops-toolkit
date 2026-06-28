@@ -13,6 +13,10 @@ FX=fleet/testdata
 PAUSED="$(mktemp -d)"; LASTEXIT="$(mktemp -d)"; ALERTS="$(mktemp -d)"
 BASE=(--manifest "$MAN" --paused-dir "$PAUSED" --last-exit-dir "$LASTEXIT")
 export MACF_ALERT_DIR="$ALERTS"
+# Default all agents to NOT-busy (static pane) for determinism + speed — the script's
+# agent_busy() seam (#134). Avoids a live capture+sleep read of the host's real panes in
+# every backoff-path test; individual tests override with MACF_TEST_BUSY="<agent>".
+export MACF_TEST_BUSY=""
 pass=0 fail=0
 
 run() { "$REC" "${BASE[@]}" "$@" 2>&1; }   # always dry-run unless --execute passed
@@ -202,6 +206,39 @@ sig_pat="$(jq -r '.[]|select(.name=="rate-limit")|.signature' fleet/stall-signat
 if [ "$sig_pat" != "MISSING" ] && [ -n "$sig_pat" ]; then
   echo "  ok: rate-limit signature present in stall-signatures.json (shared source)"; pass=$((pass+1))
 else echo "  FAIL: rate-limit signature missing from stall-signatures.json"; fail=$((fail+1)); fi
+
+echo "== stuck-in-backoff escalation (#134 fast-follow; science's wall-clock bound) =="
+# A throttled HEAL agent that stays backed off K (=3) consecutive idle sweeps escalates
+# to Tier-3 (deaf-masked-by-stale-signature suspected) — NOT a restart. Pre-seed the
+# backoff counter to K-1, then one more idle-stuck sweep tips it. (MACF_TEST_BUSY="" →
+# static pane; MACF_TEST_RATELIMITED → own signature present.)
+SKSTATE="$(mktemp -d)"
+echo 2 > "$SKSTATE/devops-agent.backoff"   # K-1 (default K=3)
+MACF_TEST_RATELIMITED="devops-agent" assert_contains \
+  "stuck after K idle backoff sweeps → Tier-3 escalation" \
+  "[STUCK] devops-agent backed off 3 idle sweeps" -- --fleet-json "$FX/fleet-degraded.json" --state-dir "$SKSTATE"
+echo 2 > "$SKSTATE/devops-agent.backoff"
+MACF_TEST_RATELIMITED="devops-agent" assert_contains \
+  "stuck escalation raises a Tier-3 alert (not a restart)" \
+  "Tier-3 alert for devops-agent" -- --fleet-json "$FX/fleet-degraded.json" --state-dir "$SKSTATE"
+# a TICKING pane (CC actively retrying) does NOT accrue — even at the threshold, no STUCK
+echo 2 > "$SKSTATE/devops-agent.backoff"
+busy_out="$(MACF_TEST_RATELIMITED="devops-agent" MACF_TEST_BUSY="devops-agent" run --fleet-json "$FX/fleet-degraded.json" --state-dir "$SKSTATE")"
+if printf '%s\n' "$busy_out" | grep -qF "[STUCK] devops-agent"; then
+  echo "  FAIL: ticking pane (active CC retry) wrongly escalated as stuck"; fail=$((fail+1))
+else echo "  ok: ticking pane (active retry) does NOT escalate (only idle-stuck sweeps count)"; pass=$((pass+1)); fi
+# below threshold (counter 0 → 1 < 3) → backoff but NOT yet stuck
+SK2="$(mktemp -d)"
+below_out="$(MACF_TEST_RATELIMITED="devops-agent" run --fleet-json "$FX/fleet-degraded.json" --state-dir "$SK2")"
+if printf '%s\n' "$below_out" | grep -qF "[STUCK]"; then
+  echo "  FAIL: escalated below the K threshold"; fail=$((fail+1))
+else echo "  ok: below threshold → backoff only, no premature stuck escalation"; pass=$((pass+1)); fi
+# fleet-wide-only backoff (agent's OWN signature absent) → does NOT accrue stuck counter
+echo 2 > "$SK2/devops-agent.backoff"
+fw_out="$(MACF_TEST_RATELIMITED="science-agent code-agent" run --fleet-json "$FX/fleet-degraded.json" --state-dir "$SK2")"
+if printf '%s\n' "$fw_out" | grep -qF "[STUCK] devops-agent"; then
+  echo "  FAIL: fleet-wide-only backoff wrongly accrued devops' stuck counter"; fail=$((fail+1))
+else echo "  ok: fleet-wide-only backoff (no own signature) does not accrue stuck counter"; pass=$((pass+1)); fi
 
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

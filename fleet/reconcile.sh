@@ -45,6 +45,15 @@ ALLOW_RESTART=0          # Tier-2 graceful-restart gate (--allow-restart); defau
 SIG_FILE="${MACF_STALL_SIGNATURES:-$(dirname "${BASH_SOURCE[0]}")/stall-signatures.json}"
 FLEET_THROTTLE_MIN="${MACF_FLEET_THROTTLE_MIN:-2}"   # ≥N agents throttled ⇒ fleet-wide backoff
 RATE_LIMIT_PANE_LINES="${MACF_RATE_LIMIT_PANE_LINES:-40}"
+# K = consecutive backoff sweeps a STILL-backed-off agent survives before Tier-3.
+# A WALL-CLOCK bound (science #134): "static pane + signature" can't tell idle-stuck-
+# throttled-but-RECOVERABLE from deaf-masked-by-stale-signature — both look identical.
+# The discriminator is time: choose K so K × your cron-interval comfortably exceeds the
+# longest plausible throttle + resume.sh's nudge-recovery window. A recoverable agent
+# resumes → reaches OK → its counter resets (reset_agent_state) BEFORE K; only a
+# genuinely-stuck one survives to alert. Default 3 ≈ 30 min at a 10-min cadence
+# (Anthropic capacity throttles are transient minutes). Tune to your cron interval.
+BACKOFF_STUCK_MAX="${MACF_BACKOFF_STUCK_MAX:-3}"
 
 usage() {
   cat <<USAGE
@@ -247,7 +256,14 @@ tier1_inject() {
 # it as IDLE → the gate would FAIL to protect it (the exact bug it exists to prevent).
 # Pane-content changing over the window = busy.
 agent_busy() {
-  local sess="macf@$1" a b
+  local agent="$1"
+  # Test seam: when MACF_TEST_BUSY is DEFINED it is the AUTHORITATIVE busy-set (space-
+  # list); the live capture+sleep is skipped (offline determinism; same spirit as
+  # MACF_TEST_RATELIMITED). Never DEFINE it on the cron.
+  if [ "${MACF_TEST_BUSY+set}" = set ]; then
+    case " $MACF_TEST_BUSY " in *" $agent "*) return 0 ;; *) return 1 ;; esac
+  fi
+  local sess="macf@$agent" a b
   tmux has-session -t "$sess" 2>/dev/null || return 1   # gone → not busy
   a="$(tmux capture-pane -t "$sess" -p 2>/dev/null | md5sum)"
   sleep 3
@@ -347,6 +363,33 @@ do_heal() {
     local scope="rate-limit signature in pane"
     [ "${FLEET_THROTTLE:-0}" -eq 1 ] && scope="fleet-wide throttle"
     echo "    [BACKOFF] $agent RATE-LIMITED ($scope) → rate-limited-backoff: NO inject, NO restart (would re-hit the limit + lose work). Recovers via CC auto-retry / resume.sh nudge."
+    # Stuck-in-backoff escalation (science's #134 review finding + the wall-clock crux).
+    # Signal-driven backoff has ONE false-negative: a genuinely-DEAF agent with a STALE
+    # rate-limit line still in its capture window backs off forever — neither healed NOR
+    # alerted. But "static pane + signature" CANNOT distinguish that from a still-RECOVERABLE
+    # idle-stuck throttle (both identical in the pane) — so the discriminator is NOT the pane,
+    # it's TIME: a recoverable agent resumes (CC auto-retry / resume.sh nudge) → reaches OK →
+    # reset_agent_state clears this counter BEFORE K; only a genuinely-stuck one survives K
+    # consecutive backoff sweeps to alert. K is a WALL-CLOCK bound (see BACKOFF_STUCK_MAX).
+    # The pane-static gate (! agent_busy) is a refinement on top: don't accrue while CC is
+    # actively RETRYING (ticking countdown = pane changing) — only count idle-stuck sweeps.
+    # Escalate to Tier-3 (human check; NEVER restart a maybe-throttled agent — a long throttle
+    # is still possible; the human decides). Same fire-cap→escalate shape as resume.sh #131.
+    # (Future, more precise: gate on resume.sh's fire-cap state = "nudge didn't take" — but
+    # that couples the two tools' state; the wall-clock K is the no-coupling first cut.)
+    if agent_rate_limited "$agent" && ! agent_busy "$agent"; then
+      local bf="$STATE_DIR/$agent.backoff" bn
+      bn=$(( $(cat "$bf" 2>/dev/null || echo 0) + 1 ))
+      [ "$EXECUTE" -eq 1 ] && { mkdir -p "$STATE_DIR"; echo "$bn" > "$bf"; }
+      if [ "$bn" -ge "$BACKOFF_STUCK_MAX" ]; then
+        echo "    [STUCK] $agent backed off $bn idle sweeps (≈ $bn × cron-interval) — longer than a throttle+recovery should last → likely deaf-masked-by-stale-signature (or an unusually long throttle). Escalating to Tier-3 (human check; NOT restarting a maybe-throttled agent)."
+        tier3_alert "$agent" "stuck in rate-limit-backoff $bn idle sweeps — exceeds plausible throttle+recovery window; deaf-masked-by-stale-signature suspected (#129/#134)"
+      fi
+    else
+      # CC actively retrying (ticking pane) OR backed off only by a fleet-wide throttle
+      # (not this agent's own signature) → not an idle-stuck sweep → reset the counter.
+      [ "$EXECUTE" -eq 1 ] && rm -f "$STATE_DIR/$agent.backoff"
+    fi
     return 0
   fi
   local sf="$STATE_DIR/$agent" n
@@ -368,6 +411,7 @@ reset_agent_state() {
   local agent="$1"
   [ "$EXECUTE" -eq 1 ] || return 0
   [ -e "$STATE_DIR/$agent" ] && { rm -f "$STATE_DIR/$agent"; echo "    [recovered] $agent OK → escalation state reset"; }
+  [ -e "$STATE_DIR/$agent.backoff" ] && rm -f "$STATE_DIR/$agent.backoff"   # clear stuck-backoff counter (#134)
   [ -e "$ALERT_DIR/$agent" ] && rm -f "$ALERT_DIR/$agent"
   return 0
 }
