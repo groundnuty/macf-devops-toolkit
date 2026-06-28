@@ -76,11 +76,12 @@ AGENTS="$(awk '/^[[:space:]]*-[[:space:]]*agent:/ { sub(/^[^:]*:[[:space:]]*/,""
 [ -n "$AGENTS" ] || { echo "FATAL: manifest has no agents" >&2; exit 2; }
 
 # is the agent's pane IDLE? 0(true)=idle, 1=busy/no-session.
-# Uses CAPTURE-PANE-DIFF, not tmux session_activity: a working Claude agent is busy
-# via pane OUTPUT (spinner, streaming, tool renders), and session_activity tracks
-# INPUT not output (verified empirically 2026-06-28 — an output-loop leaves
-# session_activity STABLE while capture-pane content CHANGES). So pane-content
-# stable over the window = idle; changing = busy.
+# Uses CAPTURE-PANE-DIFF, not tmux session_activity: `session_activity` is NOT a
+# reliable busy/liveness signal (verified empirically 2026-06-28, devops + science —
+# an output-loop leaves it STABLE while capture-pane content CHANGES; the precise
+# mechanism is murky so the firm claim is just "unreliable for busy-detection"). A
+# working Claude agent is busy via pane OUTPUT (spinner, streaming, tool renders), so
+# pane-content stable over the window = idle; changing = busy.
 pane_idle() {
   local sess="macf@$1" a b
   tmux has-session -t "$sess" 2>/dev/null || return 1   # gone → not idle (resume can't help)
