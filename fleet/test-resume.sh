@@ -21,6 +21,8 @@ agents:
     workspace: /tmp
   - agent: t-gone
     workspace: /tmp
+  - agent: t-blocked
+    workspace: /tmp
 YAML
 
 mksession() { # <agent> <pane-text>  — a tmux session showing fixed idle content
@@ -38,18 +40,34 @@ chk() { # <desc> <expect-substr> <agent>
 }
 
 echo "== resume stall-detection (real tmux panes, dry-run) =="
-mksession t-clean "❯ DR-032 ok"                                  # idle, no stall signature
-mksession t-ratelimit "API Error: Server is temporarily limiting requests · Rate limited"  # idle + stall sig
+mksession t-clean "❯ DR-032 ok"                                  # idle, no signature
+mksession t-ratelimit "API Error: Server is temporarily limiting requests · Rate limited"  # idle + nudge sig
+mksession t-blocked "Do you want to proceed? ❯ 1. Yes  2. Yes, and don't ask again  3. No"  # idle + report sig
 # t-gone: deliberately NO session
 sleep 1
 
-# clean-idle agent → NEVER nudged
-chk "clean-idle agent is NOT nudged (no stall-signature)" "idle-clean" t-clean
-chk "clean-idle reason says legitimately idle"            "NEVER nudge" t-clean
-# rate-limited idle agent → NUDGE candidate (dry-run plan)
-chk "rate-limited idle agent → NUDGE plan"                "NUDGE (rate-limit)" t-ratelimit
+# clean-idle agent → NEVER acted on
+chk "clean-idle agent is NOT acted on (no signature)" "idle-clean" t-clean
+chk "clean-idle reason says legitimately idle/done"   "never touched" t-clean
+# rate-limited idle agent → action=nudge (dry-run plan)
+chk "rate-limited idle agent → NUDGE plan"            "NUDGE (rate-limit)" t-ratelimit
 # gone agent → skip (resume can't help)
-chk "no-session agent → skip"                             "gone"        t-gone
+chk "no-session agent → skip"                         "gone"        t-gone
+
+echo "== operator-input-blocked → REPORT, not nudge (#132) =="
+# an idle agent showing a permission prompt → action=report (durable alert, NOT a nudge)
+chk "permission-prompt agent → REPORT plan (action dispatch)"   "REPORT (permission-prompt)" t-blocked
+chk "report path never sends a nudge (authorization needs a human)" "NOT auto-answered" t-blocked
+# trust-folder prompt also reports
+mksession t-blocked "Do you trust the files in this folder? ❯ 1. Yes, proceed  2. No, exit"
+sleep 1
+chk "trust-folder-prompt agent → REPORT plan"                   "REPORT (trust-folder-prompt)" t-blocked
+# report is fire-capped per episode (max_fires=1): a maxed counter → skip (already reported)
+echo 1 > "$STATE/t-blocked.report"
+rc="$(run | awk '$1=="t-blocked"{$1="";print}')"
+if printf '%s' "$rc" | grep -qF "already reported this episode"; then echo "  ok: report fire-cap → reported once per episode"; pass=$((pass+1))
+else echo "  FAIL: report fire-cap not honored — '$rc'"; fail=$((fail+1)); fi
+rm -f "$STATE/t-blocked.report"
 
 echo "== busy agent is never nudged =="
 # a session whose pane keeps changing = busy (session_activity advances)
@@ -73,7 +91,7 @@ if printf '%s' "$fc" | grep -qF "fire-cap"; then echo "  ok: fire-cap reached �
 else echo "  FAIL: fire-cap not honored — '$fc'"; fail=$((fail+1)); fi
 
 # cleanup
-for a in t-clean t-ratelimit t-busy; do tmux kill-session -t "macf@$a" 2>/dev/null || true; done
+for a in t-clean t-ratelimit t-busy t-blocked; do tmux kill-session -t "macf@$a" 2>/dev/null || true; done
 
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
