@@ -2,6 +2,7 @@
   {
     "name": "rate-limit",
     "signature": "(temporarily limiting requests|Rate limited|API Error.*limiting)",
+    "action": "nudge",
     "nudge": "You appear to have stalled on a transient API rate-limit (server-side, not your usage quota). The limit should have cleared — please continue your work where you left off.",
     "max_fires": 4,
     "comment": "Anthropic server-side capacity throttle (NOT the account quota). Leaves the agent idle mid-flow. Nudge resumes the SAME session (preserves work); restart would lose it + re-hit the limit. verify-resumed self-corrects a nudge into a still-active throttle (back off + retry)."
@@ -9,8 +10,33 @@
   {
     "name": "turn-aborted",
     "signature": "(Request was aborted|aborted by user|API Error: Connection error)",
+    "action": "nudge",
     "nudge": "Your last turn aborted before completing. Please continue your work where you left off.",
     "max_fires": 3,
     "comment": "A turn that died on a transient connection/abort error, leaving the agent idle. Same resume-not-restart logic."
+  },
+  {
+    "name": "permission-prompt",
+    "signature": "(Do you want to proceed\\?|Do you want to make this edit\\?|Do you want to create|Yes, and don.t ask again)",
+    "action": "report",
+    "report": "blocked on a tool-permission prompt (\"Do you want to proceed?\") — needs the operator to approve/deny. Cannot be auto-answered (an authorization decision, per DR-033 ceremony-not-authorization).",
+    "max_fires": 1,
+    "comment": "Claude Code tool-permission dialog. action=report (NOT nudge/answer): authorization prompts require human judgment, so the correct automation is to make the silent block LOUD, never to answer it. #132."
+  },
+  {
+    "name": "trust-folder-prompt",
+    "signature": "(Do you trust the files in this folder\\?|trust the files in this)",
+    "action": "report",
+    "report": "blocked on a folder-trust prompt — needs the operator to confirm trust. Authorization decision; cannot be auto-answered.",
+    "max_fires": 1,
+    "comment": "Claude Code 'trust this folder' dialog on a new/changed workspace. action=report. #132."
+  },
+  {
+    "name": "skill-or-memory-prompt",
+    "signature": "(Allow .* to run\\?|Save this to memory\\?|Add this to memory\\?|Allow this skill)",
+    "action": "report",
+    "report": "blocked on a skill-approval or memory-accept prompt — needs the operator's decision. Cannot be auto-answered.",
+    "max_fires": 1,
+    "comment": "Skill-approval / memory-accept dialogs. action=report. Signature strings are best-effort across CC versions — the allowlist is DATA, tune as the TUI evolves. #132."
   }
 ]
