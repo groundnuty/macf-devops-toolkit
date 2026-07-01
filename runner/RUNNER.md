@@ -136,6 +136,39 @@ script). Add a runner to the YAML → its target *and* its completion appear aut
 (e.g. `MACF_TRUSTED_ACTORS`) from it to each runner-repo, and `--check` verifies every repo still
 matches — so the actors allowlist is set ONCE, not per-repo. (Via devbox: `devbox run -- make -C runner <t>`.)
 
+## Standing up a NON-EPHEMERAL runner (the A/B path — verified 2026-07-01)
+
+The proven live-standup sequence for a persistent runner (macf-science-agent was stood up this
+way). Run on the VM; the token mints are operator-only (bot is 403 on `administration:write`).
+
+```bash
+cd /opt/macf-runner/actions-runner
+sudo ./svc.sh stop; sudo ./svc.sh uninstall     # if a prior service exists
+unset GH_TOKEN                                   # mint as the OPERATOR, not the bot (bot=403)
+# REMOVE the old registration first — `config.sh --replace` is INSUFFICIENT ("Cannot configure
+# … already configured; run './config.sh remove' first"). Remove needs a REMOVE-token (distinct
+# from the registration-token endpoint):
+RM=$(gh api -X POST /repos/<owner>/<repo>/actions/runners/remove-token --jq .token)
+sudo -u macf-runner ./config.sh remove --token "$RM"
+# RE-REGISTER non-ephemeral: OMIT --ephemeral (→ .runner `ephemeral:null` = non-ephemeral,
+# survives jobs). Fresh registration-token:
+REG=$(gh api -X POST /repos/<owner>/<repo>/actions/runners/registration-token --jq .token)
+sudo -u macf-runner ./config.sh --url https://github.com/<owner>/<repo> \
+  --token "$REG" --name macf-vm-<agent> --labels self-hosted,macf-vm --unattended
+grep -o '"ephemeral":[a-z]*' .runner             # GATE: must be null/false BEFORE starting
+sudo ./svc.sh install macf-runner && sudo ./svc.sh start && sudo ./svc.sh status
+```
+
+Gotchas that bit us: (1) `--replace` doesn't reconfigure an existing runner → **remove-then-readd**;
+(2) the token must be minted with `GH_TOKEN` **unset** (else it runs as the bot → 403 → empty token
+→ `config.sh --token ""` fails silently, leaving the old config); (3) verify `.runner` `ephemeral`
+is null/false **before** `svc.sh start` — an ephemeral runner under a persistent service de-registers
+after one job then flaps. **FOLLOW-UP:** teach `install-runner.sh` a `--non-ephemeral` flag + a
+remove-then-readd path so this isn't a manual dance (filed).
+
+**Egress-lock is still pending** for this runner (RUNNER.md's host-firewall step) — acceptable while
+it's private-repo + trusted-actor-only, but apply before broadening.
+
 ## Two corrections (learned during the first live registration, 2026-07-01)
 
 1. **Install the unit before enabling it** — `install-runner.sh` configures the runner but does

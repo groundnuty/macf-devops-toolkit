@@ -24,8 +24,9 @@ fleets:
       - name: macf-science-agent
         repo: groundnuty/macf-science-agent
         visibility: private
-        status: proven          # isolation-proven 2026-07-01 ("Connected → Listening for Jobs")
-        note: safe first spike; private = no anonymous fork surface
+        status: live            # non-ephemeral systemd service (svc.sh), listening+serving 2026-07-01
+        note: safe first spike; private = no anonymous fork surface. Non-ephemeral (survives jobs);
+              origin-routing (macf-actions#60) merged + MACF_TRUSTED_ACTORS set → serves trusted routing.
       # - name: macf
       #   repo: groundnuty/macf
       #   visibility: public
