@@ -195,6 +195,27 @@ So: **`macf ps` (extended: alive+dead, versioned, cross-platform) is the operato
 
 ---
 
+## Amendment B (2026-07-01): the distribution contract — how the operational work reaches the VMs
+
+*From an operator follow-up: "how do we deliver the operational work to the agents on multiple VMs, when the only thing we distribute today is the macf binary?"* This DR (and DR-006) produced substantial VM tooling that currently lives as **reference implementations in `macf-devops-toolkit:fleet/`** — which the VMs never receive. The contract that closes the gap:
+
+**The macf binary IS the delivery channel — so a capability must live *in* the binary, not beside it.** Three homes, by kind:
+
+| Kind | Home | Distribution |
+|---|---|---|
+| **Capability** (the upgrade orchestrator, the watchdog reconciler, resume/nudge-report, restart-self, install-cron) | a **canonical `macf` subcommand** | rides the **npm package** → every VM via `npm i -g` + `macf init`/`update` (already the channel) |
+| **Per-VM config** (`desired-agents.yaml`, cron schedule, endpoints, alert-repo) | **local on each VM** | provided by `macf init`/bootstrap per VM — NOT one-size distributed |
+| **Cluster-side** (the watchdog-heartbeat PrometheusRule, dashboards) | the **gitops repo** | argocd → the monitoring cluster (already solved) |
+
+**Consequences:**
+
+- The devops `fleet/*.sh` are **reference implementations + the interim** (VMs clone the repo until the subcommands land), NOT the distributed artifact. The distributed artifact is the CLI. This is the DR-007/DR-006 **build-split** generalized to *delivery*: devops designs + proves; the canonical `macf` subcommand is what ships.
+- **Already in motion:** `macf fleet upgrade` (`macf#682`) + `restart-self` session-safety (`macf#685`). **The rest** — `macf watchdog reconcile`, `macf fleet resume`, `macf watchdog install-cron` — filed as `macf#686` (the VM-operational-layer promotion). Implementation language (bash-wrap vs native TypeScript) is code-agent's call.
+- **The recursion:** once `macf fleet upgrade` is distributed, *it* is how future macf-binary updates roll across the fleet; `macf init` bootstraps a new VM. **`init` seeds; `fleet upgrade` sustains.**
+- **This contract belongs equally in the forthcoming macf DR** (the framework-contract DR science recommended) — "capability-in-CLI / config-local / cluster-via-gitops" is a *distribution contract*, a framework-level architecture decision, not a devops-toolkit detail.
+
+---
+
 ## Cross-references
 
 - **DR-006 §A.7** — upgrade = version-dimension reconcile; VM upgrade-driver + rolling sequencer (this DR's parent).
