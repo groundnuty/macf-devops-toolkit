@@ -41,5 +41,27 @@ allout="$(MACF_TEST_LIVE_VERSIONS='t-current=0.2.44 t-behind=0.2.44 t-busy=0.2.4
   "$UP" --manifest "$TMP/desired.yaml" --target 0.2.44 2>&1 || true)"
 if printf '%s' "$allout" | grep -qF "No behind-and-idle agents"; then echo "  ok: all-at-target → nothing to upgrade"; pass=$((pass+1))
 else echo "  FAIL: all-at-target not detected"; fail=$((fail+1)); fi
+
+echo "== session-state guard (Pattern A: assert the transcript survived the restart) =="
+# Unit-test the guard's compare logic by extracting the pure functions (kept in lockstep with
+# upgrade.sh; no whole-script source needed). MACF_TEST_SESSION="agent=<uuid>,<bytes>" seam.
+( set -uo pipefail
+  SESSION_BACKUP_DIR=/tmp/sbguard   # referenced in the HALT message
+  eval "$(awk '/^session_state\(\)/,/^}$/' "$UP")"
+  eval "$(awk '/^session_survived\(\)/,/^}$/' "$UP")"
+  gp=0; gf=0
+  g() { local d="$1" want="$2"; shift 2   # want=survive|halt ; env MACF_TEST_SESSION + args
+    if session_survived "$@" >/dev/null 2>&1; then got=survive; else got=halt; fi
+    if [ "$got" = "$want" ]; then echo "  ok: $d"; gp=$((gp+1)); else echo "  FAIL: $d (got $got want $want)"; gf=$((gf+1)); fi; }
+  MACF_TEST_SESSION="a=u1,200" g "grew (same uuid) → survive"        survive a /x "u1 100"
+  MACF_TEST_SESSION="a=u1,100" g "same size → survive"               survive a /x "u1 100"
+  MACF_TEST_SESSION="a=u1,50"  g "SHRANK (same uuid) → HALT"         halt    a /x "u1 100"
+  MACF_TEST_SESSION="a="       g "transcript GONE → HALT"            halt    a /x "u1 100"
+  MACF_TEST_SESSION="a=u2,300" g "uuid changed but grew → survive+note" survive a /x "u1 100"
+  MACF_TEST_SESSION="a=u2,40"  g "uuid changed AND shrank → HALT"    halt    a /x "u1 100"
+  echo "  ($gp guard-cases ok, $gf failed)"
+  [ "$gf" -eq 0 ]
+) && pass=$((pass+1)) || fail=$((fail+1))
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

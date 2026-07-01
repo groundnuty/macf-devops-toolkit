@@ -38,6 +38,14 @@ LAST_EXIT_DIR="${MACF_LAST_EXIT_DIR:-$HOME/.macf/last-exit}"
 PANE_LINES="${MACF_UPGRADE_PANE_LINES:-40}"
 VERIFY_TIMEOUT="${MACF_UPGRADE_VERIFY_TIMEOUT:-120}"   # secs to wait for the target to come up green
 VERIFY_INTERVAL="${MACF_UPGRADE_VERIFY_INTERVAL:-6}"
+# Session-state safety (Pattern A): back up the agent's conversation transcript BEFORE the
+# destructive restart (rotating), and ASSERT it survived AFTER (a shrink/loss → HALT+REPORT).
+# The transcript is `~/.claude/projects/<slug>/<uuid>.jsonl` — append-only; a healthy restart
+# RESUMES the same uuid (grows), so a size-regression or a swap-to-a-new-small-session is the
+# loss signal (research: /clear is in-memory-only + doesn't shrink the file; /compact self-.baks).
+SESSION_BACKUP_DIR="${MACF_SESSION_BACKUP_DIR:-$HOME/.macf/session-backups}"
+SESSION_BACKUP_KEEP="${MACF_SESSION_BACKUP_KEEP:-5}"          # rotating backups kept per agent
+CLAUDE_PROJECTS_DIR="${MACF_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 EXECUTE=0
 
 usage() {
@@ -128,12 +136,81 @@ agent_busy() {
   [ "$a" != "$b" ]
 }
 
+# --- session-state safety (Pattern A: back up before, assert-survived after) -------------
+# agent_session_file <ws> -> the agent's ACTIVE conversation transcript (.jsonl), "" if none.
+# LOCAL + registry-free: the project slug is the launch-cwd path with non-alnum→'-'; the agents'
+# slug is the Dropbox/Mac-path form (verified on this VM), so match by the shared
+# `<parent>-<repo>` tail — robust across the Mac/Linux path divergence. Active = most-recent mtime.
+agent_session_file() {
+  local ws="$1" tail proj
+  tail="$(basename "$(dirname "$ws")")-$(basename "$ws")"
+  proj="$(find "$CLAUDE_PROJECTS_DIR" -maxdepth 1 -type d -name "*$tail" 2>/dev/null | head -1)"
+  [ -n "$proj" ] || { echo ""; return; }
+  ls -t "$proj"/*.jsonl 2>/dev/null | head -1
+}
+
+# session_state <agent> <ws> -> "<uuid> <bytes>" of the active transcript, "" if none.
+# Test seam: MACF_TEST_SESSION="agent=<uuid>,<bytes> ..." DEFINED ⇒ authoritative (skips disk).
+# (comma joins uuid+bytes so the space-bearing output survives word-splitting of the seam.)
+session_state() {
+  if [ "${MACF_TEST_SESSION+set}" = set ]; then
+    local e
+    for e in $MACF_TEST_SESSION; do
+      case "$e" in "$1"=*) printf '%s\n' "${e#*=}" | tr ',' ' '; return ;; esac
+    done
+    echo ""; return
+  fi
+  local sf; sf="$(agent_session_file "$2")"
+  [ -n "$sf" ] && [ -f "$sf" ] || { echo ""; return; }
+  echo "$(basename "$sf" .jsonl) $(stat -c%s "$sf" 2>/dev/null || stat -f%z "$sf" 2>/dev/null || echo 0)"
+}
+
+# backup_session <agent> <ws> — copy the active transcript to a ROTATING per-agent backup
+# (keep newest SESSION_BACKUP_KEEP). Cheap insurance: RESTORE if a restart ever loses state.
+backup_session() {
+  local agent="$1" ws="$2" sf dir ts
+  [ "${MACF_TEST_SESSION+set}" = set ] && return 0   # tests: no real files to copy
+  sf="$(agent_session_file "$ws")"
+  [ -n "$sf" ] && [ -f "$sf" ] || { echo "    [backup] no transcript found for $agent — skipping"; return 0; }
+  dir="$SESSION_BACKUP_DIR/$agent"; mkdir -p "$dir"
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  cp -p "$sf" "$dir/${ts}-$(basename "$sf")"
+  ls -t "$dir"/*.jsonl 2>/dev/null | tail -n +"$((SESSION_BACKUP_KEEP+1))" | while read -r old; do rm -f "$old"; done
+  echo "    [backup] $agent transcript ($(stat -c%s "$sf" 2>/dev/null || echo '?') b) → $dir/${ts}-… (keep $SESSION_BACKUP_KEEP)"
+}
+
+# session_survived <agent> <ws> <pre> -> 0 if the transcript survived the restart, 1 (HALT) if lost.
+# Healthy resume = SAME uuid + size >= pre (append-only). Loss = gone, or SHRANK (a size-regression
+# is impossible for an append-only log → truncation / fresh-start / a mis-resumed session).
+session_survived() {
+  local agent="$1" ws="$2" pre="$3" post pre_uuid pre_size post_uuid post_size
+  [ -n "$pre" ] || { echo "    [state-guard] no pre-state for $agent — guard skipped"; return 0; }
+  post="$(session_state "$agent" "$ws")"
+  pre_uuid="${pre%% *}"; pre_size="${pre##* }"
+  if [ -z "$post" ]; then
+    echo "    [STATE-GUARD] HALT: $agent has NO active transcript after restart — possible state loss."
+    echo "                 Backup retained in $SESSION_BACKUP_DIR/$agent. Rolling STOPS + REPORT."
+    return 1
+  fi
+  post_uuid="${post%% *}"; post_size="${post##* }"
+  if [ "${post_size:-0}" -lt "${pre_size:-0}" ]; then
+    echo "    [STATE-GUARD] HALT: $agent transcript SHRANK after restart (pre=[$pre] → post=[$post]) —"
+    echo "                 possible /clear, fresh-start, or truncation. RESTORE from $SESSION_BACKUP_DIR/$agent. Rolling STOPS + REPORT."
+    return 1
+  fi
+  [ "$post_uuid" != "$pre_uuid" ] && echo "    [state-guard] note: $agent uuid changed $pre_uuid→$post_uuid (size ${post_size}≥${pre_size} — not a loss, but verify the right session resumed)"
+  return 0
+}
+
 # roll_one <agent> <ws> — the per-agent upgrade step (EXECUTE path). Returns 0 green, 1 fail.
-# pin-bump (verified mechanism: the target CLI's `update` bumps the workspace pins + regens
-# claude.sh) → graceful SIGTERM (exit 143 → #627 deregister ~1.5s) → detached relaunch
-# (claude.sh installs the new pin) → poll /health.version==TARGET + reachable.
+# session-backup+pre-state → pin-bump → graceful SIGTERM (exit 143 → #627 deregister ~1.5s) →
+# detached relaunch (claude.sh installs the new pin) → verify /health.version==TARGET → assert
+# the session survived (Pattern A). A bad release OR a state-loss HALTS the roll.
 roll_one() {
-  local agent="$1" ws="$2" sess="macf@$1" pid=""
+  local agent="$1" ws="$2" sess="macf@$1" pid="" pre=""
+  backup_session "$agent" "$ws"
+  pre="$(session_state "$agent" "$ws")"
+  echo "    [0/4] session pre-state: ${pre:-<none>}  (backed up; will assert it survives)"
   echo "    [1/4] bump pins → $TARGET  (npx @groundnuty/macf@$TARGET update --dir $ws --all --yes)"
   ( cd "$ws" && npx -y "@groundnuty/macf@$TARGET" update --dir "$ws" --all --yes >/dev/null 2>&1 ) \
     || { echo "    HALT: pin-bump failed for $agent"; return 1; }
@@ -152,7 +229,9 @@ roll_one() {
     sleep "$VERIFY_INTERVAL"; waited=$((waited+VERIFY_INTERVAL))
     lv="$(live_version "$agent")"
     if [ "$lv" = "$TARGET" ]; then
-      echo "    [4/4] GREEN — $agent up on $TARGET (${waited}s). Next agent."
+      # [4/4] version is green — now assert the session survived the restart (Pattern A)
+      session_survived "$agent" "$ws" "$pre" || return 1
+      echo "    [4/4] GREEN — $agent up on $TARGET (${waited}s), session preserved. Next agent."
       return 0
     fi
   done
