@@ -170,6 +170,32 @@ remove-then-readd path so this isn't a manual dance (filed).
 **Egress-lock is still pending** for this runner (RUNNER.md's host-firewall step) — acceptable while
 it's private-repo + trusted-actor-only, but apply before broadening.
 
+## Auto-restart oversight — REQUIRED (GitHub's svc.sh omits it)
+
+**GitHub's `svc.sh`-generated systemd unit has NO `Restart=` directive.** It's `enabled` (restarts
+on VM *reboot*) but NOT supervised against *crashes* — a transient failure (network blip, broker
+`SocketException`, OOM) kills the runner **permanently** while the VM stays up, with no restore.
+Observed 2026-07-01: a Tailscale/network blip during the fleet upgrade threw
+`SocketException (125): Operation canceled` on the broker connection → the listener exited → systemd
+left it dead (no oversight). This is the exact silent-death-no-restore gap the fleet cares about.
+
+**Fix — systemd IS the runner's supervisor; configure its restart policy** (do NOT bolt a second
+watchdog on top — a systemd *service* is systemd's to supervise). A repo-tracked drop-in
+(`runner/systemd-restart-override.conf`) adds `Restart=always` + `RestartSec=5` +
+`StartLimitIntervalSec=0`; drop-ins survive `svc.sh` regen:
+
+```bash
+SVC=$(systemctl list-units --type=service --all | grep -oE 'actions\.runner\.[^ ]+\.service' | head -1)
+sudo mkdir -p "/etc/systemd/system/${SVC}.d"
+sudo cp runner/systemd-restart-override.conf "/etc/systemd/system/${SVC}.d/restart.conf"
+sudo systemctl daemon-reload && sudo systemctl restart "$SVC"
+systemctl show "$SVC" -p Restart --value    # → always
+```
+
+`verify-runner.sh` now ASSERTS `Restart=always` (Pattern A — a runner missing the oversight FAILs
+the health-check). Every runner standup should install this drop-in. FOLLOW-UP: `install-runner.sh`
+should install it automatically so it's not a manual post-step.
+
 ## Two corrections (learned during the first live registration, 2026-07-01)
 
 1. **Install the unit before enabling it** — `install-runner.sh` configures the runner but does

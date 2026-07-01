@@ -77,6 +77,21 @@ else
   wrn "listener NOT running — fine if idle/between windows (start via ./run.sh or the systemd unit)"
 fi
 
+# 5b. AUTO-RESTART OVERSIGHT (Pattern A: assert the supervisor exists). GitHub's svc.sh unit
+# has NO Restart= → a crash (network blip / broker SocketException) leaves the runner dead with
+# no restore (observed #90, 2026-07-01). The systemd-restart-override.conf drop-in adds
+# Restart=always. Assert it's in effect so a runner missing the oversight is caught here.
+if command -v systemctl >/dev/null 2>&1; then
+  SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE 'actions\.runner\.[^ ]+\.service' | head -1)"
+  if [ -n "$SVC" ]; then
+    POLICY="$(systemctl show "$SVC" -p Restart --value 2>/dev/null)"
+    if [ "$POLICY" = "always" ]; then ck "auto-restart oversight: $SVC Restart=always"
+    else bad "NO auto-restart: $SVC Restart='${POLICY:-<none>}' — a crash leaves it DEAD (install runner/systemd-restart-override.conf)"; fi
+  else wrn "no actions.runner systemd service found (foreground/run.sh mode?)"; fi
+else
+  skp "auto-restart policy (systemctl — Restart=always oversight)"
+fi
+
 # 6. GitHub-side 'registered + online' — needs administration:read (bot is 403); operator/gh-side
 wrn "GitHub-side registered+online NOT checked here — verify in Settings→Actions→Runners (needs admin)"
 
