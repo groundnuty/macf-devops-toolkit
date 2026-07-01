@@ -56,14 +56,24 @@ send helper **as the agent-owner user (`ubuntu`), for that helper only**:
 
 ```
 # /etc/sudoers.d/macf-runner  (installed by setup-macf-runner-user.sh)
-macf-runner ALL=(ubuntu) NOPASSWD: /opt/macf-runner/tmux-send-to-claude.sh
+macf-runner ALL=(ubuntu) NOPASSWD: /usr/local/bin/macf-tmux-send.sh
 ```
+
+**The helper lives at a ROOT-owned path — NOT in the runner's home** (science's #145
+review): a sudoers rule that runs a script *as ubuntu* is only safe if `macf-runner`
+cannot **modify** that script, and **directory-write beats file-ownership** — if the
+helper sat in `/opt/macf-runner` (which `macf-runner` owns), the runner could `unlink`
+it and drop its own, then `sudo -u ubuntu <helper>` runs attacker code as ubuntu =
+full escalation. So the helper is `/usr/local/bin/macf-tmux-send.sh` (`root:root 0755`),
+and `setup-macf-runner-user.sh` **asserts** (Pattern B, fail-loud) that the helper +
+every parent dir is non-writable by `macf-runner` *before* installing the sudoers rule;
+`verify-runner.sh` re-checks it so drift is caught at health-check.
 
 Explicitly **NOT** granted: a login shell as ubuntu, docker group, the App key dir,
 `~/.kube`, other agents' `/proc`. So a compromised job can drive an agent (send it a
-prompt) but cannot read the VM's secrets directly. (Driving an agent is itself a
-capability — hence layers 1–2 keep untrusted triggers off the runner entirely; this
-grant is the floor for what a *trusted* routing job legitimately needs.)
+prompt) but — with the helper tamper-proof — cannot read the VM's secrets directly.
+(Driving an agent is itself a capability — hence layers 1–2 keep untrusted triggers off
+the runner entirely; this grant is the floor for what a *trusted* routing job needs.)
 
 ---
 

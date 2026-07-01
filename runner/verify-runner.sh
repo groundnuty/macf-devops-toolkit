@@ -11,7 +11,7 @@ REPO=""
 RUNNER_USER="${MACF_RUNNER_USER:-macf-runner}"
 RUNNER_HOME="${MACF_RUNNER_HOME:-/opt/macf-runner}"
 RUNNER_DIR="$RUNNER_HOME/actions-runner"
-SEND_HELPER="$RUNNER_HOME/tmux-send-to-claude.sh"
+SEND_HELPER="${MACF_SEND_HELPER:-/usr/local/bin/macf-tmux-send.sh}"   # root-owned, per #145 fix
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
@@ -34,8 +34,22 @@ id "$RUNNER_USER" >/dev/null 2>&1 && ck "user $RUNNER_USER exists" \
   || bad "user $RUNNER_USER MISSING (run setup-macf-runner-user.sh)"
 
 # 2. send helper — the ONE capability the runner has
-if [ -x "$SEND_HELPER" ]; then ck "send helper present + executable"
+if [ -x "$SEND_HELPER" ]; then ck "send helper present + executable ($SEND_HELPER)"
 else bad "send helper missing / not executable ($SEND_HELPER)"; fi
+
+# 2b. send helper NON-TAMPERABLE by the runner (science's #145 fix): the sudo-invoked helper
+# + every parent dir must be non-writable by $RUNNER_USER, else the grant escalates to $AGENT_USER.
+if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" = 0 -o -n "${MACF_CAN_SUDO:-}" ]; then
+  tamper="" d="$SEND_HELPER"
+  while :; do
+    sudo -u "$RUNNER_USER" test -w "$d" 2>/dev/null && { tamper="$d"; break; }
+    [ "$d" = "/" ] && break; d="$(dirname "$d")"
+  done
+  [ -z "$tamper" ] && ck "send helper non-tamperable by $RUNNER_USER (no writable parent)" \
+    || bad "$RUNNER_USER CAN WRITE '$tamper' → sudo helper is tamperable = escalation to ${MACF_AGENT_USER:-ubuntu}"
+else
+  skp "send-helper non-tamperability ($SEND_HELPER + parents not writable by $RUNNER_USER)"
+fi
 
 # 3. sudoers grant (needs sudo to read /etc/sudoers.d)
 SUDOERS=/etc/sudoers.d/macf-runner
