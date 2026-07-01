@@ -235,6 +235,22 @@
             "timeout": 30000
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:macf-channel-server:macf-agent",
+            "tool": "checkpoint_to_memory",
+            "input": {
+              "session_id": "${session_id}",
+              "transcript_path": "${transcript_path}",
+              "cwd": "${cwd}"
+            },
+            "timeout": 30,
+            "statusMessage": "Writing session checkpoint to memory... (macf#731 stopgap)"
+          }
+        ]
       }
     ],
     "SessionEnd": [
