@@ -41,9 +41,19 @@ if [ -f "$SEND_HELPER_SRC" ]; then
   install -o root -g root -m 0755 "$SEND_HELPER_SRC" "$SEND_HELPER"
   echo "installed send helper: $SEND_HELPER (root:root 0755) from $SEND_HELPER_SRC"
 else
-  echo "WARN: send-helper source not found ($SEND_HELPER_SRC) — place $SEND_HELPER yourself" >&2
-  echo "      as root:root 0755 BEFORE relying on the grant." >&2
+  echo "NOTE: send-helper source not found ($SEND_HELPER_SRC)." >&2
+  echo "      Pass MACF_SEND_HELPER_SRC=<path> or place $SEND_HELPER (root:root 0755) yourself." >&2
 fi
+
+# GUARD: never install a sudoers grant pointing at a MISSING helper. Catches the
+# source-not-resolved case (e.g. running this script from /tmp, where the relative
+# SEND_HELPER_SRC mis-resolves) so we fail loud instead of granting sudo to a path that
+# doesn't exist (broken) or that someone could later create.
+[ -x "$SEND_HELPER" ] || {
+  echo "FATAL: $SEND_HELPER is not an executable file — refusing to install the sudoers grant." >&2
+  echo "       Re-run from the repo (so the default source resolves) or pass MACF_SEND_HELPER_SRC=<path>." >&2
+  exit 1
+}
 
 # 3. ASSERT non-tamperability (Pattern B, science's #145 fix): the helper + EVERY parent dir
 #    up to / must be non-writable by $RUNNER_USER — else macf-runner could swap the script
