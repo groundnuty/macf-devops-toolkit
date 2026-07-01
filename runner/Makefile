@@ -48,6 +48,20 @@ fleet-$(1): $(addprefix runner-,$(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ)
 endef
 $(foreach f,$(FLEETS),$(eval $(call _fleet_rule,$(f))))
 
+# uninstall-<name>: tear down ONE runner (stop+remove svc.sh service + Restart drop-in +
+# de-register from GitHub). Repo resolved from runners.yaml; prompts for the remove-token.
+define _uninstall_rule
+uninstall-$(1): ; sudo ./uninstall-runner.sh --repo $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].runners[]|select(.name=="$(1)").repo' 2>/dev/null)
+endef
+$(foreach r,$(RUNNERS),$(eval $(call _uninstall_rule,$(r))))
+
+# reinstall-<name>: dogfood the full lifecycle — uninstall then reconcile(install).
+define _reinstall_rule
+reinstall-$(1): uninstall-$(1) runner-$(1)
+	@echo "reinstall $(1): torn down + re-registered."
+endef
+$(foreach r,$(RUNNERS),$(eval $(call _reinstall_rule,$(r))))
+
 ##@ Generic mechanism (rarely called directly — the generated targets use these)
 
 .PHONY: setup-user

@@ -47,14 +47,16 @@ read -r -p "Install + register the runner for $REPO now? [y/N] " a
 echo "-- copying $FLEET shared vars from $VAR_SOURCE → $REPO --"
 ./copy-vars.sh --to "$REPO" --fleet "$FLEET" || echo "   (var-copy had issues — continuing; verify later)"
 
-# 2b. mint a registration token — the operator does this (bot is 403). Prompt for it.
-echo "-- mint a repo registration token (operator; bot is 403) --"
-echo "   gh api -X POST /repos/$REPO/actions/runners/registration-token --jq .token"
-read -r -p "Paste the token: " TOKEN
-[ -n "$TOKEN" ] || { echo "no token — aborting install."; exit 1; }
+# 2b. if a stale registration exists, tear it down first (config.sh --replace is insufficient;
+# install-runner.sh refuses to clobber a live .runner → remove-then-readd is uninstall's job).
+if [ -f "/opt/macf-runner/actions-runner/.runner" ]; then
+  echo "-- existing registration found → uninstalling first (clean remove-then-readd) --"
+  sudo ./uninstall-runner.sh --repo "$REPO" || echo "   (uninstall had issues — continuing to install attempt)"
+fi
 
-# 2c. install/register as the low-priv macf-runner user
-sudo -u macf-runner bash ./install-runner.sh --repo "$REPO" --token "$TOKEN" || { echo "install failed."; exit 1; }
+# 2c. full install: NON-ephemeral runner + svc.sh service + Restart=always oversight (root sudo;
+# install-runner.sh prompts for the registration token — operator mints it, bot is 403).
+sudo ./install-runner.sh --repo "$REPO" || { echo "install failed."; exit 1; }
 
 # 3. prove it — verify again with the same check
 echo "-- verifying the freshly-registered runner --"
