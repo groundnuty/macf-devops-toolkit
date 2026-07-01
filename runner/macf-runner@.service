@@ -1,0 +1,31 @@
+# systemd template unit — one instance per repo: macf-runner@groundnuty-<repo>.
+# devops-toolkit#90. Install: sudo cp macf-runner@.service /etc/systemd/system/ &&
+# sudo systemctl enable --now macf-runner@groundnuty-macf-science-agent
+#
+# Runs as the LOW-PRIV macf-runner user (never ubuntu). %i = the repo slug
+# (groundnuty-<repo>); MACF_RUNNER_REPO reconstructs owner/repo from it.
+[Unit]
+Description=MACF ephemeral self-hosted runner (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=macf-runner
+Group=macf-runner
+WorkingDirectory=/opt/macf-runner/actions-runner
+# %i is groundnuty-<repo>; turn the FIRST '-' back into '/' for owner/repo.
+Environment=MACF_RUNNER_LABELS=self-hosted,macf-vm
+ExecStart=/usr/bin/env bash -c 'MACF_RUNNER_REPO="$(echo %i | sed "s/-/\\//")" /opt/macf-runner/run-ephemeral-loop.sh'
+Restart=always
+RestartSec=10
+# hardening — the runner needs very little of the host.
+NoNewPrivileges=false          # needs sudo for the send helper (the ONE grant); keep the sudoers rule narrow
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/macf-runner
+PrivateTmp=true
+# egress lock is applied at the host firewall (see RUNNER.md), not here.
+
+[Install]
+WantedBy=multi-user.target
