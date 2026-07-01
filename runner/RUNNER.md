@@ -19,17 +19,24 @@ tailnet, so the ~46% of routing wall-clock currently spent on Tailscale connect 
 on a public repo is the config GitHub explicitly discourages: *any* fork PR can target
 it and run code on the VM. Four layers contain that, in priority order:
 
-1. **Origin-routing (the primary control — lives in macf-actions, code-agent owns).**
-   The router job picks its runner by trigger trust:
-   ```yaml
-   runs-on: ${{ contains(fromJSON(vars.MACF_TRUSTED_ACTORS), github.actor)
-                && fromJSON('["self-hosted","macf-vm"]') || 'ubuntu-latest' }}
+1. **Origin-routing (the primary control — SHIPPED in macf-actions #60, code-agent owns).**
+   A `pick-runner` job picks the runner by trigger trust, and every downstream job does
+   `runs-on: ${{ fromJSON(needs.pick-runner.outputs.labels) }}`. The pick logic (bash,
+   `set -f` so `[bot]` logins don't glob):
+   ```bash
+   # self-host ONLY for a trusted actor on a NON-fork event
+   if [ "$IS_FORK" != "true" ] && [ -n "$TRUSTED_ACTORS" ]; then
+     for a in ${TRUSTED_ACTORS//,/ }; do [ "$a" = "$ACTOR" ] && labels='["self-hosted","macf-vm"]'; done
+   fi   # else: ubuntu-latest (fail-safe)
    ```
-   Trusted actors (operator + the agents + the **release agent**) → self-hosted;
-   everyone else → github-hosted. `github.actor`/`head.repo.fork` are **GitHub-set,
-   not spoofable**, and for a `pull_request` the **base** repo's workflow runs — a fork
-   can't rewrite the routing. Outsider triggers go to github-hosted **by construction**.
-   Scanners still see `self-hosted` in the YAML but can't reach it.
+   **`MACF_TRUSTED_ACTORS` is plain logins, comma/space/newline-separated — NOT a JSON
+   array** (e.g. `groundnuty macf-code-agent[bot] … macf-release-agent[bot]`). A JSON-array
+   value silently fails to match (splits into bracket/quote tokens) → everything routes
+   github-hosted + the self-hosted runner sits idle. Trusted actors (operator + agents +
+   the **release agent**) → self-hosted; everyone else → github-hosted. `github.actor` /
+   `head.repo.fork` are **GitHub-set, not spoofable**, and for a `pull_request` the **base**
+   repo's workflow runs — a fork can't rewrite the routing. Fail-safe: unset/empty var →
+   ubuntu-latest. Scanners still see `self-hosted` in the YAML but can't reach it.
 
 2. **This router never runs fork code.** No `pull_request_target`, no `run:` steps; it
    reads event metadata + delegates to the pinned macf-actions reusable workflow. The
@@ -83,11 +90,13 @@ the runner entirely; this grant is the floor for what a *trusted* routing job ne
 **Order matters — do NOT land the origin-routing `runs-on` before a runner exists**
 (trusted-actor jobs would hang forever waiting for an absent runner).
 
-1. **Operator — set the trusted-actors allowlist** (repo variable, per repo):
+1. **Operator — set the trusted-actors allowlist** (repo variable, per repo). Plain logins,
+   space-separated (macf-actions #60's shape — NOT a JSON array):
    ```bash
    gh variable set MACF_TRUSTED_ACTORS --repo groundnuty/<repo> \
-     --body '["groundnuty","macf-code-agent[bot]","macf-science-agent[bot]","macf-devops-agent[bot]","macf-auditor-agent[bot]","macf-release-agent[bot]"]'
+     --body 'groundnuty macf-code-agent[bot] macf-science-agent[bot] macf-devops-agent[bot] macf-auditor-agent[bot] macf-release-agent[bot]'
    ```
+   (Or copy from the fleet's `var_source` with `copy-vars.sh` once one repo has it — one source of truth.)
 2. **devops — create the low-priv user** (once per VM): `sudo ./setup-macf-runner-user.sh`
 3. **Operator — mint a repo-scoped registration token** (short-lived ~1h; bot is 403):
    ```bash
