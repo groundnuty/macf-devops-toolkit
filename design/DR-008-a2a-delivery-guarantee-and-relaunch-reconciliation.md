@@ -6,6 +6,8 @@
 
 Motivating incident: **the devops agent was down ~8h on 2026-07-01** (register-race on a stale registry entry + TUI stuck at the channels prompt). Any *direct* A2A sent during that window was dropped; in-flight task state died with the process. Concrete evidence this is real, not theoretical.
 
+**Self-demonstrating motivation:** this DR was *reviewed under a live instance of the exact gap it fixes.* The review-request ping to the science agent landed while it was mid-turn on another task and was **not re-surfaced when it went idle** — the review stranded until a manual wake-nudge. That is precisely the failure §2 (durable inbox) + §4 (relaunch/idle reconciliation — promote the §5 sweep from "a discipline the agent might forget" to "an injected step") exist to eliminate: *a message to a busy/idle peer is silently dropped, and the pull-based sweeps aren't auto-run when the peer next surfaces.* The DR could not have a more on-the-nose motivating case than being blocked by its own subject.
+
 ---
 
 ## Context — what's guaranteed today, and the one hole
