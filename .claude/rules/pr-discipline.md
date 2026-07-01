@@ -1,3 +1,9 @@
+<!--
+  This file is managed by `macf`. Do not edit directly — edits are
+  overwritten on the next `macf update`. The canonical source lives at
+  groundnuty/macf:plugin/rules/. To change a rule, file an issue or PR
+  against that file in the macf repo, then run `macf update` here.
+-->
 # PR Discipline (canonical, shared)
 
 **This file is the single source of truth for how MACF agents use pull
@@ -154,6 +160,101 @@ foreign-reporter, use `Refs` for all of them.
 
 ---
 
+## How to submit LGTM — formal review, not comment
+
+**LGTM and "request changes" decisions MUST be submitted as formal GitHub
+reviews via `gh pr review --approve` or `gh pr review --request-changes`,
+not as plain `gh pr comment` text.**
+
+```bash
+# CORRECT — formal review submission
+gh pr review <PR-number> --repo <owner>/<repo> --approve --body-file <review.md>
+
+# CORRECT — formal request-changes submission
+gh pr review <PR-number> --repo <owner>/<repo> --request-changes --body-file <review.md>
+
+# WRONG — review communicated only via issue/PR comment
+gh pr comment <PR-number> --repo <owner>/<repo> --body "LGTM, you can merge"
+gh issue comment <issue-N> --repo <owner>/<repo> --body "@<author> LGTM on PR #M"
+```
+
+**Why this matters structurally:**
+
+Formal review submission fires GitHub's `pull_request_review` webhook
+event with `state in {approved, changes_requested}`. The MACF routing
+Action's `route-by-pr-review-state` job (macf-actions v3.3.0+, per
+macf-actions#39) listens for this exact event and notifies the PR author's
+channel-server directly — independent of whether the reviewer @mentioned
+the author in the body. **This is the structural defense for the
+LGTM→merge handoff: the state-change IS the wake signal.**
+
+If the LGTM is communicated only as a plain `gh pr comment`,
+`pull_request_review` never fires; routing falls back to `route-by-mention`
+which depends on body parsing (and `mention-routing-hygiene.md §5`
+backtick-suppression discipline can suppress what looks like an addressing
+mention). Empirically observed: cv-e2e-test rehearsals #9, #10, #11b
+(2026-04-29 and 2026-04-30) — agents merged PRs without firing
+`pull_request_review` at all, leaving `route-by-pr-review-state` an
+untested code path despite being shipped via macf-actions v3.3.0.
+
+**Same shape as the silent-fallback hazard class (`silent-fallback-hazards.md`):
+the comment-form succeeds at the API boundary (`gh pr comment` returns 0)
+but the semantic outcome (wake recipient via routing-Action's structural
+defense) silently doesn't happen. Pattern A defense at the discipline
+layer: assert the LGTM uses a state-change-firing mechanism, not just
+text-on-the-thread.**
+
+**The body content of the formal review** is the same kind of content you'd
+otherwise put in a comment — substantive review notes, what's strong, what
+needs changes, dispositions on prior feedback. The `--body-file` path is
+the canonical way to pass that body without shell-quoting issues (per the
+backticks-in-comments hazard noted in `mention-routing-hygiene.md`).
+
+**This rule complements `coordination.md §Communication 2`** ("discussion
+in issue comments, not PR comments"). The two surfaces serve different
+purposes:
+
+- **State-change events** (LGTM, request-changes) fire on the PR via
+  formal review submission — engages the routing-Action structural
+  defense (`route-by-pr-review-state`).
+- **Substantive discussion ABOUT the work** persists on the issue thread
+  — visible on the Projects board, persists after the PR is merged or
+  closed.
+
+Both surfaces are load-bearing. Don't skip the formal review thinking
+"the issue thread is the canonical place"; don't skip the issue-thread
+discussion thinking "the formal review covers everything."
+
+**Verifying your review actually landed as a state-change** (per
+`verify-before-claim.md §2`):
+
+```bash
+# After gh pr review, confirm a state-change review exists.
+# Filter for APPROVED or CHANGES_REQUESTED specifically — `[-1]` alone
+# can mistake a follow-up COMMENTED review for the missing state-change.
+gh pr view <PR-number> --repo <owner>/<repo> --json reviews \
+  --jq '[.reviews[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")]
+        | last // "no state-change review"'
+```
+
+If the most recent state-change review is missing (output: `"no state-change
+review"`) OR the most recent review overall has `state == "COMMENTED"` and
+no prior state-change exists, the review was submitted as a comment-style
+review and won't fire the `pull_request_review.submitted` event with an
+actionable state — the routing won't engage. Re-submit with `--approve` or
+`--request-changes`.
+
+**When `--comment` (no state change) IS appropriate:**
+
+- **Mid-review clarifying questions** — partial-review feedback before completing the read-through, asking the implementer to disambiguate before you decide
+- **Partial-review notes** — observations on parts of the diff while the rest is in flight (e.g., "skimmed the `src/server.ts` changes; will read tests next pass")
+- **Out-of-band observations** — comments on a PR that's not blocking your LGTM/changes decision (style nits, future-work suggestions, links to adjacent context)
+- **Review-pickup acknowledgment** — comment like *"picking this up; will review tonight"* or *"queued behind X; ETA Y"* so the PR author knows when to expect feedback. Coordination-discipline (saves the implementer from polling) but isn't a state-change.
+
+These don't fire structural routing; agents on both sides should treat them as informational, not as merge-gating signals.
+
+---
+
 ## Merge-by-implementer
 
 **The implementer who wrote the PR merges it, not the reviewer.**
@@ -173,6 +274,25 @@ retry on flaky CI, etc.) and executes.
 
 If the PR author is blocked (e.g., offline), the reviewer may merge after
 an explicit hand-off comment — but that's exception, not default.
+
+### When the reviewer is absent or unreachable
+
+**Without an explicit LGTM from the reviewer, the implementer does NOT merge — even if waiting indefinitely.**
+
+When a PR has been open for an extended period without reviewer signal:
+
+1. **@mention the reviewer again** on the originating issue — they may have missed routing (silent-fallback hazards class; see `silent-fallback-hazards.md` Instance 3 for a concrete failure mode where routing succeeds at the API layer but the recipient never sees the prompt)
+2. **If still no response after a reasonable interval** (judgment call based on session pacing — minutes for fast-cycle work, an hour or more for deeper review): **escalate to the issue reporter** with `@<reporter>`
+3. **The reporter decides**:
+   - Re-route the review to a different reviewer
+   - Accept self-merge as exception (with explicit comment on the PR documenting why the LGTM gate was bypassed)
+   - Close the PR if the work is no longer needed
+
+**Self-merging without LGTM is a protocol violation**, except via the explicit reporter-sanctioned exception above. The only other sanctioned merge-without-explicit-LGTM path is the "PR author offline → reviewer merges with hand-off comment" exception described in the previous paragraph.
+
+**Why this rule exists.** The LGTM gate is structural — it ensures that someone other than the implementer has read the diff in context. Self-merge without LGTM bypasses that quality gate even if the work is correct. The escalation path preserves the gate's intent (someone else makes the merge decision) while providing a clear path forward when the registered reviewer is unreachable.
+
+This rule was surfaced 2026-04-26 during the macf-testbed#229 Phase C iter 4 sweep — a tester self-merged when its harness driver (acting as the de-facto reviewer) was killed mid-poll. The work was correct and the scenario AC was met, but the LGTM precondition wasn't. Codified here so the protocol covers reviewer-absence symmetrically with the existing implementer-absence case.
 
 ### Before merging
 
@@ -233,6 +353,38 @@ For fire-and-forget trivial changes (e.g., typo fix), waiting for CI is
 still right — it's a minute, and it protects against "the typo fix broke
 the build" because someone's CI job depends on the exact string you
 changed.
+
+---
+
+## Structural enforcement — `check-lgtm-gate.sh` PreToolUse hook
+
+Per `groundnuty/macf#270` (DR-023 UC-2), the "no LGTM = no merge" rule (codified above in §"How to submit LGTM" + §"When the reviewer is absent or unreachable" + §"Merge-by-implementer") is enforced by a Claude Code PreToolUse hook on `Bash` tool calls. The hook intercepts `gh pr merge` invocations, queries the target PR's review state via `gh pr view --json author,reviews`, and BLOCKs (`exit 2` with stderr explanation) when no APPROVED review from a non-author exists.
+
+**Architectural shape (DR-023 amendment 2026-04-27):** this is a bash command-type hook, NOT `type: "mcp_tool"`. PreToolUse-blocking semantics + mcp_tool's non-blocking-on-disconnect failure mode are structurally incompatible — a missing or transiently-disconnected MCP server would silently allow the merge. Bash form fires uniformly across substrate workspaces (where the `macf-agent` MCP server is permanently off per operator directive 2026-04-27) AND consumer workspaces (startup window + transient disconnect periods produce silent-fail paths under mcp_tool). Same reasoning UC-4 (`check-mention-routing.sh`, PR #275) demonstrated empirically.
+
+**The hook is the same shape as `check-gh-token.sh` (#140) + `check-mention-routing.sh` (#244 + #272):** a bash script distributed via `macf init` / `macf update` / `macf rules refresh` to every workspace's `.claude/scripts/check-lgtm-gate.sh` with the entry registered in `.claude/settings.json` `hooks.PreToolUse`. Substrate workspaces, tester agents, CV consumers, and future MACF-consumer projects all get the protection uniformly.
+
+**Decision rule** (subject to refinement; documented for transparency):
+
+- Command does NOT match `gh pr merge` (exact subcommand, wrapper-aware) → allow (other gh subcommands pass through unchanged)
+- Command matches but no PR number can be extracted → allow (defense-in-depth; gh itself surfaces the usage error)
+- Command matches AND `gh pr view --json author,reviews` returns at least one APPROVED review where reviewer login != author login (after normalizing `app/` prefix + `[bot]` suffix) → allow
+- Command matches AND no non-author APPROVED review exists → BLOCK with stderr citing this rule + the missing-LGTM diagnosis + the `MACF_SKIP_LGTM_CHECK=1` operator override
+- Any infrastructure failure (gh missing, network 404/5xx, malformed JSON) → fail-open (allow). Same defense-in-depth posture as `check-gh-token.sh` and `check-mention-routing.sh` — the hook closes residual policy slips, not all merge paths
+
+**Wrapper coverage:** the regex matches `gh pr merge` preceded by `sudo`, `env VAR=...`, `watch`, `ionice`, `setsid`, `nice`, `time`, bare-`VAR=...` env-prefix forms, and shell wrappers (`bash -c "gh pr merge ..."`, `sh -c`, `zsh -c`, including flag-prefixed forms like `bash -lc`). Same wrapper allow-list as `check-gh-token.sh` + `check-mention-routing.sh`. Chained-form leadins `;` `|` `&&` covered.
+
+**False-positive trade-off:** the hook leans toward false-positive over false-negative on parse-failure paths. PR-number extraction tolerates URL form (`https://github.com/owner/repo/pull/N`), `owner/repo#N` shorthand, and quoted positionals. Bare `gh pr merge` (no positional, gh prompts interactively) passes through unblocked — the operator's discipline catches it because the prompt is visible.
+
+**Override (`MACF_SKIP_LGTM_CHECK=1`)** is the escape hatch for legitimate exceptions documented in §"When the reviewer is absent or unreachable":
+
+- Reporter-sanctioned self-merge after extended reviewer absence
+- The "PR author offline → reviewer merges with hand-off comment" exception
+- Urgent reverts where waiting for review is itself a hazard
+
+Per the `check-gh-token.sh` precedent, structural enforcement plus an escape hatch outperforms behavioral discipline alone.
+
+**Empirical motivation:** `groundnuty/macf-testbed#229` Phase C iter 4 sweep (2026-04-26) recorded a self-merge-without-LGTM incident — a tester self-merged when its harness driver (acting as the de-facto reviewer) was killed mid-poll. Codified in §"When the reviewer is absent or unreachable" same day. The hook closes the residual: rule-discipline catches most cases; structural enforcement catches the slips that remain.
 
 ---
 

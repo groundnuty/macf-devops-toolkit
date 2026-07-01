@@ -55,6 +55,14 @@ k3s/.token
 # Claude local-only state
 .claude/settings.local.json
 .claude/.cache/
+# Per-session archives: keep the dir (.gitkeep is tracked), never commit the reports
+# themselves (local git-state snapshots + session-end logs — noise, not source of truth).
+.claude/session-reports/*
+!.claude/session-reports/.gitkeep
+# Editor/tool backups + init locks under .claude (settings*.bak, .cozempic-init.lock, etc.)
+.claude/*.bak
+.claude/**/*.bak-*
+.claude/.cozempic-init.lock
 
 # MACF hand-wire local state (substrate channel-server config — DR-005 Decision 6).
 # Per-machine + sensitive (certs incl. keys, App creds, channel logs); never committed.
