@@ -1,0 +1,38 @@
+# ArgoCD Application for the DR-006 watchdog who-watches-the-cron alert
+# (devops-toolkit#123 / DR-006 §A.4) — the EXTERNAL CONSUMER of the watchdog
+# self-heartbeat.
+#
+# Deploys a single PrometheusRule (promrule.yaml) that alarms when the agents-VM
+# cron watchdog's `macf_watchdog_last_sweep_timestamp_seconds` gauge goes stale or
+# absent. The PRODUCER is fleet/reconcile.sh (emits the gauge to the central
+# Collector on each --execute sweep); this is the monitoring-VM-side consumer that
+# closes the loop a cron can't close for itself.
+#
+# Sync-wave 2: depends on Prometheus (wave 0, via kube-prometheus-stack) being up so
+# its operator's ruleSelector can discover the rule by the `release: kube-prometheus-stack`
+# label. Same wave + label discipline as grafana-dashboards-release-hygiene.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: watchdog-heartbeat
+  namespace: argocd-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/watchdog-heartbeat
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,0 +1,77 @@
+# Who-watches-the-cron alert (devops-toolkit#123 / DR-006 §A.4) — the EXTERNAL CONSUMER
+# half of the watchdog self-heartbeat.
+#
+# The DR-006 VM cron watchdog (fleet/reconcile.sh, on the AGENTS VM) emits its last-sweep
+# timestamp as an OTLP gauge `macf_watchdog_last_sweep_timestamp_seconds` on every
+# `--execute` sweep (→ central Collector :8889 prometheus exporter → kube-prom-stack scrape).
+# A cron CANNOT detect its own death (science's #122 review) — so this rule, running on the
+# MONITORING VM (a DIFFERENT host that survives the agents-VM cron dying), alarms when the
+# heartbeat goes stale or vanishes. That closes the loop the local file-heartbeat alone can't.
+# Same producer-needs-consumer lesson as macf#589/#592 (the registry heartbeat).
+#
+# Label `release: kube-prometheus-stack` is REQUIRED for the Prometheus CR's ruleSelector to
+# discover this rule (cluster memory reference_kube_prom_stack_servicemonitor_label.md — the
+# selector is the ONLY filter; an unlabeled PrometheusRule is created but silently never loaded).
+#
+# Threshold assumes the install-cron.sh default ~10-min cadence; tune `> 1500` (25 min ≈ 2.5
+# missed sweeps) if the rollout interval differs.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: macf-watchdog-heartbeat
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: macf-watchdog-heartbeat
+    app.kubernetes.io/component: alerts
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: macf-watchdog-heartbeat
+      interval: 30s
+      rules:
+        # ----------------------------------------------------------------
+        # STALE: the watchdog emitted before but has gone quiet. This is the
+        # core who-watches-the-cron guarantee — a dead/throttled cron stops
+        # updating the gauge, so `time() - <frozen value>` grows past the
+        # threshold. Naturally rollout-safe: no metric → no value → no fire,
+        # so it only arms once the watchdog has actually run --execute.
+        # ----------------------------------------------------------------
+        - alert: MacfWatchdogHeartbeatStale
+          expr: |
+            time() - max(macf_watchdog_last_sweep_timestamp_seconds) > 1500
+          for: 5m
+          labels:
+            severity: warning
+            component: macf-watchdog
+          annotations:
+            summary: "DR-006 VM watchdog heartbeat is STALE (no --execute sweep in >25m)"
+            description: |
+              The fleet watchdog (fleet/reconcile.sh on the agents VM) has not stamped its
+              last-sweep gauge in over 25 minutes (>2.5 missed sweeps at the 10-min cadence).
+              The cron may be dead, the agents VM down, or the OTLP path broken — and a silent
+              watchdog means the fleet is UNSUPERVISED (deaf/stalled/blocked agents won't be
+              healed/nudged/reported). Investigate the agents-VM cron + reconcile.sh logs.
+            runbook_url: "https://github.com/groundnuty/macf-devops-toolkit/blob/main/design/DR-006-vm-cron-watchdog-agent-supervision-impl.md"
+        # ----------------------------------------------------------------
+        # ABSENT: the gauge is gone entirely (never emitted, or stopped
+        # flowing — collector down / OTLP path broken / watchdog long-dead).
+        # `severity: info` because it is EXPECTED to fire until the --execute
+        # rollout goes live; its RESOLUTION is itself the "rollout succeeded,
+        # watchdog is emitting" signal. Once live, a re-fire means total
+        # metric loss, distinct from the STALE (frozen-but-present) case.
+        # ----------------------------------------------------------------
+        - alert: MacfWatchdogHeartbeatAbsent
+          expr: |
+            absent(macf_watchdog_last_sweep_timestamp_seconds)
+          for: 30m
+          labels:
+            severity: info
+            component: macf-watchdog
+          annotations:
+            summary: "DR-006 VM watchdog heartbeat metric is ABSENT (gauge never seen / gone)"
+            description: |
+              `macf_watchdog_last_sweep_timestamp_seconds` has been absent for >30m. EXPECTED
+              until the watchdog `--execute` rollout is live (this alert resolving is the
+              rollout-succeeded signal). If the rollout IS live, the supervisor is silent —
+              investigate the collector + OTLP path + the agents-VM cron.
+            runbook_url: "https://github.com/groundnuty/macf-devops-toolkit/blob/main/design/DR-006-vm-cron-watchdog-agent-supervision-impl.md"
