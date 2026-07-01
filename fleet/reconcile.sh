@@ -32,6 +32,12 @@ LAST_EXIT_DIR="${MACF_LAST_EXIT_DIR:-$HOME/.macf/last-exit}"
 ALERT_DIR="${MACF_ALERT_DIR:-$HOME/.macf/alerts}"
 STATE_DIR="${MACF_WATCHDOG_STATE:-$HOME/.macf/watchdog-state}"   # cross-sweep escalation counter
 HEARTBEAT_FILE="${MACF_WATCHDOG_HEARTBEAT:-$HOME/.macf/watchdog-heartbeat}"
+# §A.4 who-watches-the-cron CONSUMER (#123): also emit the last-sweep timestamp as an
+# OTLP gauge to the central Collector, so an EXTERNAL observer (the monitoring VM's
+# Prometheus — a DIFFERENT host that survives this agents-VM cron dying) can alarm on
+# its staleness. The file-heartbeat alone is stamp-only (a cron can't detect its own
+# death). Empty endpoint disables the emit (file-heartbeat still written).
+WATCHDOG_OTLP_ENDPOINT="${MACF_WATCHDOG_OTLP_ENDPOINT:-${OTEL_EXPORTER_OTLP_ENDPOINT:-http://orzech-dev-agents-monitoring.tail491af.ts.net:4318}}"
 FLEET_JSON=""            # optional: read fleet-doctor output from a file (tests/offline)
 FLEET_DOCTOR_CMD="${MACF_FLEET_DOCTOR_CMD:-macf fleet doctor --json}"
 ROUTING_JSON=""          # optional: read routing-doctor output from a file (tests/offline)
@@ -480,6 +486,30 @@ done <<< "$DESIRED"
 echo
 mode="dry-run"; [ "$EXECUTE" -eq 1 ] && mode="EXECUTE"; restart="off"; [ "$ALLOW_RESTART" -eq 1 ] && restart="on"
 
+# emit_watchdog_metric (§A.4 / #123) — POST the last-sweep timestamp as an OTLP gauge to
+# the Collector (→ its :8889 prometheus exporter → kube-prom-stack scrape → the staleness
+# PrometheusRule on the monitoring VM). This is the EXTERNAL-observable half of the
+# who-watches-the-cron loop: the file-heartbeat is local-only (a dead cron can't alarm on
+# itself); the gauge lets a different host detect the silence. Metric
+# `macf.watchdog.last_sweep_timestamp_seconds` → `macf_watchdog_last_sweep_timestamp_seconds`
+# in Prometheus (dots→underscores via the collector's prometheus exporter). BEST-EFFORT:
+# a short timeout + always-true so a collector hiccup NEVER fails or delays the sweep.
+emit_watchdog_metric() {
+  [ -n "$WATCHDOG_OTLP_ENDPOINT" ] || return 0
+  command -v curl >/dev/null || return 0
+  local now_s now_ns host
+  now_s="$(date +%s)"; now_ns="$(date +%s%N)"; host="$(hostname 2>/dev/null || echo unknown)"
+  curl -sS --max-time 5 -o /dev/null -X POST "$WATCHDOG_OTLP_ENDPOINT/v1/metrics" \
+    -H 'Content-Type: application/json' \
+    -d '{"resourceMetrics":[{"resource":{"attributes":[
+          {"key":"service.name","value":{"stringValue":"macf-watchdog"}},
+          {"key":"host.name","value":{"stringValue":"'"$host"'"}}]},
+        "scopeMetrics":[{"scope":{"name":"macf.watchdog"},"metrics":[
+          {"name":"macf.watchdog.last_sweep_timestamp_seconds","unit":"s","gauge":{"dataPoints":[
+            {"asDouble":'"$now_s"',"timeUnixNano":"'"$now_ns"'"}]}}]}]}]}' \
+    2>/dev/null || true
+}
+
 # Self-heartbeat (§A.4) — stamp that THIS sweep ran. The watchdog's ABSENCE is what
 # the operator/auditor monitoring layer detects (who-watches-the-cron → terminates
 # at Tier-3/operator). Written on real (--execute) sweeps; dry-run stays
@@ -487,6 +517,7 @@ mode="dry-run"; [ "$EXECUTE" -eq 1 ] && mode="EXECUTE"; restart="off"; [ "$ALLOW
 if [ "$EXECUTE" -eq 1 ]; then
   { mkdir -p "$(dirname "$HEARTBEAT_FILE")" \
     && printf '%s reconcile rc=%s restart=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$restart" > "$HEARTBEAT_FILE"; } || true
+  emit_watchdog_metric   # #123: external-observable gauge for the staleness alert (best-effort)
 fi
 
 if [ "$rc" -eq 0 ]; then
