@@ -1,3 +1,9 @@
+<!--
+  This file is managed by `macf`. Do not edit directly — edits are
+  overwritten on the next `macf update`. The canonical source lives at
+  groundnuty/macf:plugin/rules/. To change a rule, file an issue or PR
+  against that file in the macf repo, then run `macf update` here.
+-->
 # Execute on Directive
 
 **After a user directive like "go", "do X", "proceed", "approve", "ship it" — execute. Do not circle back to re-ask.**
@@ -54,7 +60,7 @@ The friction mode: user says "go", agent spends a turn restating the plan and as
 
 Once the plan is agreed, the user wants the *output* of executing it, not a reminder of what the plan was.
 
-**Corollary:** after execution, lead with the result, not a recap of what you did. See `peer-dynamic.md` §"Response form" — skip restatement, skip trailing summaries.
+**Corollary:** after execution, lead with the result, not a recap of what you did. See `peer-dynamic.md` § "Response form" — skip restatement, skip trailing summaries.
 
 ---
 

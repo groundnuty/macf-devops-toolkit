@@ -1,3 +1,9 @@
+<!--
+  This file is managed by `macf`. Do not edit directly — edits are
+  overwritten on the next `macf update`. The canonical source lives at
+  groundnuty/macf:plugin/rules/. To change a rule, file an issue or PR
+  against that file in the macf repo, then run `macf update` here.
+-->
 # Mention-Routing Hygiene
 
 **GitHub `@handle[bot]` mentions fire the Agent Router workflow regardless of surrounding context. When you are writing *about* an agent — quoting its output, analyzing its behavior, describing it in documentation — code-format the handle to suppress routing. Raw handles are reserved for intentional routing targets.**
@@ -58,7 +64,9 @@ If a comment contains both describing and addressing references to the same agen
 
 For any comment or PR body that contains agent handles, grep the draft:
 
-    grep -nE '@macf-[a-z-]+-agent\[bot\]' <draft-file>
+    grep -nE '@[a-zA-Z][a-zA-Z0-9_-]*\[bot\]' <draft-file>
+
+(This pattern matches the broadened `HANDLE_PATTERN` documented in §7 — covers macf-* fleet, future CV fleet, and third-party bots like `dependabot[bot]` / `github-actions[bot]`.)
 
 For each line returned: is this line an action ask (raw stays) or a content reference (backticks wrap)?
 
@@ -103,3 +111,54 @@ Without the backtick convention, every describing use of a handle produces a fal
 The failure-mode was observed on `macf-testbed#9` and `#18` (2026-04-24): a single rules-loaded tester received three ambient routing pings across two scenario PRs, correctly disciplined each response with scope-preserving rationale, and escalated the third firing into a cross-session-commitment-tracking critique of the author. That sequence of responses was appropriate — but it was also three response turns that could have been prevented by one keystroke of backticks per handle reference in the PR bodies.
 
 The rule is cheap to apply, symmetric across the fleet, and eliminates a class of false-positive routing that otherwise compounds with every describing use of an agent handle.
+
+---
+
+## 7. Structural enforcement — `check-mention-routing.sh` PreToolUse hook
+
+Per `groundnuty/macf#244` + `#272`, this rule is enforced by a Claude Code PreToolUse hook on `Bash` tool calls. The hook intercepts `gh issue comment` / `gh pr comment` / `gh issue close --comment` / `gh pr close --comment` invocations, parses the `--body` content, and runs **two checks** that BLOCK (`exit 2` with stderr explanation):
+
+- **Check B — must-not-leak (macf#272, shipped PR #275):** raw `@<bot>[bot]` patterns in describing-context positions (mid-line, not backticked, not at line-start) would fire false-positive routing per §5. Applies to all comment-emit subcommands including `gh (issue|pr) close --comment` (leak prevention is independent of recipient semantics).
+- **Check A — must-have-mention (macf#244):** comment bodies with zero routing-active `@<bot>[bot]` mentions silently fail to reach the recipient peer agent per §Communication 2 ("a comment without @mention is invisible to the recipient agent"). Routing-active = NOT wrapped in backticks; both line-start addressing AND mid-line describing-leaks count toward the active total. Applies only to `gh (issue|pr) comment` — close subcommands are bypassed because self-close verification comments are canonically reporter-internal (no recipient).
+
+The hook is the same shape as `check-gh-token.sh` (#140 attribution-trap defense) — bash command-type hook distributed via `macf init` / `macf update` / `macf rules refresh` to every workspace's `.claude/scripts/check-mention-routing.sh` with the entry registered in `.claude/settings.json` `hooks.PreToolUse`. Substrate workspaces, tester agents, CV consumers, and future MACF-consumer projects all get the protection uniformly.
+
+Because the hook is registered as a path-invocation (`"command": "$CLAUDE_PROJECT_DIR/.claude/scripts/check-mention-routing.sh"`), Claude Code execs the script fresh on every event, so a change to the **script body** goes live on the very next event as soon as the file is synced on disk — a `macf update` that updates the script is immediately in force for consumers with no session relaunch and no relaunch-coordination needed. Only a change to the hook **registration** in `.claude/settings.json` (or to the launch environment) requires a relaunch to take effect.
+
+**Heuristic** (subject to refinement; documented for transparency):
+
+- Already wrapped in backticks (`` `@<bot>[bot]` ``) → routing-suppressed; allowed (canonical describing form §5); does NOT count toward Check A
+- At line-start (after optional whitespace, blockquote `>`, or list-item markers `* ` / `- ` / `1. `) → routing-active; allowed by Check B (canonical addressing form §3); counts toward Check A
+- Mid-line raw mention → routing-active; Check B BLOCK with stderr citing this rule + the offending line + the `MACF_SKIP_MENTION_CHECK=1` operator override
+- Zero routing-active mentions in body (Check A) → BLOCK; only fires when neither line-start addressing nor (any other) routing-active mention is present
+
+**Pattern scope (broadened per macf#276):** the hook's `HANDLE_PATTERN` matches ANY `@<handle>[bot]` shape — not just `@macf-*-agent[bot]`. Specifically:
+
+```
+HANDLE_PATTERN='@[a-zA-Z][a-zA-Z0-9_-]*[[]bot[]]'
+```
+
+Coverage:
+
+- **macf-* fleet** (`macf-code-agent`, `macf-science-agent`, `macf-tester-N-agent`, `macf-devops-agent`) — original target.
+- **Future CV fleet** (`cv-architect`, `academic-resume-author`, similar shapes) — naming convention may not follow `<prefix>-*-agent`; the broadened pattern accommodates whatever shapes consumer projects choose.
+- **Future MACF-consumer fleets** — same logic; durable across naming conventions.
+- **Third-party bots** (`dependabot`, `github-actions`) — these don't fire MACF routing (not in the agent registry, so the routing-Action workflow drops them silently), but blocking their describing-context use is consistent style. Operators can use `MACF_SKIP_MENTION_CHECK=1` for the rare legitimate describing-context use of a third-party bot handle.
+
+The first-character-must-be-letter constraint excludes `@1bot[bot]` / `@_bot[bot]` / `@-bot[bot]` / `@[bot]` (no handle body) — none of which are valid GitHub handles anyway.
+
+**Note on code blocks (clarification per macf#277):** The hook does NOT parse Markdown structure. Triple-backtick fences and 4-space-indent code blocks are both currently passed by the hook, but the *mechanism* differs:
+
+- **Triple-backtick code blocks** — pass via the *adjacent-backtick check* in the heuristic (the `` ` `` characters bracketing the block satisfy the "already wrapped in backticks" predicate at the handle's character positions).
+- **4-space-indented code blocks** — pass via the *line-start addressing allowance*, not via code-block recognition. The leading whitespace satisfies the line-start regex `^[[:space:]>]*([0-9]+\.[[:space:]]+|[-*][[:space:]]+)?` ahead of `@<bot>[bot]`, so the line is treated as addressing form (§3) and allowed. Same outcome as the triple-backtick case, different reasoning.
+
+This is a heuristic side-effect, not an explicit code-block parser. If a future refinement tightens the line-start allowance (e.g., requires the FIRST non-whitespace character on the line to be `@`), 4-space-indented examples would need explicit backtick-wrapping or the `MACF_SKIP_MENTION_CHECK=1` override on the affected `gh ... comment` invocation. GitHub's renderer parses code blocks correctly regardless — the documented routing-firing risk (§2) is unaffected by the hook's heuristic.
+
+**False-positive trade-off:** The heuristic leans toward false-positive over false-negative. Edge cases the heuristic flags:
+
+- Single-line bodies with addressing form right after `--body "` (no preceding newline) — operator should typically put addressing on its own line in multi-line bodies
+- Line-start mentions that are actually describing-with-bot-as-subject ("`@bot`'s response was clean") — these are uncommon; canonical idiom puts describing references inside prose
+
+The override (`MACF_SKIP_MENTION_CHECK=1`) handles legitimate cases. Per the `check-gh-token.sh` precedent, structural enforcement plus an escape hatch outperforms behavioral discipline alone.
+
+**Empirical motivation:** `groundnuty/macf-science-agent:research/2026-04-27-self-observed-canonical-rule-breach-pattern-analysis.md` recorded 6 self-observed routing-hygiene class breaches in 1.5 days. Codification of this rule (§1-6 above) caught ~80%; the structural hook closes the remaining 20%.

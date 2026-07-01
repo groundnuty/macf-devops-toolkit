@@ -1,3 +1,9 @@
+<!--
+  This file is managed by `macf`. Do not edit directly — edits are
+  overwritten on the next `macf update`. The canonical source lives at
+  groundnuty/macf:plugin/rules/. To change a rule, file an issue or PR
+  against that file in the macf repo, then run `macf update` here.
+-->
 # Coordination Rules (canonical, shared)
 
 **This file is the single source of truth for cross-cutting coordination rules that apply to every MACF agent.** It is copied into each agent workspace's `.claude/rules/` by `macf init` and refreshed by `macf update`. Do not edit workspace copies directly — edit this file and re-run `macf update`.
@@ -13,7 +19,7 @@ The rules here are topology-agnostic: they work whether the project uses a scien
 1. **The reporter owns the issue closure.** The agent who opened an issue is the only one who closes it. This rule has two failure modes — both costly, both silent. Check for both before posting a merge-handoff comment.
 
    **Failure mode A — closing an issue you didn't open.** Two ways this happens:
-   - *Auto-close via PR keywords.* GitHub's auto-close keywords in a PR body or commit message close the referenced issue on merge, bypassing the reporter. **Never use any of these 9 variants when the issue was filed by someone else:** `Closes #N`, `Fixes #N`, `Resolves #N`, `Close #N`, `Fix #N`, `Resolve #N`, `Closed #N`, `Fixed #N`, `Resolved #N`. Use **`Refs #N`** instead.
+   - *Auto-close via PR keywords.* GitHub's auto-close keywords in a PR body or commit message close the referenced issue on merge, bypassing the reporter. **Never use any of these 9 variants when the issue was filed by someone else:** `Closes #N`, `Fixes #N`, `Resolves #N`, `Close #N`, `Fix #N`, `Resolve #N`, `Closed #N`, `Fixed #N`, `Resolved #N`. Use **`Refs #N`** instead. The parser is negation- and context-blind (tables, checklists, quotes, and code fences do *not* shield the keyword), so this is now backstopped structurally: the `check-close-keyword.sh` PreToolUse hook (groundnuty/macf#431) intercepts `gh pr create` / `gh pr edit` whose body or title carries a close-keyword adjacent to a `#N` (or `owner/repo#N`) filed by another agent, and blocks with `exit 2`. Override with `MACF_SKIP_CLOSE_CHECK=1` for a deliberate cross-fix or your own issue.
    - *Manual close via `gh issue close`.* Don't close someone else's issue even after merging the implementation. Post the handoff comment and stop.
 
    **Failure mode B — waiting for yourself to close.** When the issue's reporter is YOU (you filed the issue during an audit, a follow-up split-off, or self-observed bug), there is no one else to close it. Don't post `@<other-agent> ready for you to close when verified` — no one is waiting to do that for you. After your PR merges, close the issue yourself with a verification comment. Silent stall otherwise: the queue fills with in-review issues that never clear.
@@ -35,6 +41,26 @@ The rules here are topology-agnostic: they work whether the project uses a scien
    If any of those appear and the referenced issue was filed by someone else, replace with `Refs #N`.
 
    **Why this rule matters:** Reporter-owns-closure gives the reporter a chance to verify the fix matches their intent before the issue disappears from their queue. In a multi-agent workflow, the reporter often has context the implementer doesn't (why it was filed at that priority, what the acceptance criteria really meant, what adjacent work it blocks). Auto-close strips that context; reflexive handoff on self-filed issues wastes it.
+
+   **Inversion warning — closure direction is independent of who implemented the fix.** A common failure mode after PR-merge handoffs: the reporter mistakes the implementer for the closer because the implementer just finished the work. Rule 1A says **reporter** owns closure, NOT **fix-author**:
+
+   *(The 4 cases below assume merge-by-implementer per `pr-discipline.md` — `implementer == merger`. Different topologies expand the table accordingly.)*
+
+   - **You filed the issue + you implemented the PR + you merged it** → **you close** (you're both reporter AND implementer).
+   - **You filed the issue + a peer implemented the PR + the peer merged it** → **you still close** (you're the reporter; the peer is implementer-but-not-reporter; their action ends at "post handoff comment + stop" per failure mode A).
+   - **A peer filed the issue + you implemented + you merged the PR** → **the peer closes** (they're the reporter; you @mention them with `ready for you to close when verified` per failure mode A).
+   - **A peer filed the issue + a peer implemented + a peer merged the PR** → **reporter closes**; you're observer.
+
+   The trap is symmetric to failure mode A. Failure mode A is "I close someone else's issue because I implemented the fix" (forgetting that fix-author ≠ reporter); the inverse is "I tell the implementer to self-close my issue because they merged the fix" (same forgetting, opposite direction). Both are the same conceptual mistake — substituting fix-authorship for issue-reportership.
+
+   **Reinforced self-check after any PR-merge that addresses an issue:**
+
+        gh issue view <N> --json author --jq '.author.login'
+
+   - Output is YOUR login → **YOU close** with verification comment (regardless of who implemented). Run `gh issue close <N> --reason completed --comment "..."`.
+   - Output is the peer's login → **THEY close**. Post `@<author> PR #M merged, ready for you to close when verified.` and STOP. Don't try to delegate the closure mechanics back to yourself.
+
+   This check is one cheap shell command; the inversion is silent (the recipient may not catch it if they're not paying attention to attribution).
 
 2. **Work through the queue without prompting.** When an issue is complete, check your assigned-label queue and pick up the next one immediately. Do NOT ask the reporter to ping you or reply "continue" before starting. Only wait when (a) your PR is in review, or (b) the queue is empty. If an issue is ambiguous, ask clarifying questions on that issue and move to the next queued one while waiting.
 
@@ -95,6 +121,37 @@ The rules here are topology-agnostic: they work whether the project uses a scien
 
 4. **Concise comments** — 1-3 sentences unless detail is needed.
 
+5. **Inbound review requests are action asks that block the requester — not status FYIs.** Issue Lifecycle rule 2 covers the implementer's OUTBOUND queue ("work through your assigned-label queue without prompting"). This rule covers the symmetric REVIEWER-side INBOUND obligation, which is just as load-bearing and far easier to strand.
+
+   **(a) Treat "PR ready: #N" / "ready for review" as a request that blocks the peer's next move.** When a peer posts a review-request comment on a thread, that is not an informational status update you can note-and-defer — it is an action ask directed at you. The LGTM/merge-gate makes this structural: per `pr-discipline.md`, a peer's PR cannot merge without a reviewer's **formal approval** (`gh pr review --approve`), so until you review, the peer is blocked. Not slowed — blocked, and silently, because nothing on their side surfaces "my reviewer never saw this." A stranded review request stalls the peer indefinitely. Pick it up, review honestly, and submit a formal approve / request-changes (not a plain comment — see `pr-discipline.md §"How to submit LGTM"`; only the formal state-change fires the reviewer-notification routing).
+
+   **(b) Run an INBOUND review-sweep before declaring idle — especially after surfacing from a long single-threaded task.** Before you say "caught up" / "nothing pending" / "your call" / go idle, sweep your repos for review requests addressed to you. This matters most right after you surface from a deep, single-threaded arc (a long workflow, a multi-step investigation): while you were heads-down on one thread, a review request can have arrived on another and been easy to miss.
+
+        # Peer-authored PRs awaiting YOUR review (review not yet given):
+        for r in <your-repos>; do
+          gh pr list --repo "$r" --state open \
+            --json number,author,reviewDecision,title \
+            --jq '.[] | select(.reviewDecision == "REVIEW_REQUIRED" or .reviewDecision == null)
+                       | select(.author.login != "<your-login>")'
+        done
+        # Plus: open threads where you were @mentioned and haven't replied.
+
+   (The query intentionally surfaces *any* peer-authored PR lacking a review, not only those that formally requested you by name — on a small fleet that breadth is a feature: it catches a peer blocked on review even when the request didn't route to you. Narrow it with a requested-reviewer filter on a larger fleet.)
+
+   **Why the sweep is necessary — and why it's mechanism-agnostic.** Routing delivers each notification as a **discrete event at the moment it occurs** — a push to your channel-server, an A2A message — not as a standing inbox you can re-open and re-read later. Once that event has been delivered (or has arrived while you were mid-turn on a different thread), it is not re-presented to you on its own. So a review-request ping that landed while you were deep in another task is gone from the live stream and only recoverable by querying GitHub state directly. This is the **general silent-fallback shape** (see `silent-fallback-hazards.md`): the routing layer reports the ping delivered, but "delivered" does not guarantee "processed by the recipient," and nothing surfaces the gap until the blocked peer escalates. The sweep is the result-invariant check at the reviewer boundary — assert against GitHub state ("are there peer PRs awaiting my review?") rather than trusting that you'd remember every ping that flowed past.
+
+   **Verified motivation:** three operator-surfaced stalls where a peer's review request sat idle (42 min in one case; ~2.5 h in another) because the reviewer went idle without sweeping — the ping had arrived during a long single-threaded task and was never picked back up. In each case the peer's PR was blocked the entire time on a formal approval that never came.
+
+   **(c) Sweep your GATES against GitHub state — don't wait for a ping that may never come.** §5(a)/(b) cover the REVIEWER's inbound obligation (review requests addressed to you). The symmetric gap they don't cover: when YOUR next action is gated on a review/approval landing on **someone else's PR** — you are the *gate-owner*, not the PR author and not the requested reviewer — `route-by-pr-review-state` notifies only the **PR author**, NOT you. A review that clears your gate fires **no signal to you**, and your gate silently reads "pending" (this is `silent-fallback-hazards.md` Instance 13: reviewer ≠ next-actor, which is the *common* case once a fleet collaborates freely). Before recording a gate as satisfied OR as still-blocked, assert its artifact directly:
+
+        # Does the approval my next step is gated on actually exist?
+        gh pr view <N> --repo <owner>/<repo> --json reviews \
+          --jq '[.reviews[] | select(.author.login=="<gate-reviewer>" and .state=="APPROVED")] | length'
+
+   This is the result-invariant (Pattern A) at the **gate boundary** — clear the gate from GitHub state, never from "did I get pinged." It generalizes §5(b)'s reviewer-sweep from the *requested-reviewer* side to the *gate-owner* side. **The load-bearing fix, though, is structural — not this sweep:** a coordination *guarantee* must anchor to a deterministic harness mechanism, so `route-by-pr-review-state` is being extended to notify everyone with deliberate review-engagement on the PR — formal reviewers + requested reviewers + @mentioned parties, not the author alone (`groundnuty/macf-actions#57`). This gate-sweep is the **behavioral backstop** until that lands — the same Path-2 logic as the `check-*.sh` hooks: a recurring discipline gets promoted to a harness mechanism, with the rule kept as a safety-net, not enshrined as the guarantee. A reviewer **SHOULD** also @mention a known gate-owner in the review body (`route-by-mention` carries it) as a courtesy — but that depends on the reviewer remembering, so don't rely on it either.
+
+   **Verified motivation:** `groundnuty/macf` PR #574 (2026-06-26) — code-agent's approval was the framework-feasibility gate devops's impl work depended on; `route-by-pr-review-state` notified the PR author (science) only, devops received no signal, and its gate read "code's review still pending" though the APPROVED review existed. Resolved only by a manual relay + an operator-prompted direct channel push. A one-line gate-sweep would have cleared it immediately.
+
 ---
 
 ## When You're Stuck — Escalation
@@ -140,22 +197,16 @@ The goal is correctness through dialogue, not compliance.
 
 ---
 
-## Submitting a Prompt to a Claude Code TUI (tmux)
+## Canonical tmux launch pattern
 
-When a hook or script needs to programmatically submit a prompt to a Claude Code TUI running in tmux, **always use the canonical helper**:
+**One session per agent, named `<project>@<agent>`.** Post-v0.2.10, `claude.sh` self-wraps in tmux with this naming structurally — bare `./claude.sh` produces the canonical session. Pre-v0.2.10 consumers (and operators wanting manual launch) use the explicit form:
 
-        .claude/scripts/tmux-send-to-claude.sh <session-or-empty> "<prompt text>"
+        # Post-v0.2.10 (canonical, structural — recommended for new consumers):
+        cd /path/to/academic-resume && ./claude.sh
+        #   Self-wraps in tmux session "academic-resume@cv-architect" automatically.
+        #   Re-attaches if the session exists; creates new if not.
 
-Pass `""` for the session to target the current pane.
-
-**Never** call `tmux send-keys "<prompt>" Enter` inline. Claude Code's TUI is in multi-line input mode by default, so a single Enter inserts a newline instead of submitting — the prompt sits in the buffer unsubmitted. The helper handles the submit-quirk correctly: clear existing input with `C-u`, send the text with a first Enter, sleep 1 second (load-bearing — without it tmux batches both Enters and Claude processes them atomically as "newline + newline"), then send a second Enter that actually submits.
-
-The helper is distributed to every agent workspace by `macf init` and refreshed by `macf update` (same mechanism as this rules file). If you're writing a new hook or automation that needs to prompt Claude, use the helper — do not re-implement the pattern.
-
-### Canonical tmux launch pattern
-
-**One session per agent, named `<project>@<agent>`.** For example:
-
+        # Pre-v0.2.10 (manual wrap, still works post-v0.2.10 with MACF_NO_TMUX_WRAP=1):
         tmux new-session -d -s "academic-resume@cv-architect" \
           "cd /path/to/academic-resume && ./claude.sh"
 
@@ -166,11 +217,15 @@ The helper is distributed to every agent workspace by `macf init` and refreshed 
 
 **One session per agent** gives each server process a deterministic `$TMUX_PANE` + one-window-per-session context where `display-message` can't be ambiguous.
 
-**Session-name convention `<project>@<agent>`** is parseable (both human + script-friendly) and collision-free across projects — two `cv-architect` agents on the same VM (one for `academic-resume`, one for `macf-paper`) stay on separate sessions.
+**Session-name convention `<project>@<routing-label>`** is parseable (both human + script-friendly) and collision-free across projects — two `cv-architect` agents on the same VM (one for `academic-resume`, one for `macf-paper`) stay on separate sessions. **The session keys on the agent's `routing_label` (`MACF_ROUTING_LABEL`), not its OTEL display name (`MACF_AGENT_NAME`).** Why: the DR-031 watchdog + reconcile/resume, the registry key, and the mTLS cert CN all key on `routing_label`; `agent_name` is the OTEL `gen_ai.agent.name` display value only. For an agent where the two differ (science: `agent_name=macf-science-agent`, `routing_label=science-agent`) a session keyed on the display name (`macf@macf-science-agent`) would be invisible to the watchdog targeting `macf@science-agent` (macf#678). Where `agent_name == routing_label` (code/devops/auditor) they coincide, so this is a no-op.
 
 **Bonus**: separate sessions mean multiple terminals can attach to different agents independently — `tmux attach -t academic-resume@cv-architect` on one terminal, `...@cv-project-archaeologist` on another, without windows-switching interference.
 
 **Migration** from a single-session multi-window setup: `tmux rename-session -t <old-name> <new-name>` per agent.
+
+**Path-2 promotion (macf#313, v0.2.10):** the canonical session-naming rule is now structurally enforced by `claude.sh` itself. Consumer workspaces converging on v0.2.10+ via `macf update --plugin` get the self-wrap automatically; substrate launchers (operator-authored, NOT generated by `claude-sh.ts` template) are unaffected. For mixed-version fleets, pre-v0.2.10 consumers continue to need the explicit `tmux new-session` wrap until they update.
+
+**Opt-out (post-v0.2.10):** `MACF_NO_TMUX_WRAP=1 ./claude.sh` skips the self-wrap. For operator-driven manual launches outside tmux, debug sessions, single-shot CLI use, CI environments. Sister convention to `MACF_OTEL_DISABLED=1`, `MACF_SKIP_TOKEN_CHECK=1`, `MACF_SKIP_MENTION_CHECK=1`.
 
 ---
 
@@ -214,6 +269,23 @@ The helper is distributed to every agent workspace by `macf init` and refreshed 
 6. **Never commit** `.github-app-key.pem`, tokens, or secrets. `.gitignore` should exclude them, but also verify untracked files before staging.
 
 7. **Structural enforcement: the PreToolUse hook.** Every workspace ships with `.claude/scripts/check-gh-token.sh`, wired into `.claude/settings.json` as a PreToolUse hook on `Bash`. It intercepts every `gh` and `git push` invocation (including wrapped forms like `sudo gh ...`, `GH_TOKEN=x gh ...`, `env FOO=bar gh ...`) and blocks with `exit 2` if `GH_TOKEN` is missing or doesn't have the `ghs_` prefix. This moves enforcement from operator discipline (rules 1-3 above) to the harness itself — without it, the attribution trap recurred 5 times in a single day (see #140). If you ever need to run a knowingly user-attributed op (e.g., `gh auth login` during onboarding), set `MACF_SKIP_TOKEN_CHECK=1` for that one call. The hook is installed by `macf init`, refreshed by `macf update` and `macf rules refresh`.
+
+---
+
+## Sandbox Configuration (Bash dev-loop unblocking)
+
+Claude Code 2.1.92+ has a seccomp regression on Linux ([anthropic/claude-code#43454](https://github.com/anthropics/claude-code/issues/43454)) that breaks Bash tool calls inside the sandbox during the spawned shell's own startup — zsh tries to read `/proc/self/fd/3` before any user-code runs and the regression denies that read. Even with `sandbox.filesystem.allowRead: ["/proc/self/fd"]` in place (per macf#208), the regression still bites because it hits before the allow-rule applies.
+
+**Workaround**: add common dev-loop commands to `sandbox.excludedCommands` so they run unsandboxed. The sandbox still gates anything not on the list; only the listed prefixes opt out. `macf init` / `macf update` / `macf rules refresh` install a canonical set per macf#211 — operator-authored entries are preserved on refresh.
+
+**Canonical set** (kept in lockstep with `SANDBOX_EXCLUDED_COMMANDS` in `packages/macf/src/cli/settings-writer.ts`):
+
+- **Build-loop / deployment**: `ssh:*`, `scp:*`, `rsync:*`, `devbox:*`, `nix:*`, `git:*`, `gpg:*`, `gpg-agent:*`, `gh:*`, `npx:*`, `npm:*`, `node:*`, `make:*`, `tmux:*`, `jq:*`, `openssl:*`
+- **Search/read**: `grep:*`, `rg:*`, `find:*`, `head:*`, `tail:*`, `cat:*`, `ls:*`, `wc:*`, `sort:*`, `awk:*`, `sed:*`, `diff:*`, `which:*`
+- **Shell wrappers**: `bash:*`, `sh:*`, `xargs:*` (subprocess shells fail at zsh-init under the regression even when the inner command is a no-op)
+- **Low-blast-radius fs mutations**: `mkdir:*`, `cp:*`, `touch:*`. **Destructive ops (`rm:*`, `mv:*`) are intentionally NOT in the list** — keeping them sandboxed limits accidental damage paths even though the sandbox is defense-in-depth here.
+
+**Opt-out**: `MACF_SANDBOX_EXCLUDED_COMMANDS_SKIP=1` skips the canonical install. Aligned with `MACF_SANDBOX_FD_FIX_SKIP` / `MACF_OTEL_DISABLED` opt-out family. If you want a tighter list (e.g., drop the fs-mutation entries), set the skip flag and curate manually — refresh won't re-add canonical entries you removed.
 
 ---
 
