@@ -149,10 +149,18 @@ The canonical CLI + operator are code-agent's (the framework); a **`macf` DR** m
 
 ## Open questions (for review)
 
-1. **Fleet enumeration on a host** — how does the orchestrator *list* the fleets present (name → registry-repo → agents)? Candidates: (a) a host-level `~/.macf/fleets.yaml` mapping name→registry(+manifest); (b) derive from `macf ps` grouping by workspace/registry; (c) each fleet's own `desired-agents.yaml` + registry config. Lean (a) — explicit, and the desired-agents manifest already exists per fleet.
+1. **Fleet enumeration on a host** — how does the orchestrator *list* the fleets present (name → registry-repo → agents)? **Resolved (science review):** DERIVE it — scan the host's workspaces, group by the registry each `macf-agent` config points at. A host-level hand-maintained `~/.macf/fleets.yaml` was rejected: it's a *new, 4th source of truth* that drifts when a fleet is added/removed (`check-before-propose.md §4` — don't build a parallel config when the state has a home). The host already knows its fleets (each workspace names its registry); an optional explicit override is an escape-hatch only. Deriving-from-existing beats a registry-of-registries.
 2. **Version-target source per fleet** — npm-latest at run time, or an explicit pin per fleet (`--target <ver>` / a per-fleet config)? Lean explicit-pin-with-`--target`-override (deterministic > "whatever's latest today").
 3. **Multi-select ordering / parallelism** — fleet-by-fleet serial (safe, proposed) vs bounded parallel across fleets. Serial for v1.
-4. **Version comparison** — semver-compare `/health.version` vs target (handle pre-release/build metadata).
+4. **Version comparison** — semver-compare `/health.version` vs target. **Resolved (science review):** reuse the bash semver-compare code-agent shipped for `macf-bootstrap`'s `compatibility.macf` (`macf#660`) — arithmetic per-component with pre-release handling — not a fresh impl.
+
+---
+
+## Review refinements (science, 2026-07-01)
+
+- **Composition with DR-036 (guest-safety, free from registry-keyed selection):** because a "fleet" == its registry and a *guest* lives in a *different* registry, fleet-upgrade selects registry **members** and therefore **never touches guests** — a consumer doesn't supervise OR upgrade a guest (the same visibility-vs-supervision invariant). Worth stating: the registry-keyed selection gives this correctness for free.
+- **A `macf` DR should carry the framework contract; DR-007 is the trigger.** The split mirrors DR-030 (macf: fleet-health *commands*) / DR-031 (macf primitives + devops watchdog cron). The **decision/driver *interface* is itself a framework architecture decision (a macf primitive)** — so `/health.version`, the `macf fleet upgrade` runtime-agnostic decision-layer + the *driver interface*, and (far-future) the macf operator belong in a **`macf` DR** authored by code/science, with DR-007 as the trigger + design source. DR-007 (devops) stays the orchestration design + the VM reference impl + the delegation trigger. (The macf operator remains its own future code/science DR — scoped out here.)
+- **§8 unattended nuance:** DR-033 auto-answers only *ceremony* prompts (channels/resume). A *permission/trust* prompt during a relaunch still **blocks-and-reports** (`#132`, report-not-answer). So unattended fleet-upgrade needs the relaunch to be **ceremony-only**; if a release ever introduces a new trust/permission prompt at launch, unattended stalls-and-reports by design (correct, not a regression).
 
 ---
 
