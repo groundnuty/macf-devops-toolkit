@@ -105,8 +105,36 @@ The router runs in 4 repos; a repo-scoped runner serves ONE repo. One VM hosts a
 register one ephemeral runner per repo (`macf-runner@<repo-slug>` systemd instances).
 Start with one repo for the spike; fan out after the A/B confirms the win.
 
+## Operational interface (`runner/Makefile`) — the registry + the mechanism
+
+Two layers, config-driven off `runners.yaml` (the documented registry) so adding a runner is
+one entry — no per-repo target to hand-maintain (same anti-drift as the trusted-actors list):
+
+- **`make runners`** — document the registry (fleets → runners → status).
+- **`make verify-all`** / **`verify-fleet FLEET=macf`** — Pattern-A health-check across the registry /
+  a fleet (asserts user + send-helper + sudoers + *configured-for-the-right-repo* + listener —
+  not "setup exited 0"; `sudo` for the sudoers/`.runner` legs).
+- **`make verify REPO=…`** / **`setup-user`** / **`install REPO=… TOKEN=…`** / **`up`** — the generic
+  per-runner mechanism. Via devbox: `devbox run -- make -C runner <target>`.
+
+## Two corrections (learned during the first live registration, 2026-07-01)
+
+1. **Install the unit before enabling it** — `install-runner.sh` configures the runner but does
+   NOT place the systemd unit. Before `systemctl enable`:
+   `sudo cp macf-runner@.service /etc/systemd/system/ && sudo systemctl daemon-reload`.
+2. **Ephemeral + unattended systemd needs a token-mint command** — an `--ephemeral` runner
+   de-registers after one job, so the respawn must re-register with a *fresh* token each time;
+   minting registration tokens needs `administration:write` (the **bot is 403** — only the operator
+   mints). So for the **spike / A/B**, use a **non-ephemeral** runner (`install-runner.sh` *without*
+   `--ephemeral` — register once, serves many jobs); the durable ephemeral+systemd form waits on
+   an operator-provided token-mint helper. The **isolation proof** needs neither — just `make up`
+   (`./run.sh`) → "Listening for Jobs".
+
 ## Files
 
+- `runners.yaml` — the documented runner REGISTRY (fleets → runners); the Makefile aggregates it.
+- `Makefile` — the operational interface (registry/aggregate + generic per-runner; above).
+- `verify-runner.sh` — the Pattern-A health check (per repo).
 - `setup-macf-runner-user.sh` — create the low-priv user + the narrow send-helper sudoers rule.
 - `install-runner.sh` — download the pinned `actions/runner`, `config.sh` ephemeral + repo-scoped.
 - `run-ephemeral-loop.sh` — re-register + run-one-job loop (the ephemeral respawn).
