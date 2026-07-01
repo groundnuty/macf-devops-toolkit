@@ -1,64 +1,60 @@
 # runner/Makefile — operate + document the self-hosted runners we manage (devops-toolkit#90).
 #
-# TWO LAYERS (per the operator's design):
-#   - REGISTRY / aggregate — reads runners.yaml (the documented inventory) and drives the
-#     generic layer across a fleet / all. Self-documenting: `make runners` prints what we run.
-#   - GENERIC per-runner — operate ONE runner (REPO=owner/repo). The mechanism.
-# Data (runners.yaml) is the registry; this Makefile is the mechanism. Add a runner in
-# runners.yaml and every aggregate target picks it up — no per-repo target to hand-maintain.
+# SINGLE SOURCE OF TRUTH = runners.yaml. This Makefile GENERATES a target per entry:
+#   make runner-<name>   — reconcile ONE runner (verify → prompt-install-if-unhealthy → verify)
+#   make fleet-<name>    — reconcile every runner in that fleet (depends on its runner-* targets)
+# via $(foreach)+$(eval) reading runners.yaml — NOTHING hardcoded. Add a runner = one YAML
+# entry → its target appears (+ tab-completes, on any make-completion that reads the make
+# DATABASE: bash-completion's default, or zsh with
+# `zstyle ':completion:*:make:*:targets' call-command true` — config, not a custom script).
 #
-# Needs yq (mikefarah v4) + jq. devbox provides them: `devbox run -- make -C runner <target>`
-# (or from environments/macf). The sudo targets prompt for the operator's password.
-# Extraction goes yq→json→jq: yq converts the yaml, jq does the shaping (portable
-# string-interpolation, vs mikefarah-yq's differing string syntax).
+# Needs yq (mikefarah v4) + jq (devbox provides both): `devbox run -- make -C runner <target>`.
+# Extraction goes yq→json→jq (portable string-shaping vs mikefarah-yq's differing syntax).
 YQ  ?= yq
 JQ  ?= jq
 REG := runners.yaml
-J   = $(YQ) -o=json $(REG) | $(JQ) -r
+J   := $(YQ) -o=json $(REG) | $(JQ) -r
+RUNNERS := $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].runners[].name' 2>/dev/null)
+FLEETS  := $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].name' 2>/dev/null)
 .DEFAULT_GOAL := help
 
 .PHONY: help
-help:  ## Show targets
-	@awk 'BEGIN{FS=":.*## "} /^##@ /{printf "\n\033[1m%s\033[0m\n",substr($$0,5)} /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+help:  ## Show targets (+ the generated runner-*/fleet-* below)
+	@awk 'BEGIN{FS=":.*## "} /^##@ /{printf "\n\033[1m%s\033[0m\n",substr($$0,5)} /^[a-zA-Z_-]+:.*## /{printf "  \033[36m%-14s\033[0m %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@printf "\n\033[1mGenerated from runners.yaml\033[0m\n"
+	@for r in $(RUNNERS); do printf "  \033[36mrunner-%-18s\033[0m reconcile that runner\n" "$$r"; done
+	@for f in $(FLEETS);  do printf "  \033[36mfleet-%-19s\033[0m reconcile that fleet\n" "$$f"; done
 
-##@ Registry / aggregate (reads runners.yaml — the documented inventory)
+##@ Registry (reads runners.yaml)
 
 .PHONY: runners
-runners:  ## Document the registry — all fleets → runners → status
-	@$(J) '.fleets[] | "fleet: \(.name)  (registry \(.registry))", (.runners[] | "  - \(.repo)  [\(.visibility)] \(.status)  — \(.note)")'
+runners:  ## Document the registry — fleets → runners → status
+	@$(J) '.fleets[] | "fleet: \(.name)  (registry \(.registry), var_source \(.var_source))", (.runners[] | "  - \(.name)  \(.repo)  [\(.visibility)] \(.status)  — \(.note)")'
 
 .PHONY: verify-all
-verify-all:  ## Health-check EVERY runner in the registry
-	@$(J) '.fleets[].runners[].repo' | while read -r r; do \
-	  echo "== $$r =="; ./verify-runner.sh --repo "$$r" || true; echo; done
+verify-all:  ## Health-check EVERY runner (read-only; no install prompts)
+	@$(J) '.fleets[].runners[].name' | while read -r n; do echo "== $$n =="; ./reconcile-runner.sh --name "$$n" --verify-only || true; echo; done
 
-.PHONY: verify-fleet
-verify-fleet:  ## Health-check a fleet's runners (FLEET=macf)
-	@[ -n "$(FLEET)" ] || { echo "set FLEET=<name> (see: make runners)"; exit 2; }
-	@$(J) '.fleets[] | select(.name=="$(FLEET)") | .runners[].repo' | while read -r r; do \
-	  echo "== $$r =="; ./verify-runner.sh --repo "$$r" || true; echo; done
+##@ Generated per-runner / per-fleet targets (from runners.yaml — see `make help`)
 
-##@ Generic per-runner (REPO=owner/repo — the mechanism)
+# runner-<name>: reconcile ONE runner (verify → prompt-install → verify).
+$(foreach r,$(RUNNERS),$(eval runner-$(r): ; @./reconcile-runner.sh --name $(r)))
 
-.PHONY: verify
-verify:  ## Health-check ONE runner (REPO=groundnuty/macf-science-agent)
-	@[ -n "$(REPO)" ] || { echo "set REPO=owner/repo"; exit 2; }
-	@./verify-runner.sh --repo "$(REPO)"
+# fleet-<name>: reconcile every runner in the fleet — depend on its runner-* targets
+# (make-idiomatic; no shell-loop escaping). Deps computed per-fleet from the yaml.
+define _fleet_rule
+fleet-$(1): $(addprefix runner-,$(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[]|select(.name=="$(1)").runners[].name' 2>/dev/null))
+	@echo "fleet $(1): all runners reconciled."
+endef
+$(foreach f,$(FLEETS),$(eval $(call _fleet_rule,$(f))))
+
+##@ Generic mechanism (rarely called directly — the generated targets use these)
 
 .PHONY: setup-user
 setup-user:  ## Create the low-priv macf-runner user + send-helper sudoers rule (once per VM; sudo)
 	sudo bash ./setup-macf-runner-user.sh
 
-.PHONY: install
-install:  ## Register ONE ephemeral runner (REPO=owner/repo TOKEN=<reg-token>; runs as macf-runner)
-	@[ -n "$(REPO)" ] && [ -n "$(TOKEN)" ] || { echo "set REPO=owner/repo TOKEN=<operator-minted reg token>"; exit 2; }
-	sudo -u macf-runner bash ./install-runner.sh --repo "$(REPO)" --token "$(TOKEN)"
-
-.PHONY: up
-up:  ## Run the listener in the foreground (the isolation proof / measurement window; sudo)
-	sudo -u macf-runner bash -c 'cd /opt/macf-runner/actions-runner && ./run.sh'
-
-# NOTE (multi-repo refinement): install-runner.sh currently uses ONE runner dir
-# (/opt/macf-runner/actions-runner). Serving MULTIPLE repos from one VM needs a per-repo
-# dir (e.g. actions-runner-<slug>) + a per-repo systemd instance. The registry (runners.yaml)
-# + verify already support N; the install/up paths get per-repo dirs when we add the 2nd runner.
+.PHONY: copy-vars
+copy-vars:  ## Copy a fleet's shared vars from its var_source to a repo (REPO=owner/repo FLEET=macf)
+	@[ -n "$(REPO)" ] && [ -n "$(FLEET)" ] || { echo "set REPO=owner/repo FLEET=<name>"; exit 2; }
+	@./copy-vars.sh --to "$(REPO)" --fleet "$(FLEET)"

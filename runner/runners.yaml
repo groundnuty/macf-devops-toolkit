@@ -1,30 +1,33 @@
 # runner/runners.yaml — the REGISTRY of self-hosted runners we operate, by fleet.
 #
-# The documented inventory + the source the runner Makefile aggregates. Add a runner =
-# ONE entry here; every aggregate target (verify/status across a fleet or all) picks it
-# up automatically — config-driven, so there's NO per-repo Makefile-target drift (the
-# same lesson as MACF_TRUSTED_ACTORS + the DR-007 fleet-enumeration: don't hand-maintain
-# per-repo lists — derive from one source).
+# THE single source of truth. The Makefile GENERATES a `runner-<name>` target per entry
+# here (via $(eval) — no hardcoding) + a `fleet-<name>` target per fleet; shell tab-
+# completion that reads the make database (bash-completion's default; zsh with
+# `zstyle ':completion:*:make:*:targets' call-command true`) then lists them for free —
+# no custom completion script. The reconcile / verify / var-copy scripts also read this
+# file. So: add a runner = ONE entry here → its target, its tab-completion, and its
+# var-copy all appear automatically. Nothing hardcoded (same anti-drift as
+# MACF_TRUSTED_ACTORS + the DR-007 fleet-enumeration).
 #
 # A "fleet" == its registry repo (DR-007). Runners are per-repo (user account => no org
-# scope). One VM hosts all of them.
+# scope). One VM hosts all of them. Per fleet:
+#   var_source  — the repo whose shared vars a new runner-repo COPIES. Set the actors
+#                 allowlist ONCE there; every runner-repo copies from + is verified
+#                 against it (kills the "set MACF_TRUSTED_ACTORS in N repos" drift).
+#   shared_vars — the GitHub Actions variables copied from var_source to each runner-repo.
 fleets:
   - name: macf
     registry: groundnuty/groundnuty
+    var_source: groundnuty/macf-devops-toolkit
+    shared_vars: [MACF_TRUSTED_ACTORS]
     runners:
-      - repo: groundnuty/macf-science-agent
+      - name: macf-science-agent
+        repo: groundnuty/macf-science-agent
         visibility: private
         status: proven          # isolation-proven 2026-07-01 ("Connected → Listening for Jobs")
-        note: safe first spike; no origin-routing dependency (private = no anonymous fork surface)
-      # - repo: groundnuty/macf
+        note: safe first spike; private = no anonymous fork surface
+      # - name: macf
+      #   repo: groundnuty/macf
       #   visibility: public
-      #   status: blocked
-      #   note: needs macf-actions#59 origin-routing to land BEFORE registering (public repo)
-      # - repo: groundnuty/macf-actions
-      #   visibility: public
-      #   status: blocked
-      #   note: same — origin-routing first
-      # - repo: groundnuty/macf-devops-toolkit
-      #   visibility: public
-      #   status: blocked
-      #   note: same — origin-routing first
+      #   status: blocked        # needs macf-actions#59 origin-routing BEFORE registering
+      #   note: public repo — origin-routing first

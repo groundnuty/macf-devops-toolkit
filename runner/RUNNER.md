@@ -105,17 +105,26 @@ The router runs in 4 repos; a repo-scoped runner serves ONE repo. One VM hosts a
 register one ephemeral runner per repo (`macf-runner@<repo-slug>` systemd instances).
 Start with one repo for the spike; fan out after the A/B confirms the win.
 
-## Operational interface (`runner/Makefile`) — the registry + the mechanism
+## Operational interface (`runner/Makefile`) — single source, generated targets
 
-Two layers, config-driven off `runners.yaml` (the documented registry) so adding a runner is
-one entry — no per-repo target to hand-maintain (same anti-drift as the trusted-actors list):
+`runners.yaml` is the single source. The Makefile **generates** a target per entry via
+`$(foreach)+$(eval)` — nothing hardcoded, so adding a runner is **one YAML line**:
 
-- **`make runners`** — document the registry (fleets → runners → status).
-- **`make verify-all`** / **`verify-fleet FLEET=macf`** — Pattern-A health-check across the registry /
-  a fleet (asserts user + send-helper + sudoers + *configured-for-the-right-repo* + listener —
-  not "setup exited 0"; `sudo` for the sudoers/`.runner` legs).
-- **`make verify REPO=…`** / **`setup-user`** / **`install REPO=… TOKEN=…`** / **`up`** — the generic
-  per-runner mechanism. Via devbox: `devbox run -- make -C runner <target>`.
+- **`make runner-<name>`** — reconcile ONE runner: **verify → (if unhealthy) prompt to copy-vars +
+  install + register → verify again** (idempotent, self-proving). Generated from the YAML.
+- **`make fleet-<name>`** — reconcile every runner in that fleet (depends on its `runner-*` targets).
+- **`make verify-all`** — read-only health-check across the registry (no install prompts).
+- **`make runners`** — document the registry; **`make copy-vars REPO=… FLEET=…`** — sync shared vars;
+  **`make setup-user`** — the low-priv user (once per VM).
+
+**Tab-completion, no custom script:** the generated targets land in the make **database**, so any
+completion that reads it lists `make runner-<TAB>` / `fleet-<TAB>` — bash-completion's default, or
+zsh with the one-liner `zstyle ':completion:*:make:*:targets' call-command true` (config, not a
+script). Add a runner to the YAML → its target *and* its completion appear automatically.
+
+**Var-drift killer:** each fleet has a `var_source` repo; `copy-vars.sh` copies `shared_vars`
+(e.g. `MACF_TRUSTED_ACTORS`) from it to each runner-repo, and `--check` verifies every repo still
+matches — so the actors allowlist is set ONCE, not per-repo. (Via devbox: `devbox run -- make -C runner <t>`.)
 
 ## Two corrections (learned during the first live registration, 2026-07-01)
 
@@ -132,11 +141,13 @@ one entry — no per-repo target to hand-maintain (same anti-drift as the truste
 
 ## Files
 
-- `runners.yaml` — the documented runner REGISTRY (fleets → runners); the Makefile aggregates it.
-- `Makefile` — the operational interface (registry/aggregate + generic per-runner; above).
+- `runners.yaml` — the single-source runner REGISTRY (fleets → runners; `var_source`, `shared_vars`).
+- `Makefile` — generates `runner-<name>`/`fleet-<name>` from the YAML (+ `runners`/`verify-all`/`copy-vars`).
+- `reconcile-runner.sh` — the per-runner reconcile (verify → prompt-install → verify); behind `runner-<name>`.
+- `copy-vars.sh` — copy/`--check` a fleet's shared vars from its `var_source` (the var-drift killer).
 - `verify-runner.sh` — the Pattern-A health check (per repo).
 - `setup-macf-runner-user.sh` — create the low-priv user + the narrow send-helper sudoers rule.
-- `install-runner.sh` — download the pinned `actions/runner`, `config.sh` ephemeral + repo-scoped.
+- `install-runner.sh` — download the pinned `actions/runner`, `config.sh` repo-scoped.
 - `run-ephemeral-loop.sh` — re-register + run-one-job loop (the ephemeral respawn).
 - `macf-runner@.service` — systemd template unit (one instance per repo).
 
