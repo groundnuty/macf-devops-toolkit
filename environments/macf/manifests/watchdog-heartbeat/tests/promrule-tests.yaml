@@ -1,0 +1,77 @@
+# promtool unit tests for the watchdog-heartbeat alert rules (../promrule.yaml).
+# Run: promtool test rules promrule-tests.yaml  (from this dir), or `make test-alerts`.
+#
+# Proves the rule EXPRESSIONS fire correctly against synthetic series — with NO cluster
+# context (science's #137 review: an unverified watchdog-watcher is itself a silent-fallback,
+# because `time() - metric > X` evaluates to no-data, NOT true, when the series is absent —
+# so a bare staleness rule would silently miss a watchdog that never started). The live
+# routing (firing alert → Alertmanager → a human) is a separate one-time monitoring-VM check.
+#
+# NOT a k8s manifest — lives in tests/ (a subdir argocd's non-recursing directory app ignores).
+#
+# rule_files points at `rules.generated.yaml` — the raw `groups:` extracted from the
+# PrometheusRule CR's `.spec` by run.sh (promtool can't parse the k8s CR wrapper directly).
+# Testing rules extracted FROM the CR means we test the ACTUAL shipped rules, no drift.
+rule_files:
+  - rules.generated.yaml
+evaluation_interval: 1m
+tests:
+  # A frozen heartbeat (cron died, gauge stops updating) → STALE fires; ABSENT does not.
+  - interval: 1m
+    input_series:
+      - series: 'macf_watchdog_last_sweep_timestamp_seconds{service_name="macf-watchdog"}'
+        values: '600x45'          # frozen at t=600 for 45m while wall-clock advances
+    alert_rule_test:
+      - eval_time: 42m            # time()-600 = 1920 > 1500, held since 35m (>5m for:)
+        alertname: MacfWatchdogHeartbeatStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              component: macf-watchdog
+            exp_annotations:
+              summary: "DR-006 VM watchdog heartbeat is STALE (no --execute sweep in >25m)"
+              description: |
+                The fleet watchdog (fleet/reconcile.sh on the agents VM) has not stamped its
+                last-sweep gauge in over 25 minutes (>2.5 missed sweeps at the 10-min cadence).
+                The cron may be dead, the agents VM down, or the OTLP path broken — and a silent
+                watchdog means the fleet is UNSUPERVISED (deaf/stalled/blocked agents won't be
+                healed/nudged/reported). Investigate the agents-VM cron + reconcile.sh logs.
+              runbook_url: "https://github.com/groundnuty/macf-devops-toolkit/blob/main/design/DR-006-vm-cron-watchdog-agent-supervision-impl.md"
+      - eval_time: 42m
+        alertname: MacfWatchdogHeartbeatAbsent
+        exp_alerts: []            # metric present → absent() does not fire
+  # A fresh heartbeat (tracks wall-clock, sweeps normally) → NEITHER fires.
+  - interval: 1m
+    input_series:
+      - series: 'macf_watchdog_last_sweep_timestamp_seconds{service_name="macf-watchdog"}'
+        values: '0+60x45'         # value == wall-clock → time()-metric ≈ 0
+    alert_rule_test:
+      - eval_time: 42m
+        alertname: MacfWatchdogHeartbeatStale
+        exp_alerts: []
+      - eval_time: 42m
+        alertname: MacfWatchdogHeartbeatAbsent
+        exp_alerts: []
+  # No heartbeat series at all (never started / aged out) → ABSENT fires; STALE is no-data.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="placeholder"}'   # a series to establish the timeline; watchdog metric ABSENT
+        values: '1x45'
+    alert_rule_test:
+      - eval_time: 35m            # absent() true from t=0, held >30m (for:)
+        alertname: MacfWatchdogHeartbeatAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              component: macf-watchdog
+            exp_annotations:
+              summary: "DR-006 VM watchdog heartbeat metric is ABSENT (gauge never seen / gone)"
+              description: |
+                `macf_watchdog_last_sweep_timestamp_seconds` has been absent for >30m. EXPECTED
+                until the watchdog `--execute` rollout is live (this alert resolving is the
+                rollout-succeeded signal). If the rollout IS live, the supervisor is silent —
+                investigate the collector + OTLP path + the agents-VM cron.
+              runbook_url: "https://github.com/groundnuty/macf-devops-toolkit/blob/main/design/DR-006-vm-cron-watchdog-agent-supervision-impl.md"
+      - eval_time: 35m
+        alertname: MacfWatchdogHeartbeatStale
+        exp_alerts: []            # no series → no-data → correctly does NOT fire

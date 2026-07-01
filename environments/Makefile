@@ -316,6 +316,13 @@ grafana-password:  ## Print the Grafana admin password
 argocd-password:  ## Print the ArgoCD admin password (from initial-admin-secret)
 	@$(DEVBOX_RUN) kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d && echo
 
+.PHONY: test-alerts
+test-alerts:  ## promtool unit-test the PrometheusRule alert expressions (no cluster needed; runs manifests/*/tests/run.sh)
+	@ran=0; for r in manifests/*/tests/run.sh; do \
+	  [ -x "$$r" ] || continue; ran=1; echo "=== $$r ==="; "$$r" || exit 1; \
+	done; \
+	if [ "$$ran" = 1 ]; then echo "✓ all alert-rule unit tests passed"; else echo "(no manifests/*/tests/run.sh found)"; fi
+
 .PHONY: smoke
 smoke:  ## OTLP round-trip test (needs `make pf-collector` + `make pf-tempo` in other terminals)
 	@bash hack/smoke.sh
