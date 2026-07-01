@@ -5,9 +5,10 @@ tailnet, so the ~46% of routing wall-clock currently spent on Tailscale connect 
 `sleep 10` drops to ~0 (inject becomes a local `tmux send-keys`). Expected **~40s →
 ~6–9s** (~4–6×). Science owns the A/B measurement (#90).
 
-> **STATUS: staged scaffolding — NOT yet live.** These scripts are reviewed but not
-> executed; they are validated at registration time (they need `sudo` + a live
-> registration token + are host-mutating). Nothing here registers a runner on its own.
+> **STATUS (2026-07-01): the `macf-science-agent` runner is LIVE** — non-ephemeral `svc.sh`
+> systemd service, listening + serving trusted routing (see `runners.yaml`). The other repos'
+> runners remain staged. Standup requires `sudo` + operator-minted tokens (host-mutating);
+> the scripts don't register anything on their own — see "Standing up a NON-EPHEMERAL runner".
 
 ---
 
