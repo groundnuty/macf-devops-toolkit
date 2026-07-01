@@ -240,5 +240,20 @@ if printf '%s\n' "$fw_out" | grep -qF "[STUCK] devops-agent"; then
   echo "  FAIL: fleet-wide-only backoff wrongly accrued devops' stuck counter"; fail=$((fail+1))
 else echo "  ok: fleet-wide-only backoff (no own signature) does not accrue stuck counter"; pass=$((pass+1)); fi
 
+echo "== launch-stagger: cold-start multi-launch is spaced (anti rate-limit-burst) =="
+# all agents down (empty fleet-doctor) → all 4 LAUNCH; every launch after the 1st shows the plan.
+# Fresh paused/last-exit dirs so nothing is SKIPped (paused / operator-/exit).
+FP="$(mktemp -d)"; FL="$(mktemp -d)"
+st_out="$("$REC" --manifest "$MAN" --paused-dir "$FP" --last-exit-dir "$FL" --fleet-json "$FX/fleet-alldown.json" 2>&1)"
+n_launch="$(printf '%s\n' "$st_out" | awk '$2=="LAUNCH"{n++} END{print n+0}')"
+n_stagger="$(printf '%s\n' "$st_out" | grep -c 'stagger.*would wait' || true)"
+if [ "$n_launch" -ge 2 ] && [ "$n_stagger" -eq "$((n_launch-1))" ]; then
+  echo "  ok: $n_launch launches → $n_stagger stagger-gaps (spaced; the 1st is immediate)"; pass=$((pass+1))
+else echo "  FAIL: launches=$n_launch stagger-gaps=$n_stagger (want gaps=launches-1)"; fail=$((fail+1)); fi
+# MACF_LAUNCH_STAGGER=0 disables it
+off_out="$(MACF_LAUNCH_STAGGER=0 "$REC" --manifest "$MAN" --paused-dir "$FP" --last-exit-dir "$FL" --fleet-json "$FX/fleet-alldown.json" 2>&1)"
+if printf '%s\n' "$off_out" | grep -q 'stagger'; then echo "  FAIL: stagger fired with MACF_LAUNCH_STAGGER=0"; fail=$((fail+1))
+else echo "  ok: MACF_LAUNCH_STAGGER=0 disables the stagger"; pass=$((pass+1)); fi
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
