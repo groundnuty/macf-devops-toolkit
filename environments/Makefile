@@ -335,6 +335,10 @@ check-tempo-ingestion:  ## Pattern A defense (silent-fallback-hazards Instance 8
 doctor-otel:  ## Pattern A defense (silent-fallback-hazards Instance 8 Tier 4): per-agent-process traces-emission invariant — detects stuck OTel exporters in long-lived claude processes. Override WINDOW_MINUTES=N (default 30).
 	@bash hack/doctor-otel.sh
 
+.PHONY: fleet-telemetry-ingest
+fleet-telemetry-ingest:  ## Backend-owner's-eye PER-AGENT telemetry-landing check (#114): is each registry-roster agent's traces/metrics/logs queryable? Pass MACF_GRAFANA_PASSWORD=$(make grafana-password) for the metrics/logs legs. WINDOW_MINUTES=N (default 30).
+	@bash hack/check-fleet-telemetry-ingestion.sh
+
 # NOTE (DR-004 / native k3s): the tailscale-otlp-up/down targets are GONE.
 # They were a k3d-era workaround — k3d's serverlb bound host ports to 127.0.0.1
 # only, so `tailscale serve` was needed to ALSO reach OTLP/Tempo over the tailnet.
