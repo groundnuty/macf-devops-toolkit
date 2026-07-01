@@ -46,6 +46,12 @@ USE_ROUTING=0            # --with-routing: also consume routing-doctor (registra
 EXPECTED_SCHEMA=1
 EXECUTE=0                # 0 = dry-run (print commands); 1 = actually act (--execute)
 ALLOW_RESTART=0          # Tier-2 graceful-restart gate (--allow-restart); default OFF
+# Launch-stagger: space consecutive cold-start LAUNCHes within one sweep so N agents (all on
+# the SAME Anthropic account) don't hammer the API simultaneously → server-side rate-limit →
+# agents idle. Prevention half; recovery = rate-limit backoff (#134) + resume nudge (#131).
+LAUNCH_STAGGER="${MACF_LAUNCH_STAGGER:-15}"   # secs between consecutive launches (0 = off)
+LAUNCHED_THIS_SWEEP=0    # within-sweep launch counter (drives the stagger)
+LAST_LAUNCH_TS=0         # within-sweep last-launch epoch
 # Rate-limit backoff (#129): the throttle signature (single source of truth = the
 # stall-signatures allowlist resume.sh nudges on) + the fleet-wide-stop threshold.
 SIG_FILE="${MACF_STALL_SIGNATURES:-$(dirname "${BASH_SOURCE[0]}")/stall-signatures.json}"
@@ -213,10 +219,27 @@ act() { # $1=label  $2...=command — print always; run only if EXECUTE
 # desired-down. MACF_NO_TMUX_WRAP=1 avoids double-wrap (we provide the session).
 do_launch() {
   local agent="$1" ws="$2"
+  # LAUNCH-STAGGER — every launch after the 1st this sweep is spaced by LAUNCH_STAGGER secs so a
+  # cold-start / restart-many burst doesn't hit one Anthropic account all at once (the upgrade
+  # ROLL is already one-at-a-time; this covers reconcile's multi-launch). Dry-run prints the plan.
+  if [ "$LAUNCHED_THIS_SWEEP" -gt 0 ] && [ "$LAUNCH_STAGGER" -gt 0 ]; then
+    if [ "$EXECUTE" -eq 1 ]; then
+      local now elapsed w
+      now="$(date +%s)"; elapsed=$((now - LAST_LAUNCH_TS)); w=$((LAUNCH_STAGGER - elapsed))
+      if [ "$w" -gt 0 ]; then
+        echo "    [stagger] wait ${w}s before launching $agent (anti rate-limit-burst; $LAUNCHED_THIS_SWEEP launched this sweep)"
+        sleep "$w"
+      fi
+    else
+      echo "    [stagger] would wait ~${LAUNCH_STAGGER}s before launching $agent (anti rate-limit-burst; launch #$((LAUNCHED_THIS_SWEEP+1)) this sweep)"
+    fi
+  fi
   local inner="cd $ws && MACF_NO_TMUX_WRAP=1 ./claude.sh; echo \$? > $LAST_EXIT_DIR/$agent"
   if [ "$EXECUTE" -eq 1 ]; then mkdir -p "$LAST_EXIT_DIR"; fi
   act "launch macf@$agent (detached, exit-code-captured)" \
     tmux new-session -d -s "macf@$agent" "$inner"
+  if [ "$EXECUTE" -eq 1 ]; then LAST_LAUNCH_TS="$(date +%s)"; fi
+  LAUNCHED_THIS_SWEEP=$((LAUNCHED_THIS_SWEEP+1))
 }
 
 # Tier 1 — inject a self-diagnose prompt, GATED by the Pattern-C session_activity
