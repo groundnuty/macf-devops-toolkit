@@ -164,6 +164,37 @@ The canonical CLI + operator are code-agent's (the framework); a **`macf` DR** m
 
 ---
 
+## Amendment A (2026-07-01): the host-local operational plane — registry-free enumeration
+
+*From an operator follow-up: "how can I, without depending on any repository, on macOS or Linux, list all my macf agents alive or dead and reason about (or execute) an upgrade? On K8s the operator/labels do the trick, no problem there."* This sharpens a distinction §1–§4 blurred.
+
+**Two planes, not one:**
+
+- **The routing/delivery plane = the registry** (per-fleet GitHub org-vars). Its job is *reachability* — agents publish `host:port` so the router can dial them. It only knows **registered/alive-ish** agents, needs a **repo + network + auth**, and is **per-fleet** (N round-trips for N fleets). This is where a "fleet == a registry" (§4) lives — correct for routing + upgrade *selection isolation*.
+- **The host operational plane = a LOCAL scan.** "What macf agents live on *this box*, alive or dead, at what version" is a **purely local** question — no repo, no network. The host already holds every fact locally:
+
+  | Fact | Local, registry-free source |
+  |---|---|
+  | which agents exist here | scan for workspaces carrying a `.macf/` marker (+ the local `desired-agents.yaml`) |
+  | alive vs **dead** | union with the running process table → present=alive, absent=**dead** |
+  | version | the **on-disk pin** (`.macf/plugin/…/plugin.json`) — no `/health` call |
+  | busy vs idle | the **tmux pane** (capture-pane-diff) — no `/health` call |
+  | upgrade + restart | `macf update` + local relaunch |
+
+**Consequence — the VM upgrade is registry-INDEPENDENT, exactly like K8s.** The decision layer should **enumerate + reason from the host-local plane** (alive/dead + version + busy — all local), and touch the registry ONLY for the routing it's actually for (or not at all on a pure-local upgrade). On K8s this plane is the **control plane** (`kubectl get pods -l app=macf` → alive/dead + image version, operator + labels) — free, no VM-equivalent problem. On a VM, **`macf ps` IS this plane** — the analog of `kubectl get pods -l`.
+
+**This resolves OQ1 in the registry-free direction** (derive-from-workspaces, not a hand-maintained registry-of-registries) and *is why*: enumeration must not depend on any repo.
+
+**`macf ps` gaps to be the full host-local view (→ macf#682):**
+
+1. **Dead agents too** — today `ps` lists only *running* processes (a pure `/proc` scanner). The host-local view must union running-processes with **known agent workspaces** (the local `.macf`/`desired-agents.yaml` markers — NOT the registry) and mark each **alive/dead**. This is the load-bearing addition for "list all my agents alive or dead."
+2. **Version** — ✅ *already shipped* in code's #683 (Phase 1): `macf ps` resolves version **locally, network-free** (cs process → on-disk `package.json`) — exactly this plane's principle. (Works for a dead agent too, from the pin.)
+3. **macOS** — the workspace scan is filesystem-portable; only the alive-match needs `ps`/`lsof` instead of `/proc` (Phase 3).
+
+So: **`macf ps` (extended: alive+dead, versioned, cross-platform) is the operator's "list all my agents without a repo" view** — the VM control-plane. The registry stays the routing plane; the two never conflate.
+
+---
+
 ## Cross-references
 
 - **DR-006 §A.7** — upgrade = version-dimension reconcile; VM upgrade-driver + rolling sequencer (this DR's parent).
