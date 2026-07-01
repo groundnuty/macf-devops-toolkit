@@ -187,7 +187,7 @@ The canonical CLI + operator are code-agent's (the framework); a **`macf` DR** m
 
 **`macf ps` gaps to be the full host-local view (→ macf#682):**
 
-1. **Dead agents too** — today `ps` lists only *running* processes (a pure `/proc` scanner). The host-local view must union running-processes with **known agent workspaces** (the local `.macf`/`desired-agents.yaml` markers — NOT the registry) and mark each **alive/dead**. This is the load-bearing addition for "list all my agents alive or dead."
+1. **Dead agents too** — today `ps` lists only *running* processes (a pure `/proc` scanner). The host-local view must union running-processes with **known agent workspaces** (the local `.macf`/`desired-agents.yaml` markers — NOT the registry) and mark each **alive/dead**. This is the load-bearing addition for "list all my agents alive or dead." **The workspace-scan is scoped to configured root(s)** (`MACF_WORKSPACE_ROOT`, per the #682 discovery agreement) — **NOT a whole-filesystem walk** — so a big host doesn't pay a full-FS scan per `ps` (science's #141 note).
 2. **Version** — ✅ *already shipped* in code's #683 (Phase 1): `macf ps` resolves version **locally, network-free** (cs process → on-disk `package.json`) — exactly this plane's principle. (Works for a dead agent too, from the pin.)
 3. **macOS** — the workspace scan is filesystem-portable; only the alive-match needs `ps`/`lsof` instead of `/proc` (Phase 3).
 
