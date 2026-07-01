@@ -196,6 +196,38 @@ systemctl show "$SVC" -p Restart --value    # → always
 the health-check). Every runner standup should install this drop-in. FOLLOW-UP: `install-runner.sh`
 should install it automatically so it's not a manual post-step.
 
+## Lever B — action-archive-cache (the ~2s/job optimization)
+
+The runner deletes `_work/_actions` and **re-fetches every `uses:` action from codeload on every
+job** (by design — `ActionManager.cs`). GitHub's native archive-cache (runner v2.311+) turns that
+network fetch into a local `File.Copy` of a SHA-keyed tarball. Measured win: **~2s/job (~50% of
+the action-fetch phase)**.
+
+`install-runner.sh` **bakes Lever B in** — no manual post-step:
+
+- creates the cache dir (`/opt/macf-runner/action-archive-cache`, override
+  `MACF_ACTION_ARCHIVE_CACHE`) and arms the runner's `.env` with
+  `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=<dir>` **before** `svc.sh start` (the listener must inherit
+  the env at start). Idempotent — a re-run won't duplicate the `.env` line.
+- **seeds immediately** when the runner already has a Worker log (warm / reinstall). A brand-new
+  runner has no log yet (chicken-and-egg), so its cache **seeds after the first routing job**: run
+  `./seed-action-cache.sh` once a job has run (install prints this note; a `make seed-<name>`
+  wrapper can be added to `runner/Makefile` later).
+
+Key properties:
+
+- **Survives uninstall/reinstall** — the cache lives OUTSIDE `$RUNNER_DIR`
+  (`/opt/macf-runner/actions-runner`), so re-registering a runner keeps the warm cache.
+- **`seed-action-cache.sh` is drift-proof + fail-safe** — it derives the exact
+  `{owner}/{repo}/{sha}` set from the runner's OWN latest Worker log (no hardcoded SHAs to rot when
+  a tag moves); a SHA-keyed miss (a moving `@vN` tag) just falls back to codeload — never breaks a
+  job, only forgoes the speedup until re-seeded.
+- **A seed failure is non-fatal** — Lever B is a pure optimization; install WARNs and the runner
+  still serves jobs (paying the full codeload fetch).
+
+`verify-runner.sh` asserts Lever B: **PASS** = `.env` armed + ≥1 cached tarball; **WARN** = armed
+but unseeded (fresh, pre-first-job); **FAIL** = not armed.
+
 ## Two corrections (learned during the first live registration, 2026-07-01)
 
 1. **Install the unit before enabling it** — `install-runner.sh` configures the runner but does
@@ -217,7 +249,9 @@ should install it automatically so it's not a manual post-step.
 - `copy-vars.sh` — copy/`--check` a fleet's shared vars from its `var_source` (the var-drift killer).
 - `verify-runner.sh` — the Pattern-A health check (per repo).
 - `setup-macf-runner-user.sh` — create the low-priv user + the narrow send-helper sudoers rule.
-- `install-runner.sh` — download the pinned `actions/runner`, `config.sh` repo-scoped.
+- `install-runner.sh` — download the pinned `actions/runner`, `config.sh` repo-scoped, install the
+  non-ephemeral `svc.sh` service + `Restart=always` oversight, and arm Lever B (archive-cache).
+- `seed-action-cache.sh` — drift-proof + fail-safe action-archive-cache seeder (Lever B).
 - `run-ephemeral-loop.sh` — re-register + run-one-job loop (the ephemeral respawn).
 - `macf-runner@.service` — systemd template unit (one instance per repo).
 

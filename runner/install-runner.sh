@@ -18,7 +18,9 @@ RUNNER_USER="${MACF_RUNNER_USER:-macf-runner}"
 RUNNER_HOME="${MACF_RUNNER_HOME:-/opt/macf-runner}"
 RUNNER_DIR="${MACF_RUNNER_DIR:-$RUNNER_HOME/actions-runner}"
 LABELS="${MACF_RUNNER_LABELS:-self-hosted,macf-vm}"
-HERE="$(cd "$(dirname "$0")" && pwd)"       # for the Restart override .conf
+CACHE_DIR="${MACF_ACTION_ARCHIVE_CACHE:-$RUNNER_HOME/action-archive-cache}"  # Lever B; OUTSIDE
+                                            #   $RUNNER_DIR so it survives uninstall/reinstall
+HERE="$(cd "$(dirname "$0")" && pwd)"       # for the Restart override .conf + seed helper
 REPO="" ; TOKEN="" ; EPHEMERAL=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -60,6 +62,36 @@ EPH=""; [ "$EPHEMERAL" -eq 1 ] && EPH="--ephemeral"
 sudo -u "$RUNNER_USER" bash -c "cd '$RUNNER_DIR' && ./config.sh \
   --url 'https://github.com/$REPO' --token '$TOKEN' \
   --name 'macf-vm-$(hostname -s)' --labels '$LABELS' --unattended $EPH"
+
+# 2b. Lever B (action-archive-cache) — arm the runner's .env BEFORE the service starts (the
+#     listener inherits $ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE at start). Pure optimization:
+#     File.Copy a local SHA-keyed tarball instead of re-fetching every uses: action from codeload
+#     each job (verified ~2s/job, ~50% of the fetch phase; #150). Seeding needs a prior Worker log
+#     (chicken-and-egg on a fresh runner) → seed now if warm, else after the first routing job.
+#     A seed failure is a WARN, NEVER fatal — the runner works without it (falls back to codeload;
+#     fails safe). Cache dir is outside $RUNNER_DIR so it survives uninstall/reinstall.
+install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$CACHE_DIR"
+ENV_FILE="$RUNNER_DIR/.env"
+if ! grep -qs '^ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=' "$ENV_FILE" 2>/dev/null; then
+  echo "ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=$CACHE_DIR" >> "$ENV_FILE"   # idempotent (grep-guarded)
+fi
+if ls "$RUNNER_DIR"/_diag/Worker_*.log >/dev/null 2>&1; then            # warm / reinstall — seed now
+  if MACF_ACTION_ARCHIVE_CACHE="$CACHE_DIR" MACF_RUNNER_DIAG="$RUNNER_DIR/_diag" \
+       "$HERE/seed-action-cache.sh"; then
+    chown -R "$RUNNER_USER":"$RUNNER_USER" "$CACHE_DIR"
+    LEVER_B="armed + seeded"
+  else
+    echo "  WARN: Lever B seed failed — cache incomplete; jobs fall back to codeload (fails safe)." >&2
+    echo "        Re-seed later: $HERE/seed-action-cache.sh" >&2
+    chown -R "$RUNNER_USER":"$RUNNER_USER" "$CACHE_DIR" 2>/dev/null || true
+    LEVER_B="armed (seed FAILED — see WARN, non-fatal)"
+  fi
+else                                                                   # brand-new runner — no log yet
+  echo "  note: Lever B armed; cache seeds after the FIRST routing job. Once a job has run, seed it:"
+  echo "        $HERE/seed-action-cache.sh   (or 'make seed-<name>' if wired into runner/Makefile)"
+  LEVER_B="armed (pending first-job seed)"
+fi
+echo "  ✓ Lever B (action-archive-cache): $LEVER_B  [$CACHE_DIR]"
 
 # 3. install + start the svc.sh systemd service (runs as macf-runner)
 ( cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start )

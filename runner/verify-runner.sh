@@ -92,6 +92,24 @@ else
   skp "auto-restart policy (systemctl — Restart=always oversight)"
 fi
 
+# 5c. LEVER B (action-archive-cache, #150) — the runner-side latency lever (~2s/job, ~50% of the
+# action-fetch phase). Arm = ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE in .env; seed = ≥1 SHA-keyed
+# tarball ({cacheDir}/{owner}_{repo}/{sha}.tar.gz). PASS armed+seeded; WARN armed-but-unseeded
+# (fresh runner, pre-first-job — seeds via seed-action-cache.sh after the first job); FAIL not armed.
+CACHE_DIR="${MACF_ACTION_ARCHIVE_CACHE:-$RUNNER_HOME/action-archive-cache}"
+ENV_FILE="$RUNNER_DIR/.env"
+if grep -qs '^ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=' "$ENV_FILE" 2>/dev/null; then
+  if ls "$CACHE_DIR"/*/*.tar.gz >/dev/null 2>&1; then
+    ck "Lever B armed + seeded ($(ls "$CACHE_DIR"/*/*.tar.gz 2>/dev/null | wc -l | tr -d ' ') archive(s) in $CACHE_DIR)"
+  else
+    wrn "Lever B armed but UNSEEDED — no *.tar.gz in $CACHE_DIR (fresh runner; seeds after the first job via seed-action-cache.sh)"
+  fi
+elif [ -r "$ENV_FILE" ] || [ "$(id -u)" = 0 ]; then
+  bad "Lever B NOT armed — no ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE in $ENV_FILE (re-run install-runner.sh; jobs pay the full codeload fetch)"
+else
+  skp "Lever B .env arming ($ENV_FILE)"
+fi
+
 # 6. GitHub-side 'registered + online' — needs administration:read (bot is 403); operator/gh-side
 wrn "GitHub-side registered+online NOT checked here — verify in Settings→Actions→Runners (needs admin)"
 
