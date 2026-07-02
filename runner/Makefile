@@ -74,9 +74,17 @@ uninstall-$(1): ; sudo ./uninstall-runner.sh --repo $(shell $(YQ) -o=json $(REG)
 endef
 $(foreach r,$(RUNNERS),$(eval $(call _uninstall_rule,$(r))))
 
-# reinstall-<name>: dogfood the full lifecycle — uninstall then reconcile(install).
+# reinstall-<name>: dogfood the full lifecycle — uninstall then FORCE install (devops-toolkit
+# reinstall-skips-install bug, 2026-07-02). MUST NOT depend on runner-$(1) (the plain
+# verify-gated reconcile target): a just-uninstalled runner run through verify-runner.sh
+# WITHOUT sudo can read back as "healthy" (root-only checks silently [skip] instead of
+# [FAIL]), so runner-$(1) would see "already healthy; nothing to do" and skip the install —
+# leaving the runner torn down + de-registered while the echo below lies "re-registered".
+# --force (reconcile-runner.sh) removes exactly that health-check bypass; the install step
+# always runs after the uninstall prerequisite.
 define _reinstall_rule
-reinstall-$(1): uninstall-$(1) runner-$(1)
+reinstall-$(1): uninstall-$(1)
+	@./reconcile-runner.sh --name $(1) --force
 	@echo "reinstall $(1): torn down + re-registered."
 endef
 $(foreach r,$(RUNNERS),$(eval $(call _reinstall_rule,$(r))))

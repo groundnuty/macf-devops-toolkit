@@ -81,13 +81,21 @@ fi
 # has NO Restart= → a crash (network blip / broker SocketException) leaves the runner dead with
 # no restore (observed #90, 2026-07-01). The systemd-restart-override.conf drop-in adds
 # Restart=always. Assert it's in effect so a runner missing the oversight is caught here.
+#
+# "no service found" is a FAIL, not a warn: the tooling's default is a NON-ephemeral runner
+# installed as a systemd service (install-runner.sh always creates one), so its absence means
+# the runner was torn down (uninstalled) or never installed — not a legitimate foreground/run.sh
+# mode. `systemctl list-units` works WITHOUT sudo, so a torn-down runner is caught even
+# unprivileged — this is what makes `make reinstall-<name>` correctly see a dead runner as
+# unhealthy instead of silently treating "no service" as fine and skipping the reinstall
+# (devops-toolkit reinstall-skips-install bug, 2026-07-02).
 if command -v systemctl >/dev/null 2>&1; then
   SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE 'actions\.runner\.[^ ]+\.service' | head -1)"
   if [ -n "$SVC" ]; then
     POLICY="$(systemctl show "$SVC" -p Restart --value 2>/dev/null)"
     if [ "$POLICY" = "always" ]; then ck "auto-restart oversight: $SVC Restart=always"
     else bad "NO auto-restart: $SVC Restart='${POLICY:-<none>}' — a crash leaves it DEAD (install runner/systemd-restart-override.conf)"; fi
-  else wrn "no actions.runner systemd service found (foreground/run.sh mode?)"; fi
+  else bad "no actions.runner systemd service found — runner appears torn down / not installed (run install-runner.sh)"; fi
 else
   skp "auto-restart policy (systemctl — Restart=always oversight)"
 fi
