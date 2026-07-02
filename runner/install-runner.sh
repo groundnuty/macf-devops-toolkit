@@ -1,4 +1,4 @@
-#\!/usr/bin/env bash
+#!/usr/bin/env bash
 # install-runner.sh — download + register a PERSISTENT (non-ephemeral) self-hosted runner
 # as a svc.sh systemd service WITH the Restart=always oversight. Run with sudo (root):
 # config.sh runs as the low-priv macf-runner user (correct _work ownership); svc.sh +
@@ -8,7 +8,9 @@
 #
 # NON-EPHEMERAL by default (survives jobs — the stable A/B baseline). --ephemeral opts into
 # the de-register-after-one-job mode (needs an external token-refresh loop; bot is 403).
-# The REGISTRATION token is operator-minted (bot is 403); if --token omitted, prompts for it.
+# The REGISTRATION token is auto-minted via YOUR gh admin creds (the bot is always 403 on
+# administration:write, so it can't self-mint) — falls back to an interactive prompt only if
+# auto-mint fails, or FATALs if there's no TTY either. Pass --token to skip both.
 # Expects a CLEAN slot — run uninstall-runner.sh first to re-register (config.sh --replace is
 # insufficient: "already configured" → remove-then-readd; that's uninstall-runner.sh's job).
 set -uo pipefail
@@ -28,7 +30,7 @@ while [ $# -gt 0 ]; do
     --token) TOKEN="$2"; shift 2 ;;
     --version) RUNNER_VERSION="$2"; shift 2 ;;
     --ephemeral) EPHEMERAL=1; shift ;;
-    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -39,11 +41,43 @@ id "$RUNNER_USER" >/dev/null 2>&1 || { echo "FATAL: user $RUNNER_USER missing �
 # refuse to clobber an existing registration (remove-then-readd is uninstall-runner.sh's job)
 [ -f "$RUNNER_DIR/.runner" ] && { echo "FATAL: already registered ($RUNNER_DIR/.runner exists). Run: sudo ./uninstall-runner.sh --repo $REPO  first." >&2; exit 2; }
 
-# 0. token
+# 0. token — precedence: --token (explicit) > auto-mint (your gh admin creds) > interactive prompt.
+#    The bot's own creds are ALWAYS 403 on administration:write, so auto-mint runs as the
+#    INVOKING operator, not root/macf-runner — under sudo that's $SUDO_USER's stored `gh auth`,
+#    reached via `sudo -u` WITHOUT -E so a bot GH_TOKEN sitting in this root shell's env can't
+#    leak into the operator's call (sudo -u resets HOME too, so gh reads the operator's own config).
+mint_token() {
+  # $1 = registration-token | remove-token ; prints the token to stdout on success, nothing on failure
+  local endpoint="$1" who tok
+  local gh_as=(gh)
+  who="$(id -un)"
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    gh_as=(sudo -u "$SUDO_USER" -- gh)
+    who="$SUDO_USER"
+  fi
+  tok="$("${gh_as[@]}" api -X POST "/repos/$REPO/actions/runners/$endpoint" --jq '.token' 2>/dev/null)"
+  if [ -n "$tok" ] && [ "$tok" != "null" ]; then
+    echo "  ✓ auto-minted $endpoint via ${who}'s gh credentials" >&2
+    printf '%s' "$tok"
+  fi
+}
+
 if [ -z "$TOKEN" ]; then
-  echo "Mint a REGISTRATION token as YOURSELF (bot is 403):"
-  echo "  gh api -X POST /repos/$REPO/actions/runners/registration-token --jq .token"
-  read -r -p "Paste the registration-token: " TOKEN
+  TOKEN="$(mint_token registration-token)"
+fi
+if [ -z "$TOKEN" ]; then
+  if [ -t 0 ]; then
+    echo "Auto-mint failed — the active gh credentials likely lack admin / administration:write on $REPO" >&2
+    echo "(the bot's credentials are ALWAYS 403 on this endpoint by design)." >&2
+    echo "Mint one at: https://github.com/$REPO/settings/actions/runners" >&2
+    echo "  or: gh api -X POST /repos/$REPO/actions/runners/registration-token --jq .token" >&2
+    read -r -p "Paste the registration-token: " TOKEN
+  else
+    echo "FATAL: no registration token — auto-mint failed and no TTY to prompt." >&2
+    echo "       Pass --token <REG_TOKEN>, or mint one yourself:" >&2
+    echo "       gh api -X POST /repos/$REPO/actions/runners/registration-token --jq .token" >&2
+    exit 2
+  fi
 fi
 [ -n "$TOKEN" ] || { echo "FATAL: no registration token" >&2; exit 2; }
 

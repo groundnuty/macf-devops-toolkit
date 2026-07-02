@@ -7,8 +7,10 @@ tailnet, so the ~46% of routing wall-clock currently spent on Tailscale connect 
 
 > **STATUS (2026-07-01): the `macf-science-agent` runner is LIVE** — non-ephemeral `svc.sh`
 > systemd service, listening + serving trusted routing (see `runners.yaml`). The other repos'
-> runners remain staged. Standup requires `sudo` + operator-minted tokens (host-mutating);
-> the scripts don't register anything on their own — see "Standing up a NON-EPHEMERAL runner".
+> runners remain staged. Standup requires `sudo` (host-mutating); `install-runner.sh` /
+> `uninstall-runner.sh` now **auto-mint** the registration/remove token via the invoking
+> operator's `gh` admin creds (falling back to a prompt only if that fails) — see "Setup
+> sequence" and "Standing up a NON-EPHEMERAL runner" below.
 
 ---
 
@@ -98,22 +100,25 @@ the runner entirely; this grant is the floor for what a *trusted* routing job ne
    ```
    (Or copy from the fleet's `var_source` with `copy-vars.sh` once one repo has it — one source of truth.)
 2. **devops — create the low-priv user** (once per VM): `sudo ./setup-macf-runner-user.sh`
-3. **Operator — mint a repo-scoped registration token** (short-lived ~1h; bot is 403):
+3. **devops — register + install the runner** (as `macf-runner`). The REGISTRATION token is
+   **auto-minted** via the invoking operator's `gh` admin creds — no manual pre-mint step
+   needed (the bot is always 403 on `administration:write`, so it can't self-mint):
+   ```bash
+   sudo ./install-runner.sh --repo groundnuty/<repo>
+   sudo systemctl enable --now macf-runner@<repo-slug>
+   ```
+   Falls back to an interactive prompt only if auto-mint fails (e.g. your own `gh auth` also
+   lacks repo-admin); pass `--token <TOKEN>` to skip both with a token minted yourself:
    ```bash
    gh api -X POST /repos/groundnuty/<repo>/actions/runners/registration-token --jq .token
    ```
-4. **devops — register + install the ephemeral runner** (as `macf-runner`):
-   ```bash
-   sudo -u macf-runner ./install-runner.sh --repo groundnuty/<repo> --token <TOKEN>
-   sudo systemctl enable --now macf-runner@<repo-slug>
-   ```
-5. **Prove it in isolation** — a throwaway trusted-actor-triggered job lands on the
+4. **Prove it in isolation** — a throwaway trusted-actor-triggered job lands on the
    runner (check the run log shows `self-hosted, macf-vm`). No routing depends on it yet.
-6. **code-agent — land the origin-routing `runs-on`** in the macf-actions reusable
+5. **code-agent — land the origin-routing `runs-on`** in the macf-actions reusable
    workflow. NOW trusted routing flows to the runner; outsiders to github-hosted.
-7. **science — run the A/B**, confirm the ~4–6×.
+6. **science — run the A/B**, confirm the ~4–6×.
 
-**Egress lock** (step 2/4, host firewall — operator applies, tune to your setup):
+**Egress lock** (step 2/3, host firewall — operator applies, tune to your setup):
 restrict `macf-runner`'s egress to the agent host (localhost tmux is local anyway) +
 the Tempo endpoint; deny the rest so a compromised job can't exfiltrate.
 
@@ -149,7 +154,12 @@ matches — so the actors allowlist is set ONCE, not per-repo. (Via devbox: `dev
 ## Standing up a NON-EPHEMERAL runner (the A/B path — verified 2026-07-01)
 
 The proven live-standup sequence for a persistent runner (macf-science-agent was stood up this
-way). Run on the VM; the token mints are operator-only (bot is 403 on `administration:write`).
+way), shown here as the raw `config.sh` recipe — useful for troubleshooting or when bypassing
+the wrapper scripts. **Prefer the wrapper scripts when possible**: `install-runner.sh` and
+`uninstall-runner.sh` now **auto-mint** both token types via the invoking operator's `gh` admin
+creds (bot is 403 on `administration:write`, so it can't self-mint), so a normal
+`sudo ./uninstall-runner.sh --repo ... && sudo ./install-runner.sh --repo ...` no longer needs a
+manual `gh api` mint step at all. The steps below remain useful for driving `config.sh` directly.
 
 ```bash
 cd /opt/macf-runner/actions-runner
@@ -244,10 +254,13 @@ but unseeded (fresh, pre-first-job); **FAIL** = not armed.
    `sudo cp macf-runner@.service /etc/systemd/system/ && sudo systemctl daemon-reload`.
 2. **Ephemeral + unattended systemd needs a token-mint command** — an `--ephemeral` runner
    de-registers after one job, so the respawn must re-register with a *fresh* token each time;
-   minting registration tokens needs `administration:write` (the **bot is 403** — only the operator
-   mints). So for the **spike / A/B**, use a **non-ephemeral** runner (`install-runner.sh` *without*
-   `--ephemeral` — register once, serves many jobs); the durable ephemeral+systemd form waits on
-   an operator-provided token-mint helper. The **isolation proof** needs neither — just `make up`
+   minting registration tokens needs `administration:write` (the **bot is 403**). `install-runner.sh`
+   now **auto-mints** for the *interactive, operator-present* call (via `$SUDO_USER`'s `gh` creds
+   under `sudo`) — but that doesn't help an *unattended* systemd-triggered respawn with no
+   operator in the loop, which still has no token source. So for the **spike / A/B**, use a
+   **non-ephemeral** runner (`install-runner.sh` *without* `--ephemeral` — register once, serves
+   many jobs, mint happens once at standup time); the durable ephemeral+systemd form still waits on
+   a separate unattended token-mint helper. The **isolation proof** needs neither — just `make up`
    (`./run.sh`) → "Listening for Jobs".
 
 ## Files
@@ -258,8 +271,12 @@ but unseeded (fresh, pre-first-job); **FAIL** = not armed.
 - `copy-vars.sh` — copy/`--check` a fleet's shared vars from its `var_source` (the var-drift killer).
 - `verify-runner.sh` — the Pattern-A health check (per repo).
 - `setup-macf-runner-user.sh` — create the low-priv user + the narrow send-helper sudoers rule.
-- `install-runner.sh` — download the pinned `actions/runner`, `config.sh` repo-scoped, install the
+- `install-runner.sh` — download the pinned `actions/runner`, `config.sh` repo-scoped (registration
+  token **auto-minted** via the invoking operator's `gh` creds, prompt-fallback), install the
   non-ephemeral `svc.sh` service + `Restart=always` oversight, and arm Lever B (archive-cache).
+- `uninstall-runner.sh` — stop/remove the `svc.sh` service + drop-in, and de-register from GitHub
+  (`config.sh remove`; remove-token **auto-minted** the same way, prompt-fallback, non-fatal WARN
+  if neither is available — the rest of the teardown still proceeds).
 - `seed-action-cache.sh` — drift-proof + fail-safe action-archive-cache seeder (Lever B).
 - `run-ephemeral-loop.sh` — re-register + run-one-job loop (the ephemeral respawn).
 - `macf-runner@.service` — systemd template unit (one instance per repo).
