@@ -93,10 +93,14 @@ if [ \! -f "$RUNNER_DIR/config.sh" ]; then
 fi
 
 # 2. register (as macf-runner — correct _work ownership). NON-ephemeral unless --ephemeral.
+# --replace: if a runner with this name is ALREADY registered on GitHub (e.g. a prior install's
+# local dir was deleted out from under it, leaving a stale GitHub-side registration), replace it
+# instead of failing "a runner with that name already exists". Idempotent re-registration; safe
+# because the name is per-repo. (The LOCAL clean-slot is still uninstall's job — see the header.)
 EPH=""; [ "$EPHEMERAL" -eq 1 ] && EPH="--ephemeral"
 sudo -u "$RUNNER_USER" bash -c "cd '$RUNNER_DIR' && ./config.sh \
   --url 'https://github.com/$REPO' --token '$TOKEN' \
-  --name 'macf-vm-$(hostname -s)' --labels '$LABELS' --unattended $EPH"
+  --name 'macf-vm-$(hostname -s)' --labels '$LABELS' --unattended --replace $EPH"
 
 # 2b. Lever B (action-archive-cache) — arm the runner's .env BEFORE the service starts (the
 #     listener inherits $ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE at start). Pure optimization:
