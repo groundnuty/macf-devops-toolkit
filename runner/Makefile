@@ -4,14 +4,33 @@
 #   make runner-<name>   — reconcile ONE runner (verify → prompt-install-if-unhealthy → verify)
 #   make fleet-<name>    — reconcile every runner in that fleet (depends on its runner-* targets)
 # via $(foreach)+$(eval) reading runners.yaml — NOTHING hardcoded. Add a runner = one YAML
-# entry → its target appears (+ tab-completes, on any make-completion that reads the make
-# DATABASE: bash-completion's default, or zsh with
-# `zstyle ':completion:*:make:*:targets' call-command true` — config, not a custom script).
+# entry → its target appears.
 #
-# Needs yq (mikefarah v4) + jq (devbox provides both): `devbox run -- make -C runner <target>`.
+# Needs yq (mikefarah v4) + jq. Self-contained devbox: `cd runner && devbox shell` (see
+# devbox.json) pins both + gh + working tab-completion for these generated targets
+# (make-completion.zsh / make-completion.bash, loaded by devbox's shell.init_hook — see
+# RUNNER.md). The generic "read the make database" completion approaches (bash-completion's
+# default, or zsh's `zstyle ':completion:*:make:*:targets' call-command true`) do NOT work
+# here because these targets are $(shell)-generated at parse time, not static rules — with
+# no completion script bound, they silently fall back to filename completion instead
+# (e.g. `uninstall-runner.sh` polluting `make uninstall-<TAB>`). The $(error) guard below
+# converts the same yq/jq-missing condition from "silently generate zero targets" into a
+# loud, actionable failure.
 # Extraction goes yq→json→jq (portable string-shaping vs mikefarah-yq's differing syntax).
 YQ  ?= yq
 JQ  ?= jq
+
+# Fail LOUD, not silently-empty: without yq/jq, $(shell $(YQ) ... | $(JQ) ...) below returns
+# "" for BOTH $(RUNNERS) and $(FLEETS) — every generated runner-*/uninstall-*/reinstall-*/
+# fleet-* target simply never gets $(eval)'d, and `make <that-target>` fails with a bare
+# "No rule to make target" that gives no hint why. Assert the real precondition instead.
+ifeq ($(shell command -v $(YQ) 2>/dev/null),)
+$(error yq (mikefarah v4) not found on PATH -- runner/Makefile generates its runner-*/fleet-*/uninstall-*/reinstall-* targets from runners.yaml via yq+jq, so without yq every one of those targets silently fails to exist ("No rule to make target"). Fix: run inside the runner devbox -- `cd runner && devbox shell` (pins yq/jq/gh + working tab-completion, see RUNNER.md) -- or one-off from the repo root: `devbox run --config runner -- make <target>`)
+endif
+ifeq ($(shell command -v $(JQ) 2>/dev/null),)
+$(error jq not found on PATH -- same fix as the yq guard above: `cd runner && devbox shell`, or `devbox run --config runner -- make <target>` from the repo root)
+endif
+
 REG := runners.yaml
 J   := $(YQ) -o=json $(REG) | $(JQ) -r
 RUNNERS := $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].runners[].name' 2>/dev/null)

@@ -142,14 +142,54 @@ Start with one repo for the spike; fan out after the A/B confirms the win.
 - **`make runners`** — document the registry; **`make copy-vars REPO=… FLEET=…`** — sync shared vars;
   **`make setup-user`** — the low-priv user (once per VM).
 
-**Tab-completion, no custom script:** the generated targets land in the make **database**, so any
-completion that reads it lists `make runner-<TAB>` / `fleet-<TAB>` — bash-completion's default, or
-zsh with the one-liner `zstyle ':completion:*:make:*:targets' call-command true` (config, not a
-script). Add a runner to the YAML → its target *and* its completion appear automatically.
+### Self-contained devbox — yq/jq/gh + working tab-completion (no more silent-empty targets)
+
+The Makefile's `runner-<name>` / `uninstall-<name>` / `reinstall-<name>` / `fleet-<name>`
+targets are **generated at parse time** from `runners.yaml` via `$(shell yq ... | jq ...)`
+— a make *variable*, not a static rule. Two consequences that used to bite:
+
+1. **Without yq/jq on PATH, generation silently returns nothing** — `make <generated-target>`
+   used to fail with a bare `No rule to make target`, no hint why. `runner/Makefile` now
+   asserts the precondition right after the `YQ`/`JQ` definitions and fails LOUD instead
+   (`$(error) yq (mikefarah v4) not found on PATH -- ...`) — same for `jq`.
+2. **The generic "read the make database" completion trick doesn't work for these targets**
+   (bash-completion's default, or zsh's `zstyle ':completion:*:make:*:targets' call-command
+   true`) — because a `$(shell)`-computed variable isn't a static rule in the database for
+   either mechanism to introspect. With nothing to offer, both fall back to **filename**
+   completion — `make uninstall-<TAB>` used to offer `uninstall-runner.sh`, not
+   `uninstall-macf-science-agent`.
+
+Fix — `runner/devbox.json` (packages: `yq-go`, `jq`, `gh`, matching `environments/macf`'s pin
+style) plus two completion scripts that derive candidates the SAME way the Makefile does
+(`yq -o=json runners.yaml | jq -r '...'`), bound directly to `make` so filename completion
+never runs for it:
+
+```
+cd runner && devbox shell     # yq/jq/gh on PATH; completion loaded automatically
+make reinstall-<TAB>          # → reinstall-macf-science-agent  (not a .sh filename)
+make uninstall-<TAB>          # → uninstall-macf-science-agent
+make fleet-<TAB>               # → fleet-macf
+```
+
+- **`make-completion.zsh`** / **`make-completion.bash`** — both derive: the Makefile's own
+  self-documenting `target:  ## comment` targets (`help`, `runners`, `verify-all`,
+  `setup-user`, `copy-vars`) PLUS the generated `runner-*`/`uninstall-*`/`reinstall-*` (per
+  runner) and `fleet-*` (per fleet) names from `runners.yaml`. Resilient: if yq/jq or
+  `runners.yaml` are unavailable, completion just offers the static targets (never errors,
+  never falls back to filenames).
+- **`devbox.json`**'s `shell.init_hook` sources whichever of the two matches the running
+  shell (`$ZSH_VERSION`/`$BASH_VERSION`) and prints a one-line ready hint. Scoped to the
+  `runner/` devbox shell only — nothing is installed into your global zsh/bash config.
+- **One-off (no interactive shell) from the repo root:**
+  `devbox run --config runner -- make <target>` — devbox resolves `runner/devbox.json`
+  without a `cd`, and `make` runs with yq/jq/gh already on PATH (no completion in this
+  non-interactive form, obviously — that's an interactive-shell feature).
+- Add a runner to the YAML → its target *and* its completion appear automatically, same as
+  before — only the completion *mechanism* changed, not the single-source-of-truth model.
 
 **Var-drift killer:** each fleet has a `var_source` repo; `copy-vars.sh` copies `shared_vars`
 (e.g. `MACF_TRUSTED_ACTORS`) from it to each runner-repo, and `--check` verifies every repo still
-matches — so the actors allowlist is set ONCE, not per-repo. (Via devbox: `devbox run -- make -C runner <t>`.)
+matches — so the actors allowlist is set ONCE, not per-repo.
 
 ## Standing up a NON-EPHEMERAL runner (the A/B path — verified 2026-07-01)
 
@@ -266,7 +306,12 @@ but unseeded (fresh, pre-first-job); **FAIL** = not armed.
 ## Files
 
 - `runners.yaml` — the single-source runner REGISTRY (fleets → runners; `var_source`, `shared_vars`).
-- `Makefile` — generates `runner-<name>`/`fleet-<name>` from the YAML (+ `runners`/`verify-all`/`copy-vars`).
+- `Makefile` — generates `runner-<name>`/`fleet-<name>` from the YAML (+ `runners`/`verify-all`/`copy-vars`);
+  fails loud via `$(error)` if yq/jq aren't on PATH instead of silently generating zero targets.
+- `devbox.json` — self-contained devbox for this directory (`yq-go`, `jq`, `gh`); `shell.init_hook`
+  loads the matching tab-completion script + prints a ready hint. `cd runner && devbox shell`.
+- `make-completion.zsh` / `make-completion.bash` — bind `make` completion to the target names
+  generated from `runners.yaml` (+ the Makefile's own documented targets); no filename fallback.
 - `reconcile-runner.sh` — the per-runner reconcile (verify → prompt-install → verify); behind `runner-<name>`.
 - `copy-vars.sh` — copy/`--check` a fleet's shared vars from its `var_source` (the var-drift killer).
 - `verify-runner.sh` — the Pattern-A health check (per repo).
