@@ -28,6 +28,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$REPO" ] || { echo "FATAL: --repo groundnuty/<repo> required" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "FATAL: run with sudo (root) — svc.sh + systemd need it" >&2; exit 2; }
+REPO_SLUG="${REPO//\//-}"   # owner/repo -> owner-repo, matches svc.sh's actions.runner.<slug>.<name>.service
 
 # token resolution: --token (explicit) > auto-mint (your gh admin creds) > interactive prompt.
 # The bot's own creds are ALWAYS 403 on administration:write, so auto-mint runs as the
@@ -50,7 +51,10 @@ mint_token() {
   fi
 }
 
-SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE 'actions\.runner\.[^ ]+\.service' | head -1)"
+# Filtered by THIS repo's slug — with multiple runners on one host, an unfiltered
+# `head -1` can grab a SIBLING runner's service and tear down/de-register the wrong one
+# (devops-toolkit multi-runner-per-host fix).
+SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE "actions\.runner\.${REPO_SLUG}\.[^ ]+\.service" | head -1)"
 
 # 1. stop + uninstall the systemd service (svc.sh removes the unit + the enable symlink)
 if [ -x "$RUNNER_DIR/svc.sh" ]; then

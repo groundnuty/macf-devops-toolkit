@@ -11,6 +11,13 @@ tailnet, so the ~46% of routing wall-clock currently spent on Tailscale connect 
 > `uninstall-runner.sh` now **auto-mint** the registration/remove token via the invoking
 > operator's `gh` admin creds (falling back to a prompt only if that fails) — see "Setup
 > sequence" and "Standing up a NON-EPHEMERAL runner" below.
+>
+> **UPDATE (multi-runner-per-host): runners now install onto `/mnt/volume1`, isolated per
+> repo, sharing one action-archive-cache.** `groundnuty` is a user account (no org runners),
+> so a second repo's runner would collide with the first under the old single fixed-path
+> model (`/opt/macf-runner`, also on the near-full root disk). See "Multi-runner-per-host
+> layout" below for the new `$MACF_RUNNER_BASE/<name>` scheme, and "Migrating the
+> `macf-science-agent` runner" for moving the existing LIVE runner off `/opt/macf-runner`.
 
 ---
 
@@ -126,9 +133,75 @@ the Tempo endpoint; deny the rest so a compromised job can't exfiltrate.
 
 ## Multi-repo
 
-The router runs in 4 repos; a repo-scoped runner serves ONE repo. One VM hosts all —
-register one ephemeral runner per repo (`macf-runner@<repo-slug>` systemd instances).
-Start with one repo for the spike; fan out after the A/B confirms the win.
+The router runs in 4 repos; a repo-scoped runner serves ONE repo (`groundnuty` is a user
+account — no org-scoped runners). One VM hosts all of them, one **non-ephemeral `svc.sh`
+systemd service per repo**, each isolated under its own dir on `/mnt/volume1` — see
+"Multi-runner-per-host layout" below for the directory scheme. Service names don't
+collide either: `svc.sh` derives `actions.runner.<owner>-<repo>.<name>.service` from the
+registered repo, so `verify-runner.sh` / `uninstall-runner.sh` / `install-runner.sh` all
+target the SPECIFIC service for their `--repo`, not just "whichever service comes first."
+Start with one repo for the spike (done: `macf-science-agent`); fan out via
+`make runner-<name>` once the A/B confirms the win.
+
+## Multi-runner-per-host layout (`/mnt/volume1`)
+
+**Heavy/growing storage goes on the big volume, not the (84%-full) root disk** — same
+rule as the observability cluster's `/mnt/volume1` convention. Each runner installs
+ISOLATED under its own name:
+
+```
+/mnt/volume1/macf-runners/
+├── macf-science-agent/
+│   └── actions-runner/        # this runner's config.sh registration + _work + _diag
+├── macf-devops-toolkit/
+│   └── actions-runner/        # a second repo's runner — no path collision
+└── action-archive-cache/      # SHARED — Lever B; router actions are identical across
+                                # repos, so one cache serves every runner (devops#150)
+```
+
+- **`MACF_RUNNER_BASE`** (default `/mnt/volume1/macf-runners`) — the base dir; override to
+  relocate the whole fleet. `reconcile-runner.sh` computes `$MACF_RUNNER_BASE/<name>` from
+  the `runners.yaml` `name` field and exports `MACF_RUNNER_HOME` / `MACF_RUNNER_DIR` /
+  `MACF_ACTION_ARCHIVE_CACHE` / `MACF_RUNNER_DIAG` before calling install/uninstall/verify —
+  the single point where the per-runner path formula lives. The Makefile's `uninstall-<name>`
+  target calls `uninstall-runner.sh` DIRECTLY (bypassing reconcile, since uninstall doesn't
+  need the verify/install dance), so it threads the same formula independently — the one
+  unavoidable duplication, called out in the Makefile's `MACF_RUNNER_BASE` comment.
+- **ISOLATED per runner:** the `actions-runner` install dir (registration, `_work`, `_diag`,
+  the per-runner `.env`).
+- **SHARED across every runner:**
+  - the `action-archive-cache` (Lever B) — one cache, `{cacheDir}/{owner}_{repo}/{sha}.tar.gz`
+    keyed, so it's already namespaced per-repo internally; no reason to duplicate it per runner.
+  - the low-priv **`macf-runner` OS user** — one system account runs every runner's listener
+    process (each with its own `_work`, so no cross-repo bleed); set up ONCE per VM via
+    `setup-macf-runner-user.sh` (unchanged — its `MACF_RUNNER_HOME` is the OS user's `$HOME`,
+    a small metadata dir, NOT where the actions-runner installs land).
+- **Threading through `sudo`:** `reconcile-runner.sh` exports the per-runner vars, then calls
+  `sudo ./install-runner.sh` / `sudo ./uninstall-runner.sh` via **`sudo env VAR=val cmd`**, not
+  `sudo -E` — `sudo` resets the environment by default (`env_reset`), and whether `-E` is
+  honored depends on sudoers policy the operator's shell may not have. `env VAR=val` is an
+  explicit assignment consumed by `env(1)` before it execs the child, so it works regardless
+  of that policy.
+- **Bare / manual invocation still works:** each script's own default (`MACF_RUNNER_HOME:-
+  /opt/macf-runner`, etc.) is UNCHANGED — a direct `sudo ./install-runner.sh --repo ...` with
+  no env overrides still installs to the old single-runner location. The multi-runner scheme
+  is opt-in via `reconcile-runner.sh` / `make runner-<name>`, the primary interface.
+
+### Migrating the `macf-science-agent` runner off `/opt/macf-runner`
+
+The runner registered before this change is still on the OLD path. Move it onto the volume:
+
+```bash
+make reinstall-macf-science-agent   # uninstalls the /opt/macf-runner registration,
+                                     # re-installs onto /mnt/volume1/macf-runners/macf-science-agent
+sudo rm -rf /opt/macf-runner        # reclaim the root-disk space once verify-runner.sh is green
+```
+
+The shared action-archive-cache starts **fresh** on the volume (the old `/opt/macf-runner/
+action-archive-cache` isn't migrated — it's a pure optimization, not state). It re-seeds
+after the first routed job, or immediately via `./seed-action-cache.sh` if the migrated
+runner already has a Worker log (a `make reinstall-<name>` warm-reinstall does, since
+`install-runner.sh` seeds immediately when one exists — see "Lever B" below).
 
 ## Operational interface (`runner/Makefile`) — single source, generated targets
 
@@ -202,7 +275,7 @@ creds (bot is 403 on `administration:write`, so it can't self-mint), so a normal
 manual `gh api` mint step at all. The steps below remain useful for driving `config.sh` directly.
 
 ```bash
-cd /opt/macf-runner/actions-runner
+cd /mnt/volume1/macf-runners/<name>/actions-runner   # per-runner dir; see "Multi-runner-per-host layout"
 sudo ./svc.sh stop; sudo ./svc.sh uninstall     # if a prior service exists
 unset GH_TOKEN                                   # mint as the OPERATOR, not the bot (bot=403)
 # REMOVE the old registration first — `config.sh --replace` is INSUFFICIENT ("Cannot configure
@@ -244,7 +317,11 @@ watchdog on top — a systemd *service* is systemd's to supervise). A repo-track
 `StartLimitIntervalSec=0`; drop-ins survive `svc.sh` regen:
 
 ```bash
-SVC=$(systemctl list-units --type=service --all | grep -oE 'actions\.runner\.[^ ]+\.service' | head -1)
+# Filtered by the repo's slug (owner-repo) — with multiple runners on one host, an
+# unfiltered `head -1` can grab a SIBLING runner's service. install-runner.sh /
+# uninstall-runner.sh / verify-runner.sh all do this filtering internally already;
+# this raw form is for manual troubleshooting only.
+SVC=$(systemctl list-units --type=service --all | grep -oE 'actions\.runner\.<owner>-<repo>\.[^ ]+\.service' | head -1)
 sudo mkdir -p "/etc/systemd/system/${SVC}.d"
 sudo cp runner/systemd-restart-override.conf "/etc/systemd/system/${SVC}.d/restart.conf"
 sudo systemctl daemon-reload && sudo systemctl restart "$SVC"
@@ -264,7 +341,10 @@ the action-fetch phase)**.
 
 `install-runner.sh` **bakes Lever B in** — no manual post-step:
 
-- creates the cache dir (`/opt/macf-runner/action-archive-cache`, override
+- creates the cache dir (`/mnt/volume1/macf-runners/action-archive-cache` under the
+  multi-runner scheme — **SHARED across every runner** on the host, threaded via
+  `reconcile-runner.sh`'s `MACF_ACTION_ARCHIVE_CACHE` export; bare/manual invocation
+  defaults to `/opt/macf-runner/action-archive-cache`, override either way with
   `MACF_ACTION_ARCHIVE_CACHE`) and arms the runner's `.env` with
   `ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=<dir>` **before** `svc.sh start` (the listener must inherit
   the env at start). Idempotent — a re-run won't duplicate the `.env` line.
@@ -275,8 +355,10 @@ the action-fetch phase)**.
 
 Key properties:
 
-- **Survives uninstall/reinstall** — the cache lives OUTSIDE `$RUNNER_DIR`
-  (`/opt/macf-runner/actions-runner`), so re-registering a runner keeps the warm cache.
+- **Survives uninstall/reinstall** — the cache lives OUTSIDE `$RUNNER_DIR` (each runner's
+  `actions-runner` subdir), so re-registering a runner keeps the warm cache. Under the
+  multi-runner scheme this ALSO means uninstalling/reinstalling one runner never touches
+  the shared cache other runners are reading from.
 - **`seed-action-cache.sh` is drift-proof + fail-safe** — it derives the exact
   `{owner}/{repo}/{sha}` set from the runner's OWN latest Worker log (no hardcoded SHAs to rot when
   a tag moves); a SHA-keyed miss (a moving `@vN` tag) just falls back to codeload — never breaks a
@@ -306,8 +388,11 @@ but unseeded (fresh, pre-first-job); **FAIL** = not armed.
 ## Files
 
 - `runners.yaml` — the single-source runner REGISTRY (fleets → runners; `var_source`, `shared_vars`).
-- `Makefile` — generates `runner-<name>`/`fleet-<name>` from the YAML (+ `runners`/`verify-all`/`copy-vars`);
-  fails loud via `$(error)` if yq/jq aren't on PATH instead of silently generating zero targets.
+  Also documents the multi-runner-per-host `/mnt/volume1/macf-runners/<name>` layout (top-of-file note).
+- `Makefile` — generates `runner-<name>`/`fleet-<name>`/`uninstall-<name>`/`reinstall-<name>` from the
+  YAML (+ `runners`/`verify-all`/`copy-vars`); fails loud via `$(error)` if yq/jq aren't on PATH instead
+  of silently generating zero targets. `MACF_RUNNER_BASE` (default `/mnt/volume1/macf-runners`) is the
+  per-runner base dir, threaded into `uninstall-<name>` directly (see "Multi-runner-per-host layout").
 - `devbox.json` — self-contained devbox for this directory (`yq-go`, `jq`, `gh`); `shell.init_hook`
   loads the matching tab-completion script + prints a ready hint. `cd runner && devbox shell`.
 - `make-completion.zsh` / `make-completion.bash` — bind `make` completion to the target names

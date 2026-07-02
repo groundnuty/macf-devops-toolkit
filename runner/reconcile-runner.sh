@@ -38,6 +38,32 @@ row="$(yq -o=json "$REG" | jq -r --arg n "$NAME" \
 IFS=$'\t' read -r FLEET VAR_SOURCE REPO <<<"$row"
 echo "reconcile runner '$NAME' — repo=$REPO  fleet=$FLEET"
 
+# per-runner paths — heavy/growing runner state (the actions-runner install + its _work)
+# lives on the big volume, NOT the (84%-full) root disk. Each runner gets an ISOLATED
+# home+actions-runner dir keyed by its own name (no collision between repos); ALL runners
+# SHARE one action-archive-cache (Lever B — the router actions are identical across repos,
+# one cache serves every runner) and the ONE low-priv macf-runner OS user (RUNNER_USER,
+# unchanged — set up once per VM by setup-macf-runner-user.sh, not per-runner).
+# Exported so every downstream call below (verify / install / uninstall) resolves the SAME
+# per-runner paths without re-deriving them. Plain export is enough for the un-sudo'd
+# verify-runner.sh calls; the `sudo ./install-runner.sh` / `sudo ./uninstall-runner.sh`
+# calls below thread them explicitly via `sudo env VAR=...` instead of relying on `sudo -E`
+# — sudo resets the environment by default (env_reset), and whether -E is honored depends
+# on sudoers policy the operator's shell may not have; `sudo env VAR=val cmd` always works
+# regardless of that policy because it's not environment INHERITANCE, it's an explicit
+# assignment consumed by env(1) before it execs the child.
+RUNNER_BASE="${MACF_RUNNER_BASE:-/mnt/volume1/macf-runners}"
+export MACF_RUNNER_HOME="$RUNNER_BASE/$NAME"
+export MACF_RUNNER_DIR="$MACF_RUNNER_HOME/actions-runner"
+export MACF_ACTION_ARCHIVE_CACHE="$RUNNER_BASE/action-archive-cache"
+export MACF_RUNNER_DIAG="$MACF_RUNNER_DIR/_diag"
+SUDO_ENV=(env
+  "MACF_RUNNER_HOME=$MACF_RUNNER_HOME"
+  "MACF_RUNNER_DIR=$MACF_RUNNER_DIR"
+  "MACF_ACTION_ARCHIVE_CACHE=$MACF_ACTION_ARCHIVE_CACHE"
+  "MACF_RUNNER_DIAG=$MACF_RUNNER_DIAG")
+echo "   runner home: $MACF_RUNNER_HOME  (shared cache: $MACF_ACTION_ARCHIVE_CACHE)"
+
 # 1. verify (the same check we'll prove with at the end) — skipped entirely under --force,
 # so a reinstall can never be short-circuited by "already healthy; nothing to do." (that gate
 # is exactly what left a torn-down runner dead + de-registered — see the --force comment above).
@@ -71,14 +97,14 @@ echo "-- copying $FLEET shared vars from $VAR_SOURCE → $REPO --"
 
 # 2b. if a stale registration exists, tear it down first (config.sh --replace is insufficient;
 # install-runner.sh refuses to clobber a live .runner → remove-then-readd is uninstall's job).
-if [ -f "/opt/macf-runner/actions-runner/.runner" ]; then
+if [ -f "$MACF_RUNNER_DIR/.runner" ]; then
   echo "-- existing registration found → uninstalling first (clean remove-then-readd) --"
-  sudo ./uninstall-runner.sh --repo "$REPO" || echo "   (uninstall had issues — continuing to install attempt)"
+  sudo "${SUDO_ENV[@]}" ./uninstall-runner.sh --repo "$REPO" || echo "   (uninstall had issues — continuing to install attempt)"
 fi
 
 # 2c. full install: NON-ephemeral runner + svc.sh service + Restart=always oversight (root sudo;
 # install-runner.sh prompts for the registration token — operator mints it, bot is 403).
-sudo ./install-runner.sh --repo "$REPO" || { echo "install failed."; exit 1; }
+sudo "${SUDO_ENV[@]}" ./install-runner.sh --repo "$REPO" || { echo "install failed."; exit 1; }
 
 # 3. prove it — verify again with the same check
 echo "-- verifying the freshly-registered runner --"

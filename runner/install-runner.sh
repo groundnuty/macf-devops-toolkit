@@ -36,6 +36,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$REPO" ] || { echo "FATAL: --repo groundnuty/<repo> required" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "FATAL: run with sudo (root) — svc.sh + the systemd drop-in need it" >&2; exit 2; }
+REPO_SLUG="${REPO//\//-}"   # owner/repo -> owner-repo, matches svc.sh's actions.runner.<slug>.<name>.service
 id "$RUNNER_USER" >/dev/null 2>&1 || { echo "FATAL: user $RUNNER_USER missing — run setup-macf-runner-user.sh first" >&2; exit 2; }
 
 # refuse to clobber an existing registration (remove-then-readd is uninstall-runner.sh's job)
@@ -92,10 +93,14 @@ if [ \! -f "$RUNNER_DIR/config.sh" ]; then
 fi
 
 # 2. register (as macf-runner — correct _work ownership). NON-ephemeral unless --ephemeral.
+# --replace: if a runner with this name is ALREADY registered on GitHub (e.g. a prior install's
+# local dir was deleted out from under it, leaving a stale GitHub-side registration), replace it
+# instead of failing "a runner with that name already exists". Idempotent re-registration; safe
+# because the name is per-repo. (The LOCAL clean-slot is still uninstall's job — see the header.)
 EPH=""; [ "$EPHEMERAL" -eq 1 ] && EPH="--ephemeral"
 sudo -u "$RUNNER_USER" bash -c "cd '$RUNNER_DIR' && ./config.sh \
   --url 'https://github.com/$REPO' --token '$TOKEN' \
-  --name 'macf-vm-$(hostname -s)' --labels '$LABELS' --unattended $EPH"
+  --name 'macf-vm-$(hostname -s)' --labels '$LABELS' --unattended --replace $EPH"
 
 # 2b. Lever B (action-archive-cache) — arm the runner's .env BEFORE the service starts (the
 #     listener inherits $ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE at start). Pure optimization:
@@ -131,8 +136,10 @@ echo "  ✓ Lever B (action-archive-cache): $LEVER_B  [$CACHE_DIR]"
 ( cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start )
 
 # 4. install the Restart=always oversight drop-in (the svc.sh unit omits Restart= → a crash
-#    leaves it dead; #90). Assert it took.
-SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE 'actions\.runner\.[^ ]+\.service' | head -1)"
+#    leaves it dead; #90). Assert it took. Filtered by THIS repo's slug — with multiple
+#    runners on one host, an unfiltered `head -1` can grab a SIBLING runner's service
+#    (devops-toolkit multi-runner-per-host fix) and apply the drop-in to the wrong unit.
+SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE "actions\.runner\.${REPO_SLUG}\.[^ ]+\.service" | head -1)"
 if [ -n "$SVC" ] && [ -f "$HERE/systemd-restart-override.conf" ]; then
   mkdir -p "/etc/systemd/system/${SVC}.d"
   cp "$HERE/systemd-restart-override.conf" "/etc/systemd/system/${SVC}.d/restart.conf"
