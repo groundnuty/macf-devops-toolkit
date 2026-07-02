@@ -27,7 +27,26 @@ command -v tar  >/dev/null || { echo "FATAL: tar not found" >&2; exit 2; }
 WL="$(ls -t "$DIAG_DIR"/Worker_*.log 2>/dev/null | head -1)"
 [ -n "$WL" ] || { echo "FATAL: no Worker log in $DIAG_DIR — run a routing job first so the runner records what it fetches" >&2; exit 2; }
 URLS="$(grep -ohE 'https://codeload\.github\.com/[^/]+/[^/]+/tar\.gz/[a-f0-9]+' "$WL" 2>/dev/null | sort -u)"
-[ -n "$URLS" ] || { echo "FATAL: no codeload tarball fetches in $WL — nothing to seed" >&2; exit 2; }
+if [ -z "$URLS" ]; then
+  # No codeload fetches in the latest Worker log. Two cases, only one is an error:
+  #  - WARM cache (SUCCESS): the last job served every action from the cache (File.Copy, no
+  #    codeload) → there's nothing NEW to seed, and the cache is already populated. This is
+  #    Lever B WORKING — not a failure. (Common on a reinstall: the cache survives outside the
+  #    install dir, and the pre-reinstall job hit it.)
+  #  - COLD cache (real error): nothing to seed from AND the cache is empty → the caller must
+  #    run a routing job first (cache OFF / fresh runner) so the runner records codeload URLs.
+  if ls "$CACHE_DIR"/*/*.tar.gz >/dev/null 2>&1; then
+    n_have=$(ls "$CACHE_DIR"/*/*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+    echo "Nothing new to seed: latest Worker log ($WL) shows no codeload fetches — the last job"
+    echo "served all actions from the cache (File.Copy). Lever B is already working; cache has"
+    echo "$n_have archive(s) in $CACHE_DIR. ✓"
+    exit 0
+  fi
+  echo "FATAL: no codeload tarball fetches in $WL AND the cache ($CACHE_DIR) is EMPTY —" >&2
+  echo "       run a routing job first (cache OFF / fresh runner) so the runner records the" >&2
+  echo "       codeload URLs to seed from, then re-run this." >&2
+  exit 2
+fi
 
 echo "Seeding action-archive-cache: $CACHE_DIR"
 echo "Source (drift-proof): $WL"

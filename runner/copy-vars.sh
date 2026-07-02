@@ -5,7 +5,8 @@
 # --check verifies every repo still MATCHES the source.
 #   ./copy-vars.sh --to groundnuty/macf-science-agent --fleet macf          # copy
 #   ./copy-vars.sh --to groundnuty/macf-science-agent --fleet macf --check  # compare only
-# Needs GH_TOKEN (variables:write to set; read to compare — the bot HAS variables:write).
+# Auth: a bot GH_TOKEN (variables:write) if exported, else the invoking operator's stored
+# `gh auth` (so `make reinstall`/reconcile — which run copy-vars as the operator — just work).
 set -uo pipefail
 cd "$(dirname "$0")"
 REG="${MACF_RUNNERS_YAML:-runners.yaml}"
@@ -20,7 +21,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$TO" ] && [ -n "$FLEET" ] || { echo "FATAL: --to owner/repo --fleet <name> required" >&2; exit 2; }
-[ -n "${GH_TOKEN:-}" ] || { echo "FATAL: GH_TOKEN unset" >&2; exit 2; }
+
+# Auth: prefer a bot GH_TOKEN if one is exported, else fall back to the invoking operator's
+# stored `gh auth` (reconcile-runner.sh calls copy-vars as the OPERATOR, who has repo admin +
+# variables:write — no GH_TOKEN is preset there). Fail loud only if NEITHER is available.
+if [ -z "${GH_TOKEN:-}" ] && ! gh auth status >/dev/null 2>&1; then
+  echo "FATAL: no GH_TOKEN and no gh auth — export GH_TOKEN (needs variables:write) or run 'gh auth login'" >&2
+  exit 2
+fi
+# gh with the bot token if set, else the operator's stored auth:
+gh_do() { if [ -n "${GH_TOKEN:-}" ]; then GH_TOKEN="$GH_TOKEN" gh "$@"; else gh "$@"; fi; }
 
 SRC="$(yq -o=json "$REG" | jq -r --arg f "$FLEET" '.fleets[]|select(.name==$f).var_source // empty')"
 VARS="$(yq -o=json "$REG" | jq -r --arg f "$FLEET" '.fleets[]|select(.name==$f).shared_vars[]? // empty')"
@@ -28,7 +38,7 @@ VARS="$(yq -o=json "$REG" | jq -r --arg f "$FLEET" '.fleets[]|select(.name==$f).
 [ -n "$VARS" ] || { echo "fleet '$FLEET' has no shared_vars — nothing to copy."; exit 0; }
 [ "$SRC" = "$TO" ] && { echo "$TO IS the var_source — nothing to copy."; exit 0; }
 
-getvar() { GH_TOKEN=$GH_TOKEN gh api "/repos/$1/actions/variables/$2" --jq '.value' 2>/dev/null || echo "__ABSENT__"; }
+getvar() { gh_do api "/repos/$1/actions/variables/$2" --jq '.value' 2>/dev/null || echo "__ABSENT__"; }
 
 drift=0
 for v in $VARS; do
@@ -40,7 +50,7 @@ for v in $VARS; do
     else echo "  [DRIFT] $v on $TO != $SRC"; drift=1; fi
   else
     if [ "$sval" = "$dval" ]; then echo "  [ ok ] $v already matches — skip";
-    else GH_TOKEN=$GH_TOKEN gh variable set "$v" --repo "$TO" --body "$sval" >/dev/null 2>&1 \
+    else gh_do variable set "$v" --repo "$TO" --body "$sval" >/dev/null 2>&1 \
         && echo "  [set ] $v copied $SRC → $TO" || { echo "  [FAIL] could not set $v on $TO"; drift=1; }; fi
   fi
 done
