@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": [
+    "yq-go@latest",
+    "jq@latest",
+    "gh@latest"
+  ],
+  "shell": {
+    "init_hook": [
+      "if [ -n \"$ZSH_VERSION\" ] && [ -f \"$DEVBOX_PROJECT_ROOT/make-completion.zsh\" ]; then . \"$DEVBOX_PROJECT_ROOT/make-completion.zsh\"; elif [ -n \"$BASH_VERSION\" ] && [ -f \"$DEVBOX_PROJECT_ROOT/make-completion.bash\" ]; then . \"$DEVBOX_PROJECT_ROOT/make-completion.bash\"; fi",
+      "echo 'runner tooling ready (yq/jq/gh on PATH) — try: make reinstall-<TAB>'"
+    ]
+  }
+}
