@@ -15,6 +15,14 @@
 #                 allowlist ONCE there; every runner-repo copies from + is verified
 #                 against it (kills the "set MACF_TRUSTED_ACTORS in N repos" drift).
 #   shared_vars — the GitHub Actions variables copied from var_source to each runner-repo.
+#
+# MULTI-RUNNER-PER-HOST: each runner below installs ISOLATED under
+# /mnt/volume1/macf-runners/<name> (the big volume — root disk is 84% full; override via
+# MACF_RUNNER_BASE), computed by reconcile-runner.sh from the `name` field. ALL runners
+# SHARE one action-archive-cache (/mnt/volume1/macf-runners/action-archive-cache — Lever B,
+# the router actions are identical across repos) + the ONE low-priv macf-runner OS user
+# (set up once per VM by setup-macf-runner-user.sh, not per-runner). Service names don't
+# collide either — svc.sh derives actions.runner.<owner>-<repo>.<name>.service per repo.
 fleets:
   - name: macf
     registry: groundnuty/groundnuty
@@ -27,6 +35,12 @@ fleets:
         status: live            # non-ephemeral systemd service (svc.sh), listening+serving 2026-07-01
         note: safe first spike; private = no anonymous fork surface. Non-ephemeral (survives jobs);
               origin-routing (macf-actions#60) merged + MACF_TRUSTED_ACTORS set → serves trusted routing.
+      - name: macf-devops-toolkit
+        repo: groundnuty/macf-devops-toolkit
+        visibility: private
+        status: ready            # next in queue — installs onto /mnt/volume1/macf-runners/macf-devops-toolkit
+        note: this repo's own routing runs here. private = no anonymous fork surface, same as
+              macf-science-agent. `make runner-macf-devops-toolkit` to stand up.
       # - name: macf
       #   repo: groundnuty/macf
       #   visibility: public

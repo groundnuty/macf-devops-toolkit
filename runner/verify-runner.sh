@@ -20,6 +20,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$REPO" ] || { echo "FATAL: --repo owner/repo required" >&2; exit 2; }
+REPO_SLUG="${REPO//\//-}"   # owner/repo -> owner-repo, matches svc.sh's actions.runner.<slug>.<name>.service
 
 fail=0 warn=0
 ck()  { printf '  [ ok ] %s\n' "$1"; }
@@ -89,8 +90,11 @@ fi
 # unprivileged — this is what makes `make reinstall-<name>` correctly see a dead runner as
 # unhealthy instead of silently treating "no service" as fine and skipping the reinstall
 # (devops-toolkit reinstall-skips-install bug, 2026-07-02).
+# Filtered by THIS repo's slug — with multiple runners on one host, an unfiltered `head -1`
+# can grab a SIBLING runner's service and report the wrong one's Restart= policy
+# (devops-toolkit multi-runner-per-host fix).
 if command -v systemctl >/dev/null 2>&1; then
-  SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE 'actions\.runner\.[^ ]+\.service' | head -1)"
+  SVC="$(systemctl list-units --type=service --all 2>/dev/null | grep -oE "actions\.runner\.${REPO_SLUG}\.[^ ]+\.service" | head -1)"
   if [ -n "$SVC" ]; then
     POLICY="$(systemctl show "$SVC" -p Restart --value 2>/dev/null)"
     if [ "$POLICY" = "always" ]; then ck "auto-restart oversight: $SVC Restart=always"

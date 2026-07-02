@@ -19,6 +19,7 @@ set -uo pipefail
 
 CACHE_DIR="${MACF_ACTION_ARCHIVE_CACHE:-/opt/macf-runner/action-archive-cache}"
 DIAG_DIR="${MACF_RUNNER_DIAG:-/opt/macf-runner/actions-runner/_diag}"
+RUNNER_DIR_DISPLAY="$(dirname "$DIAG_DIR")"   # _diag's parent = the actions-runner dir (apply notes below)
 
 command -v curl >/dev/null || { echo "FATAL: curl not found" >&2; exit 2; }
 command -v tar  >/dev/null || { echo "FATAL: tar not found" >&2; exit 2; }
@@ -80,13 +81,13 @@ cat <<APPLY
   # 1. ensure the runner (macf-runner) can read it
   sudo chown -R macf-runner:macf-runner "$CACHE_DIR"
   # 2. inject the env via the runner's supported .env (svc.sh-regen-safe, clean toggle)
-  echo 'ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=$CACHE_DIR' | sudo tee -a /opt/macf-runner/actions-runner/.env
+  echo 'ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE=$CACHE_DIR' | sudo tee -a $RUNNER_DIR_DISPLAY/.env
   # 3. restart the service to pick it up
-  cd /opt/macf-runner/actions-runner && sudo ./svc.sh stop && sudo ./svc.sh start
+  cd $RUNNER_DIR_DISPLAY && sudo ./svc.sh stop && sudo ./svc.sh start
 
 ── Verify (empirical) ── after the next routed job, its Worker log should say
   "already exists in cache directory" (File.Copy) instead of "Save archive 'https://codeload…'".
 
 ── Toggle OFF (for the A/B baseline) ── remove the ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE
-  line from /opt/macf-runner/actions-runner/.env + restart → back to codeload fetch.
+  line from $RUNNER_DIR_DISPLAY/.env + restart → back to codeload fetch.
 APPLY

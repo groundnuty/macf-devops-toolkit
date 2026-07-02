@@ -35,6 +35,16 @@ REG := runners.yaml
 J   := $(YQ) -o=json $(REG) | $(JQ) -r
 RUNNERS := $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].runners[].name' 2>/dev/null)
 FLEETS  := $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].name' 2>/dev/null)
+
+# MULTI-RUNNER-PER-HOST: each runner installs isolated under
+# $(MACF_RUNNER_BASE)/<name> on the big volume (root disk is 84% full), sharing ONE
+# action-archive-cache + the ONE macf-runner OS user across all runners. `?=` picks up an
+# operator-exported MACF_RUNNER_BASE the same way reconcile-runner.sh's bash
+# `${MACF_RUNNER_BASE:-...}` does, so the two stay in lockstep without hardcoding twice.
+# `runner-<name>`/`reinstall-<name>` compute this INSIDE reconcile-runner.sh (it has
+# --name); `uninstall-<name>` below calls uninstall-runner.sh DIRECTLY (bypassing
+# reconcile), so it threads the same formula here — the one unavoidable duplication.
+MACF_RUNNER_BASE ?= /mnt/volume1/macf-runners
 .DEFAULT_GOAL := help
 
 .PHONY: help
@@ -69,8 +79,15 @@ $(foreach f,$(FLEETS),$(eval $(call _fleet_rule,$(f))))
 
 # uninstall-<name>: tear down ONE runner (stop+remove svc.sh service + Restart drop-in +
 # de-register from GitHub). Repo resolved from runners.yaml; prompts for the remove-token.
+# Threads MACF_RUNNER_DIR = $(MACF_RUNNER_BASE)/<name>/actions-runner — the ONLY per-runner
+# path uninstall-runner.sh actually consumes — via `sudo env VAR=val cmd`, not `sudo -E`:
+# sudo resets the environment by default (env_reset) and honoring -E depends on sudoers
+# policy the operator's shell may not have; `env VAR=val` is an explicit assignment to the
+# child, unaffected by that policy. This target calls uninstall-runner.sh DIRECTLY (not via
+# reconcile-runner.sh, which has --name and computes the same path internally) — see the
+# MACF_RUNNER_BASE comment above for why the formula is duplicated here.
 define _uninstall_rule
-uninstall-$(1): ; sudo ./uninstall-runner.sh --repo $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].runners[]|select(.name=="$(1)").repo' 2>/dev/null)
+uninstall-$(1): ; sudo env MACF_RUNNER_DIR=$(MACF_RUNNER_BASE)/$(1)/actions-runner ./uninstall-runner.sh --repo $(shell $(YQ) -o=json $(REG) 2>/dev/null | $(JQ) -r '.fleets[].runners[]|select(.name=="$(1)").repo' 2>/dev/null)
 endef
 $(foreach r,$(RUNNERS),$(eval $(call _uninstall_rule,$(r))))
 
