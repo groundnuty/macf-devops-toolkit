@@ -69,3 +69,13 @@ k3s/.token
 # The CONTENT/recipe is documented in design/DR-005...; the files are per-home local state.
 .macf/
 .claude/.macf/
+
+# DR-040 Decision 4 maintenance-lock (fleet/maintenance-lock.sh, #158) — ephemeral
+# per-upgrade runtime state, never git-persisted (on K8s it's a pod annotation, no
+# file at all). The default path is $HOME/.macf/maintenance-locks/ (already outside
+# any repo checkout, same as PAUSED_DIR/LAST_EXIT_DIR/STATE_DIR/ALERT_DIR); these
+# patterns are defense-in-depth in case MACF_MAINT_LOCK_DIR is ever pointed at an
+# in-repo path (e.g. local dev/testing convenience).
+fleet/locks/
+.macf/maintenance-locks/
+.claude/.macf/maintenance.lock
