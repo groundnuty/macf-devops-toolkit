@@ -22,11 +22,22 @@
 # (the operator clicks through). A permission/trust prompt at launch still blocks-and-
 # reports by design (#132) — so unattended needs the relaunch to be ceremony-only.
 #
-# Refs: design/DR-007-fleet-upgrade-orchestration.md ; DR-006 §A.7 ; macf DR-031 ; macf#682.
+# MAINTENANCE-LOCK (DR-040 Decision 4, macf-devops-toolkit#158, this file = SET-side):
+# roll_one() acquires a per-agent lock BEFORE it touches the process (SIGTERM/relaunch),
+# heartbeats it via a background loop through the whole stop→restart→verify window, and
+# — per DR-040 Decision 3 (transactional halt) — RELEASES it ONLY on a confirmed clean
+# GREEN. A halted/interrupted roll deliberately LEAVES the lock in place (a bounded
+# operator-grace window); it self-frees via the lock's own TTL once heartbeats stop. See
+# maintenance-lock.sh's header for the full contract this file is the write-side of.
+#
+# Refs: design/DR-007-fleet-upgrade-orchestration.md ; DR-006 §A.7 ; macf DR-031 ; macf#682 ;
+#       DR-040 Decision 4 (maintenance-lock) ; fleet/maintenance-lock.sh.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."   # repo root (for cert paths)
+# shellcheck source=./maintenance-lock.sh
+. "$(pwd)/fleet/maintenance-lock.sh"
 MANIFEST="${MACF_DESIRED_AGENTS:-$HOME/.macf/desired-agents.yaml}"
 TARGET=""                # --target <ver>; default = npm latest channel-server
 CA="${MACF_CA_CERT_FILE:-$HOME/.macf/certs/macf/ca-cert.pem}"
@@ -47,6 +58,28 @@ SESSION_BACKUP_DIR="${MACF_SESSION_BACKUP_DIR:-$HOME/.macf/session-backups}"
 SESSION_BACKUP_KEEP="${MACF_SESSION_BACKUP_KEEP:-5}"          # rotating backups kept per agent
 CLAUDE_PROJECTS_DIR="${MACF_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
 EXECUTE=0
+
+# --- maintenance-lock bookkeeping (DR-040 Decision 4, #158) ------------------
+# Tracks the SINGLE agent + heartbeat-loop PID currently protected (the roll is
+# one-at-a-time, so at most one lock is ever held by this process). The
+# top-level trap below is the defense-in-depth backstop for a hard interrupt
+# (Ctrl-C/SIGTERM/an uncaught `set -e` bail) mid-roll: it STOPS the heartbeat
+# loop so an interrupted script never leaves an orphaned refresher running, but
+# it deliberately does NOT release the lock — see _lock_cleanup_keep below and
+# DR-040 Decision 3 (transactional halt). The lock frees itself via its own TTL
+# once heartbeats stop (maintenance-lock.sh's crash-safety model).
+CURRENT_LOCK_AGENT=""
+CURRENT_HB_PID=""
+_lock_cleanup_keep() {   # stop heartbeat; LEAVE the lock (used on HALT + trap)
+  [ -n "$CURRENT_HB_PID" ] && kill "$CURRENT_HB_PID" 2>/dev/null || true
+  CURRENT_HB_PID=""
+}
+_lock_cleanup_release() { # stop heartbeat AND release (used ONLY on clean GREEN)
+  _lock_cleanup_keep
+  [ -n "$CURRENT_LOCK_AGENT" ] && lock_release "$CURRENT_LOCK_AGENT"
+  CURRENT_LOCK_AGENT=""
+}
+trap _lock_cleanup_keep EXIT INT TERM
 
 usage() {
   cat <<USAGE
@@ -203,17 +236,28 @@ session_survived() {
 }
 
 # roll_one <agent> <ws> — the per-agent upgrade step (EXECUTE path). Returns 0 green, 1 fail.
+# maintenance-lock ACQUIRE (DR-040 Decision 4, before anything touches the process) →
 # session-backup+pre-state → pin-bump → graceful SIGTERM (exit 143 → #627 deregister ~1.5s) →
 # detached relaunch (claude.sh installs the new pin) → verify /health.version==TARGET → assert
-# the session survived (Pattern A). A bad release OR a state-loss HALTS the roll.
+# the session survived (Pattern A). A bad release OR a state-loss HALTS the roll — the lock is
+# LEFT IN PLACE on any HALT (DR-040 Decision 3) and released ONLY on a confirmed clean GREEN.
 roll_one() {
   local agent="$1" ws="$2" sess="macf@$1" pid="" pre=""
+  # [lock] acquire BEFORE anything below touches the process — the busy-gate + the
+  # classify pass already confirmed this agent is idle-and-behind, so the process
+  # is about to be stopped. A concurrent watchdog sweep landing anywhere from here
+  # to the end of this function must see an ACTIVE lock, not a reachable-but-about-
+  # to-die agent it could race a Tier-2 restart against.
+  lock_acquire "$agent" "$TARGET"
+  CURRENT_LOCK_AGENT="$agent"
+  lock_heartbeat_loop "$agent" "$MAINT_LOCK_HEARTBEAT_INTERVAL" "$(lock_heartbeat_max_iters "$MAINT_LOCK_HEARTBEAT_INTERVAL")" &
+  CURRENT_HB_PID=$!
   backup_session "$agent" "$ws"
   pre="$(session_state "$agent" "$ws")"
   echo "    [0/4] session pre-state: ${pre:-<none>}  (backed up; will assert it survives)"
   echo "    [1/4] bump pins → $TARGET  (npx @groundnuty/macf@$TARGET update --dir $ws --all --yes)"
   ( cd "$ws" && npx -y "@groundnuty/macf@$TARGET" update --dir "$ws" --all --yes >/dev/null 2>&1 ) \
-    || { echo "    HALT: pin-bump failed for $agent"; return 1; }
+    || { echo "    HALT: pin-bump failed for $agent"; _lock_cleanup_keep; return 1; }
   echo "    [2/4] graceful restart (SIGTERM claude → relaunch claude.sh, new pin installs on launch)"
   for p in $(pgrep -x claude 2>/dev/null || true); do
     [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$ws" ] && pid="$p"
@@ -230,11 +274,19 @@ roll_one() {
     lv="$(live_version "$agent")"
     if [ "$lv" = "$TARGET" ]; then
       # [4/4] version is green — now assert the session survived the restart (Pattern A)
-      session_survived "$agent" "$ws" "$pre" || return 1
+      session_survived "$agent" "$ws" "$pre" || { _lock_cleanup_keep; return 1; }
+      # [lock] RELEASE — ONLY on a confirmed clean GREEN (DR-040 Decision 3). Hands
+      # the agent back to normal watchdog reconciliation immediately.
+      _lock_cleanup_release
       echo "    [4/4] GREEN — $agent up on $TARGET (${waited}s), session preserved. Next agent."
       return 0
     fi
   done
+  # [lock] HALT (verify-timeout): stop the heartbeat but LEAVE the lock in place —
+  # it self-clears via its own TTL once heartbeats stop (DR-040 Decision 3); this is
+  # a deliberate bounded grace window for the operator to look before the watchdog's
+  # Tier-1/2/3 ladder would otherwise start acting on a possibly-broken agent.
+  _lock_cleanup_keep
   echo "    HALT: $agent did NOT come up on $TARGET within ${VERIFY_TIMEOUT}s (live=${lv:-down}). Rolling STOPS here"
   echo "          (a bad release cannot take the whole fleet down — the rest stay on their current version)."
   return 1

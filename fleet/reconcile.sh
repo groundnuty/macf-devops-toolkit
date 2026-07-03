@@ -7,7 +7,9 @@
 #   - desired & running-but-deaf  → HEAL     (the tiered ladder, §"Tiered response")
 #   - desired-down                → SKIP     (never resurrect — don't-fight-the-operator)
 #       desired-down = `paused` sentinel (explicit, §A.3) OR last-exit==0 (the
-#       operator typed `/exit`, §B.1) — the two compose (DR-031 §A.3 unification).
+#       operator typed `/exit`, §B.1) OR an ACTIVE maintenance lock (DR-040 Decision
+#       4 — "upgrade ≠ outage", macf-devops-toolkit#158) — the three compose
+#       (DR-031 §A.3 unification, extended).
 #   - desired & reachable+accept  → OK
 #
 # This is the Kubernetes reconcile model on the VM: desired (the manifest) vs
@@ -16,12 +18,16 @@
 # per-agent `ack_agent` (kebab routing-label), NOT `name` (registry-key form).
 #
 # INCREMENT 1: the reconcile ENGINE (decisions, report-only).
-# INCREMENT 2 (this): ACTION EXECUTION — the exit-code intent layer (B.1/B.2),
+# INCREMENT 2: ACTION EXECUTION — the exit-code intent layer (B.1/B.2),
 #   LAUNCH (detached, exit-code-capture wrapper), and the tiered HEAL ladder
 #   (Tier-1 gated inject → Tier-2 graceful-restart [--allow-restart] → Tier-3
 #   alert). DRY-RUN BY DEFAULT — constructs + prints commands; `--execute` runs.
+# INCREMENT 6 (this, #158): the MAINTENANCE-LOCK read-side (DR-040 Decision 4) —
+#   an active lock (see maintenance-lock.sh) SKIPS every watchdog action for that
+#   agent, same tier as the `paused` sentinel. fleet/upgrade.sh is the write-side.
 #
-# Refs: design/DR-006-vm-cron-watchdog-agent-supervision-impl.md ; macf DR-031.
+# Refs: design/DR-006-vm-cron-watchdog-agent-supervision-impl.md ; macf DR-031 ;
+#       DR-040 Decision 4 (maintenance-lock) ; fleet/maintenance-lock.sh.
 
 set -euo pipefail
 
@@ -67,6 +73,14 @@ RATE_LIMIT_PANE_LINES="${MACF_RATE_LIMIT_PANE_LINES:-40}"
 # (Anthropic capacity throttles are transient minutes). Tune to your cron interval.
 BACKOFF_STUCK_MAX="${MACF_BACKOFF_STUCK_MAX:-3}"
 
+# DR-040 Decision 4 — the maintenance-lock primitive ("upgrade ≠ outage"): shared
+# with fleet/upgrade.sh, which SETS the lock; this file only READS it (lock_active)
+# before taking ANY watchdog action on an agent. See maintenance-lock.sh's header
+# for the full contract + crash-safety model. Sourced BEFORE arg-parsing so
+# --maint-lock-dir (below) can override the env-var default afterward.
+# shellcheck source=./maintenance-lock.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/maintenance-lock.sh"
+
 usage() {
   cat <<USAGE
 reconcile.sh — DR-006 desired-state reconciler (increment 2: action execution)
@@ -79,6 +93,7 @@ reconcile.sh — DR-006 desired-state reconciler (increment 2: action execution)
   --last-exit-dir <dir> per-agent last-exit-code dir (default: \$HOME/.macf/last-exit)
   --state-dir <dir>     cross-sweep escalation-counter dir (default: \$HOME/.macf/watchdog-state)
   --heartbeat-file <f>  watchdog self-heartbeat file (default: \$HOME/.macf/watchdog-heartbeat)
+  --maint-lock-dir <d>  maintenance-lock dir (default: \$HOME/.macf/maintenance-locks, DR-040 §4)
   --execute             ACTUALLY act (launch/inject/restart/alert). Default: dry-run.
   --allow-restart       enable Tier-2 graceful-restart (held behind operator sign-off).
   -h, --help
@@ -100,6 +115,7 @@ while [ $# -gt 0 ]; do
     --last-exit-dir) LAST_EXIT_DIR="$2"; shift 2 ;;
     --state-dir)     STATE_DIR="$2"; shift 2 ;;
     --heartbeat-file) HEARTBEAT_FILE="$2"; shift 2 ;;
+    --maint-lock-dir) MAINT_LOCK_DIR="$2"; shift 2 ;;
     --execute)       EXECUTE=1; shift ;;
     --allow-restart) ALLOW_RESTART=1; shift ;;
     -h|--help)       usage; exit 0 ;;
@@ -479,6 +495,20 @@ while IFS=$'\t' read -r agent workspace; do
   fi
   if [ -z "$reachable" ] && [ "$(cat "$LAST_EXIT_DIR/$agent" 2>/dev/null || echo X)" = "0" ]; then
     printf '%-16s %-10s %s\n' "$agent" "SKIP" "not running + last-exit==0 (operator /exit) — desired-down, not restarted"
+    continue
+  fi
+
+  # desired-down (SKIP): a MAINTENANCE LOCK is active (DR-040 Decision 4 — "upgrade
+  # ≠ outage"). fleet/upgrade.sh acquires this lock BEFORE it stops an agent for a
+  # planned version-roll and heartbeats it through the stop→restart→verify window;
+  # a crashed/interrupted upgrade simply stops heartbeating, so the lock goes STALE
+  # (lock_active reads false) and the watchdog resumes keep-alive on its own — no
+  # manual unlock needed (see maintenance-lock.sh's crash-safety model). This check
+  # SUPPRESSES EVERY watchdog action below (LAUNCH + the whole HEAL ladder), not just
+  # LAUNCH: a Tier-2 restart racing the upgrade's own SIGTERM/relaunch would be
+  # exactly the double-launch / wrong-session bug this primitive exists to prevent.
+  if lock_active "$agent"; then
+    printf '%-16s %-10s %s\n' "$agent" "SKIP" "maintenance lock active ($(lock_info "$agent")) — upgrade in progress, not touched"
     continue
   fi
 

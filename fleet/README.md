@@ -14,7 +14,7 @@ Each run reconciles the delta between **desired** (the manifest) and **actual**
 | desired & reachable+accepting | **OK** |
 | desired & not-registered/running | **LAUNCH** (cold-start / reboot-recovery) |
 | desired & registered-but-deaf | **HEAL** (the tiered ladder) |
-| desired-down (`paused`) | **SKIP** (never resurrect — don't-fight-the-operator) |
+| desired-down (`paused` OR active maintenance lock) | **SKIP** (never resurrect — don't-fight-the-operator) |
 
 This is the Kubernetes reconcile model on the VM (desired replicas vs running
 pods); on K8s it is native. The reconciler **consumes** `fleet doctor --json` —
@@ -33,6 +33,13 @@ it does not re-implement detection. Identity keys on the per-agent **`ack_agent`
   registry (that is *actual* state; this is *desired*).
 - **`test-reconcile.sh`** — offline unit tests (canned fixtures, no live fleet).
 - **`testdata/`** — `fleet doctor --json` fixtures.
+- **`upgrade.sh`** — DR-007 rolling version-upgrade (VM reference impl). See its
+  own header + `MAINTENANCE-LOCK.md` for the lock it holds while rolling an agent.
+- **`test-upgrade.sh`** — offline classify/busy-gate/session-guard tests for `upgrade.sh`.
+- **`maintenance-lock.sh`** — the DR-040 Decision-4 maintenance-lock primitive
+  ("upgrade ≠ outage", macf-devops-toolkit#158). Sourced by both `reconcile.sh`
+  (read-side) and `upgrade.sh` (write-side). Full design writeup: **`MAINTENANCE-LOCK.md`**.
+- **`test-maintenance-lock.sh`** — offline library + `reconcile.sh`-integration tests.
 
 ## Intent signal — the exit code (DR-006 Amendment B)
 
@@ -81,6 +88,14 @@ the explicit `paused` sentinel: **desired-down = `paused` OR `last-exit==0`**.
   substrate-native equivalent — `restartPolicy: OnFailure` consumes the *same*
   exit-code contract; the agent contract `/health` + be-replaceable + exit-code-intent
   is unchanged). Plus the heartbeat external consumer (devops-toolkit#123).
+- **Increment 6 (this, #158):** the **maintenance-lock** primitive (DR-040
+  Decision 4 — "upgrade ≠ outage"). `upgrade.sh` acquires + heartbeats a
+  per-agent lock around its stop→restart→verify window; `reconcile.sh` SKIPs
+  (instead of LAUNCH/HEAL) any agent with an active lock. Crash-safe: a
+  crashed/interrupted upgrade simply stops heartbeating, the lock goes stale,
+  and the watchdog resumes on its own — no manual unlock. See
+  **`MAINTENANCE-LOCK.md`** for the full design (lock-path choice, release
+  policy, TTL/heartbeat sizing, and the K8s driver interface).
 
 ## Run
 
@@ -102,6 +117,8 @@ the explicit `paused` sentinel: **desired-down = `paused` OR `last-exit==0`**.
 
 # offline / tests:
 ./fleet/test-reconcile.sh
+./fleet/test-upgrade.sh
+./fleet/test-maintenance-lock.sh
 ```
 
 Requires `jq` (and `macf` ≥ 0.2.39 for `fleet doctor --json`). In cron it runs
