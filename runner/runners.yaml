@@ -50,9 +50,15 @@ fleets:
         note: "auditor routing runs here. private repo means no fork exposure, independent of
           macf-actions#59. Deploy with make runner-macf-auditor-agent (auto-mints token from
           operator gh creds; sudo for systemd)."
-      # - name: macf
-      #   repo: groundnuty/macf
-      #   visibility: public
-      #   status: blocked        # GATED on macf-actions#59 origin-routing (confirmed OPEN 2026-07-03) —
-      #                          # public + highest-traffic; needs trusted→self-hosted routing BEFORE registering
-      #   note: public repo — origin-routing (#59) first, THEN register
+      - name: macf
+        repo: groundnuty/macf
+        visibility: public
+        status: ready            # origin-routing (macf-actions#59/#60) LANDED in v3.4.x + MACF_TRUSTED_ACTORS
+                                 # already set on macf. Register FIRST (inert on macf's current @v3.3.0 pin),
+                                 # THEN code bumps macf's agent-router pin @v3.3.0 -> @v3.4.1 to ACTIVATE (macf#769).
+        note: "PUBLIC + highest-traffic repo. Two safety layers now exist: origin-routing
+          (macf-actions#60, in v3.4.x) plus the deploy-side fork-PR-approval precheck (#161).
+          ORDER MATTERS: register here FIRST (inert on macf's current @v3.3.0 pin, no job targets
+          self-hosted yet), THEN merge macf#769 (the @v3.4.1 workflow bump) to activate — registering
+          AFTER the bump would queue trusted routing with no runner. Fork-PR-approval must be
+          all_external_contributors; the precheck (#161) enforces it at register time."
