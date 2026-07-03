@@ -37,12 +37,22 @@ fleets:
               origin-routing (macf-actions#60) merged + MACF_TRUSTED_ACTORS set → serves trusted routing.
       - name: macf-devops-toolkit
         repo: groundnuty/macf-devops-toolkit
+        visibility: public      # CORRECTED 2026-07-03 — GitHub reports PUBLIC (was mislabeled private)
+        status: live            # non-ephemeral svc.sh on /mnt/volume1/macf-runners/macf-devops-toolkit (2026-07-02)
+        note: "PUBLIC repo. origin-routing (macf-actions#59) is NOT yet landed (OPEN), so
+          self-hosted fork-safety currently rests ONLY on the repo native fork-PR-approval
+          setting (operator-enabled). Once that lands, origin-routing is the defense-in-depth
+          second layer. Flagged for operator review on the devops#90 thread."
+      - name: macf-auditor-agent
+        repo: groundnuty/macf-auditor-agent
         visibility: private
-        status: ready            # next in queue — installs onto /mnt/volume1/macf-runners/macf-devops-toolkit
-        note: this repo's own routing runs here. private = no anonymous fork surface, same as
-              macf-science-agent. `make runner-macf-devops-toolkit` to stand up.
+        status: ready            # private = no anonymous fork surface, safe like macf-science-agent
+        note: "auditor routing runs here. private repo means no fork exposure, independent of
+          macf-actions#59. Deploy with make runner-macf-auditor-agent (auto-mints token from
+          operator gh creds; sudo for systemd)."
       # - name: macf
       #   repo: groundnuty/macf
       #   visibility: public
-      #   status: blocked        # needs macf-actions#59 origin-routing BEFORE registering
-      #   note: public repo — origin-routing first
+      #   status: blocked        # GATED on macf-actions#59 origin-routing (confirmed OPEN 2026-07-03) —
+      #                          # public + highest-traffic; needs trusted→self-hosted routing BEFORE registering
+      #   note: public repo — origin-routing (#59) first, THEN register
