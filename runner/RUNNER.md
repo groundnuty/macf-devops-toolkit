@@ -65,6 +65,49 @@ variable. Contained by layers 3–4 to "can send a routed tmux keystroke," not s
 
 ---
 
+## Fork-PR-approval precheck (public repos)
+
+Layer 1 above (origin-routing, macf-actions#59) is the intended **primary** control —
+but it is **not landed yet**. Until it lands, the *only* thing standing between an
+untrusted fork PR and code execution on this VM is GitHub's own native "require
+approval for outside collaborators" fork-PR setting on the repo. `install-runner.sh`
+now asserts that setting is in its strictest state **before** it does any
+download/register/token-mint work, so an unsafe public repo aborts up front instead
+of quietly registering a runner that origin-routing hasn't caught up to yet.
+
+- **What it checks:** on a repo whose visibility is `public` (or whose visibility
+  couldn't be determined — treated as public, conservatively), the runner
+  `/repos/{owner}/{repo}/actions/permissions/fork-pr-contributor-approval` policy
+  must be `all_external_contributors` — the setting that gates *every* outside fork
+  PR behind a maintainer's manual "Approve and run" click before any workflow
+  executes. The two weaker settings (`first_time_contributors`,
+  `first_time_contributors_new_to_github`) both let a once-merged / once-approved
+  contributor trigger unapproved runs afterwards — not safe for a public repo with a
+  self-hosted runner attached, and the precheck FATALs (exit 2) on either of them,
+  on an empty/unreadable policy, or on any endpoint failure. It never silently
+  proceeds on "couldn't confirm the policy."
+- **Needs OPERATOR creds, not the bot's.** Visibility (`.visibility`) is readable
+  with the bot's own token (`metadata:read`). The approval-policy endpoint needs
+  admin / `repo` scope — the bot App is **always 403** here (same shape as
+  `install-runner.sh`'s own token auto-mint being 403 on `administration:write`), so
+  the check runs `gh` as the invoking operator (`sudo -u "$SUDO_USER" -- gh`,
+  mirroring `mint_token()`'s pattern) rather than as root/macf-runner.
+- **A repo confirmed `private` or `internal` skips the check entirely** — there's no
+  anonymous fork surface for the setting to matter on.
+- **Override:** `MACF_RUNNER_SKIP_FORK_APPROVAL_CHECK=1` skips the whole check with a
+  loud one-line warning (sister to the repo's other `MACF_SKIP_*`-family escape
+  hatches). Legitimate uses: macf-actions#59 (origin-routing) has landed and is now
+  the real gate, or a deliberate, documented operator call. This precheck is
+  **belt-and-suspenders once #59 lands** — it doesn't go away, since origin-routing
+  and fork-PR-approval are independent controls (a routing-logic bug shouldn't also
+  require a GitHub-setting misconfiguration to become exploitable).
+- **Implementation:** `runner/fork-pr-approval-check.sh` — sourced by
+  `install-runner.sh`. The decision table (SKIP/PASS/FATAL given a visibility +
+  policy pair) is factored into a pure `_fork_approval_decide()` function so it's
+  unit-testable without calling `gh` — see `runner/test-fork-approval.sh`.
+
+---
+
 ## The `macf-runner` capability boundary
 
 The runner must inject routed prompts into the agents' tmux sessions — nothing more.
@@ -401,15 +444,22 @@ but unseeded (fresh, pre-first-job); **FAIL** = not armed.
 - `copy-vars.sh` — copy/`--check` a fleet's shared vars from its `var_source` (the var-drift killer).
 - `verify-runner.sh` — the Pattern-A health check (per repo).
 - `setup-macf-runner-user.sh` — create the low-priv user + the narrow send-helper sudoers rule.
+- `fork-pr-approval-check.sh` — the fork-PR-approval-precheck library (see "Fork-PR-approval
+  precheck (public repos)" above); sourced by `install-runner.sh`. Its decision table
+  (`_fork_approval_decide`) is a pure function, kept separate from the `gh`-calling wrapper
+  (`check_fork_pr_approval`) specifically so it's unit-testable.
 - `install-runner.sh` — download the pinned `actions/runner`, `config.sh` repo-scoped (registration
   token **auto-minted** via the invoking operator's `gh` creds, prompt-fallback), install the
   non-ephemeral `svc.sh` service + `Restart=always` oversight, and arm Lever B (archive-cache).
+  Runs the fork-PR-approval precheck FIRST, before any of that.
 - `uninstall-runner.sh` — stop/remove the `svc.sh` service + drop-in, and de-register from GitHub
   (`config.sh remove`; remove-token **auto-minted** the same way, prompt-fallback, non-fatal WARN
   if neither is available — the rest of the teardown still proceeds).
 - `seed-action-cache.sh` — drift-proof + fail-safe action-archive-cache seeder (Lever B).
 - `run-ephemeral-loop.sh` — re-register + run-one-job loop (the ephemeral respawn).
 - `macf-runner@.service` — systemd template unit (one instance per repo).
+- `test-fork-approval.sh` — offline unit tests for `fork-pr-approval-check.sh`'s decision table
+  (see "Fork-PR-approval precheck (public repos)" above).
 
 ## Refs
 

@@ -42,7 +42,20 @@ id "$RUNNER_USER" >/dev/null 2>&1 || { echo "FATAL: user $RUNNER_USER missing �
 # refuse to clobber an existing registration (remove-then-readd is uninstall-runner.sh's job)
 [ -f "$RUNNER_DIR/.runner" ] && { echo "FATAL: already registered ($RUNNER_DIR/.runner exists). Run: sudo ./uninstall-runner.sh --repo $REPO  first." >&2; exit 2; }
 
-# 0. token — precedence: --token (explicit) > auto-mint (your gh admin creds) > interactive prompt.
+# 0. fork-PR-approval precheck (public repos only) — a self-hosted runner on a
+# PUBLIC repo is a fork-PR code-execution risk; until macf-actions#59 (origin-
+# routing) lands, GitHub's native "require approval for ALL external
+# contributors" fork-PR setting is the ONLY thing standing between an
+# untrusted fork PR and code execution on this VM. Placed EARLY (before any
+# download/register/token-mint work) so an unsafe public repo aborts before
+# touching anything. See RUNNER.md "The security model" +
+# fork-pr-approval-check.sh's header for the full threat writeup + the two
+# verified gh endpoints this depends on. Override: MACF_RUNNER_SKIP_FORK_APPROVAL_CHECK=1.
+# shellcheck source=./fork-pr-approval-check.sh
+. "$HERE/fork-pr-approval-check.sh"
+check_fork_pr_approval || exit 2
+
+# 1. token — precedence: --token (explicit) > auto-mint (your gh admin creds) > interactive prompt.
 #    The bot's own creds are ALWAYS 403 on administration:write, so auto-mint runs as the
 #    INVOKING operator, not root/macf-runner — under sudo that's $SUDO_USER's stored `gh auth`,
 #    reached via `sudo -u` WITHOUT -E so a bot GH_TOKEN sitting in this root shell's env can't
@@ -82,7 +95,7 @@ if [ -z "$TOKEN" ]; then
 fi
 [ -n "$TOKEN" ] || { echo "FATAL: no registration token" >&2; exit 2; }
 
-# 1. download the runner tarball into the (macf-runner-owned) dir
+# 2. download the runner tarball into the (macf-runner-owned) dir
 install -d -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_DIR"
 if [ \! -f "$RUNNER_DIR/config.sh" ]; then
   TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
@@ -92,7 +105,7 @@ if [ \! -f "$RUNNER_DIR/config.sh" ]; then
     && tar xzf '$TARBALL' && rm -f '$TARBALL'"
 fi
 
-# 2. register (as macf-runner — correct _work ownership). NON-ephemeral unless --ephemeral.
+# 3. register (as macf-runner — correct _work ownership). NON-ephemeral unless --ephemeral.
 # --replace: if a runner with this name is ALREADY registered on GitHub (e.g. a prior install's
 # local dir was deleted out from under it, leaving a stale GitHub-side registration), replace it
 # instead of failing "a runner with that name already exists". Idempotent re-registration; safe
@@ -102,7 +115,7 @@ sudo -u "$RUNNER_USER" bash -c "cd '$RUNNER_DIR' && ./config.sh \
   --url 'https://github.com/$REPO' --token '$TOKEN' \
   --name 'macf-vm-$(hostname -s)' --labels '$LABELS' --unattended --replace $EPH"
 
-# 2b. Lever B (action-archive-cache) — arm the runner's .env BEFORE the service starts (the
+# 3b. Lever B (action-archive-cache) — arm the runner's .env BEFORE the service starts (the
 #     listener inherits $ACTIONS_RUNNER_ACTION_ARCHIVE_CACHE at start). Pure optimization:
 #     File.Copy a local SHA-keyed tarball instead of re-fetching every uses: action from codeload
 #     each job (verified ~2s/job, ~50% of the fetch phase; #150). Seeding needs a prior Worker log
@@ -132,10 +145,10 @@ else                                                                   # brand-n
 fi
 echo "  ✓ Lever B (action-archive-cache): $LEVER_B  [$CACHE_DIR]"
 
-# 3. install + start the svc.sh systemd service (runs as macf-runner)
+# 4. install + start the svc.sh systemd service (runs as macf-runner)
 ( cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER" && ./svc.sh start )
 
-# 4. install the Restart=always oversight drop-in (the svc.sh unit omits Restart= → a crash
+# 5. install the Restart=always oversight drop-in (the svc.sh unit omits Restart= → a crash
 #    leaves it dead; #90). Assert it took. Filtered by THIS repo's slug — with multiple
 #    runners on one host, an unfiltered `head -1` can grab a SIBLING runner's service
 #    (devops-toolkit multi-runner-per-host fix) and apply the drop-in to the wrong unit.
