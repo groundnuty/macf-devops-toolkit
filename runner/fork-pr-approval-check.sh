@@ -129,7 +129,8 @@ check_fork_pr_approval() {
         else
           echo "       current policy: could not be read — the operator's gh creds may lack admin on $REPO, or the endpoint is unavailable"
         fi
-        echo "       Fix: Settings -> Actions -> General -> \"Fork pull request workflows from outside collaborators\""
+        echo "       Fix (one click): https://github.com/$REPO/settings/actions"
+        echo "            -> \"Fork pull request workflows from outside collaborators\""
         echo "            -> select \"Require approval for all external contributors\"."
         echo "       Override (only once macf-actions#59 lands, or a deliberate operator call): MACF_RUNNER_SKIP_FORK_APPROVAL_CHECK=1"
       } >&2
