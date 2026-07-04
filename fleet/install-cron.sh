@@ -17,7 +17,26 @@
 # --execute to act; --allow-restart additionally enables Tier-2. Idempotent: a
 # re-run replaces the existing macf-watchdog line (marker-guarded), never duplicates.
 #
-# Refs: design/DR-006-vm-cron-watchdog-agent-supervision-impl.md §A.4.
+# --with-runner-watchdog (macf-devops-toolkit#163) chains fleet/runner-watchdog.sh
+# (the RUNNER-side liveness watchdog — detects a down self-hosted-runner systemd
+# unit that macf-actions' pick-runner would otherwise silently queue trusted
+# routing against) onto the SAME cron line, right after reconcile.sh, gated by the
+# SAME --execute/--allow-restart dials (one operator-trust dial for both legs —
+# DRY). Kept as a SEPARATE script invoked ALONGSIDE reconcile.sh rather than folded
+# into it: reconcile.sh's whole decision model (ack_agent identity, desired-agents
+# schema, fleet-doctor JSON schema) is agent-shaped, and a systemd-unit-keyed-by-
+# repo entity doesn't fit that schema without contorting it. This mirrors the
+# existing --with-routing precedent (DR-006 Increment 4): a second, independently
+# toggleable probe/leg bolted onto the same sweep rather than a schema rewrite.
+# Chained with `;` (not `&&`) so a reconcile.sh hiccup never suppresses the runner
+# sweep, and logged to ITS OWN file (not reconcile.sh's $LOG) for easier triage of
+# which watchdog raised what. runner-watchdog.sh needs `yq` in addition to the
+# `jq`/tmux toolchain host-prelude already provides for reconcile.sh — see
+# fleet/README.md "Runner-watchdog cron wiring" for the `devbox global add yq-go`
+# operator step this depends on.
+#
+# Refs: design/DR-006-vm-cron-watchdog-agent-supervision-impl.md §A.4;
+#       macf-devops-toolkit#163 (fleet/runner-watchdog.sh).
 
 set -euo pipefail
 
@@ -26,21 +45,26 @@ INTERVAL="${MACF_WATCHDOG_INTERVAL:-*/10 * * * *}"   # coarse default (§A.4 / h
 PRELUDE="${MACF_HOST_PRELUDE:-$HOME/.claude/.macf/host-prelude.sh}"
 LOG="${MACF_WATCHDOG_LOG:-$HOME/.macf/watchdog.log}"
 RECON="$(cd "$(dirname "$0")" && pwd)/reconcile.sh"
+RUNNER_WD="$(cd "$(dirname "$0")" && pwd)/runner-watchdog.sh"
+RUNNER_WD_LOG="${MACF_RUNNER_WATCHDOG_LOG:-$HOME/.macf/runner-watchdog.log}"
 MANIFEST_ARG=""
-EXECUTE_ARG="" ; RESTART_ARG="" ; ROUTING_ARG="" ; UNINSTALL=0 ; NO_TOKEN=0
+EXECUTE_ARG="" ; RESTART_ARG="" ; ROUTING_ARG="" ; UNINSTALL=0 ; NO_TOKEN=0 ; WITH_RUNNER_WD=0
 
 usage() {
   cat <<USAGE
 install-cron.sh — idempotently install/remove the DR-006 watchdog cron (DR-006 §A.4)
 
-  --manifest <path>   pass --manifest to reconcile.sh (default: its own default)
-  --interval "<cron>" schedule (default: "$INTERVAL")
-  --execute           install an ACTING line (default: report-only/dry-run)
-  --allow-restart     also enable Tier-2 graceful-restart (implies a careful operator)
-  --with-routing      also run the routing-doctor probe (registration-freshness)
-  --no-token          do NOT bake a GH_TOKEN mint into the cron (operator provides it)
-  --uninstall         remove the macf-watchdog cron line
-  --print             print the line that WOULD be installed, don't touch crontab
+  --manifest <path>       pass --manifest to reconcile.sh (default: its own default)
+  --interval "<cron>"     schedule (default: "$INTERVAL")
+  --execute               install an ACTING line (default: report-only/dry-run)
+  --allow-restart         also enable Tier-2 graceful-restart (implies a careful operator)
+  --with-routing          also run the routing-doctor probe (registration-freshness)
+  --with-runner-watchdog  also chain fleet/runner-watchdog.sh (#163, self-hosted-runner
+                          liveness) onto the same line — reuses --execute/--allow-restart,
+                          logs to $RUNNER_WD_LOG
+  --no-token              do NOT bake a GH_TOKEN mint into the cron (operator provides it)
+  --uninstall             remove the macf-watchdog cron line
+  --print                 print the line that WOULD be installed, don't touch crontab
   -h, --help
 
 Installs (default) a REPORT-ONLY line logging to $LOG — watch it, then re-run with
@@ -51,21 +75,25 @@ USAGE
 PRINT_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --manifest)      MANIFEST_ARG="--manifest $2"; shift 2 ;;
-    --interval)      INTERVAL="$2"; shift 2 ;;
-    --execute)       EXECUTE_ARG="--execute"; shift ;;
-    --allow-restart) RESTART_ARG="--allow-restart"; shift ;;
-    --with-routing)  ROUTING_ARG="--with-routing"; shift ;;
-    --no-token)      NO_TOKEN=1; shift ;;
-    --uninstall)     UNINSTALL=1; shift ;;
-    --print)         PRINT_ONLY=1; shift ;;
-    -h|--help)       usage; exit 0 ;;
+    --manifest)             MANIFEST_ARG="--manifest $2"; shift 2 ;;
+    --interval)             INTERVAL="$2"; shift 2 ;;
+    --execute)              EXECUTE_ARG="--execute"; shift ;;
+    --allow-restart)        RESTART_ARG="--allow-restart"; shift ;;
+    --with-routing)         ROUTING_ARG="--with-routing"; shift ;;
+    --with-runner-watchdog) WITH_RUNNER_WD=1; shift ;;
+    --no-token)             NO_TOKEN=1; shift ;;
+    --uninstall)            UNINSTALL=1; shift ;;
+    --print)                PRINT_ONLY=1; shift ;;
+    -h|--help)              usage; exit 0 ;;
     *) echo "install-cron.sh: unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
 command -v crontab >/dev/null || { echo "FATAL: crontab not found" >&2; exit 2; }
 [ -f "$RECON" ] || { echo "FATAL: reconcile.sh not found at $RECON" >&2; exit 2; }
+if [ "$WITH_RUNNER_WD" -eq 1 ]; then
+  [ -f "$RUNNER_WD" ] || { echo "FATAL: --with-runner-watchdog given but runner-watchdog.sh not found at $RUNNER_WD" >&2; exit 2; }
+fi
 
 # strip any existing macf-watchdog line (idempotency); preserve the rest
 EXISTING="$(crontab -l 2>/dev/null | grep -vF "$MARKER" || true)"
@@ -102,8 +130,21 @@ if [ "$NO_TOKEN" -ne 1 ]; then
   fi
 fi
 
-# the cron command: prelude (toolchain) → mint GH_TOKEN → run reconcile, append to the log
-CMD="[ -f $PRELUDE ] && . $PRELUDE; ${TOKEN_PREFIX}$RECON $MANIFEST_ARG $ROUTING_ARG $EXECUTE_ARG $RESTART_ARG >> $LOG 2>&1"
+# runner-watchdog leg (#163): chained with `;` (not `&&`) so a reconcile.sh hiccup
+# never suppresses the runner sweep. No GH_TOKEN prefix needed — detection is
+# LOCAL-ONLY (systemd unit state), never the GitHub runners API (RUNNER.md
+# "security model" — the bot is 403 on administration:read anyway). Reuses the
+# SAME $EXECUTE_ARG/$RESTART_ARG dials as reconcile.sh (one operator-trust knob
+# for both legs); own log file so triage doesn't have to disentangle two
+# watchdogs' output from one stream.
+RUNNER_WD_CMD=""
+if [ "$WITH_RUNNER_WD" -eq 1 ]; then
+  RUNNER_WD_CMD="; $RUNNER_WD $EXECUTE_ARG $RESTART_ARG >> $RUNNER_WD_LOG 2>&1"
+fi
+
+# the cron command: prelude (toolchain) → mint GH_TOKEN → run reconcile (+ the
+# optional runner-watchdog leg), append to the respective log(s)
+CMD="[ -f $PRELUDE ] && . $PRELUDE; ${TOKEN_PREFIX}$RECON $MANIFEST_ARG $ROUTING_ARG $EXECUTE_ARG $RESTART_ARG >> $LOG 2>&1${RUNNER_WD_CMD}"
 LINE="$INTERVAL $CMD $MARKER"
 
 if [ "$PRINT_ONLY" -eq 1 ]; then
@@ -112,5 +153,6 @@ fi
 
 printf '%s\n%s\n' "$EXISTING" "$LINE" | grep -v '^$' | crontab -
 mode="REPORT-ONLY (dry-run)"; [ -n "$EXECUTE_ARG" ] && mode="EXECUTE"; [ -n "$RESTART_ARG" ] && mode="$mode + restart"
-echo "installed macf-watchdog cron [$mode], interval '$INTERVAL', log $LOG"
+runner_wd_note=""; [ "$WITH_RUNNER_WD" -eq 1 ] && runner_wd_note=" + runner-watchdog ($RUNNER_WD_LOG)"
+echo "installed macf-watchdog cron [$mode], interval '$INTERVAL', log $LOG$runner_wd_note"
 echo "verify: crontab -l | grep macf-watchdog"

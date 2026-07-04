@@ -375,6 +375,25 @@ systemctl show "$SVC" -p Restart --value    # → always
 the health-check). Every runner standup should install this drop-in. FOLLOW-UP: `install-runner.sh`
 should install it automatically so it's not a manual post-step.
 
+### Fleet-visible liveness — the runner-watchdog (`../fleet/runner-watchdog.sh`, #163)
+
+`Restart=always` above recovers a bare process crash, but it is **silent** (no
+fleet-visible signal) and does **not** cover a unit stuck `failed`/`inactive`
+past its restart budget, `masked`, or torn down/de-registered entirely — and a
+down self-hosted runner does NOT make macf-actions' `pick-runner` fall back to
+`ubuntu-latest`; it makes that repo's trusted routing queue forever with no
+liveness check anywhere in the routing path. `fleet/runner-watchdog.sh` is the
+runner-side analog of the `fleet/reconcile.sh` DR-006 agent watchdog: it sweeps
+`runners.yaml`'s `status: live` entries via `systemctl show` (same repo-slug +
+`list-units` derivation `verify-runner.sh` uses above), and on a
+loaded-but-not-active unit attempts `systemctl restart` (gated behind
+`--allow-restart`, needs a `sudo -n`-reachable grant since restarting is
+root-privileged), escalating to a dedup'd alert sentinel when the unit is
+missing/masked or the restart doesn't bring it back. See
+`../fleet/README.md` "Runner-watchdog (#163)" for the full decision table,
+the maintenance-lock composition, and the `install-cron.sh --with-runner-watchdog`
+wiring.
+
 ## Lever B — action-archive-cache (the ~2s/job optimization)
 
 The runner deletes `_work/_actions` and **re-fetches every `uses:` action from codeload on every

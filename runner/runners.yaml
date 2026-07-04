@@ -46,16 +46,16 @@ fleets:
       - name: macf-auditor-agent
         repo: groundnuty/macf-auditor-agent
         visibility: private
-        status: ready            # private = no anonymous fork surface, safe like macf-science-agent
+        status: live            # deployed 2026-07-04, non-ephemeral svc.sh on /mnt/volume1/macf-runners/macf-auditor-agent (private = no fork surface)
         note: "auditor routing runs here. private repo means no fork exposure, independent of
           macf-actions#59. Deploy with make runner-macf-auditor-agent (auto-mints token from
           operator gh creds; sudo for systemd)."
       - name: macf
         repo: groundnuty/macf
         visibility: public
-        status: ready            # origin-routing (macf-actions#59/#60) LANDED in v3.4.x + MACF_TRUSTED_ACTORS
-                                 # already set on macf. Register FIRST (inert on macf's current @v3.3.0 pin),
-                                 # THEN code bumps macf's agent-router pin @v3.3.0 -> @v3.4.1 to ACTIVATE (macf#769).
+        status: live            # deployed + ACTIVE 2026-07-04: registered (fork-PR-approval precheck passed),
+                                 # macf pinned @v3.4.1 (macf#772 merged) so origin-routing is live + verified
+                                 # (trusted actor -> this self-hosted runner; untrusted -> ubuntu-latest).
         note: "PUBLIC + highest-traffic repo. Two safety layers now exist: origin-routing
           (macf-actions#60, in v3.4.x) plus the deploy-side fork-PR-approval precheck (#161).
           ORDER MATTERS: register here FIRST (inert on macf's current @v3.3.0 pin, no job targets
