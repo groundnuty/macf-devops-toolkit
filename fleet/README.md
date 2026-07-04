@@ -154,14 +154,17 @@ on a password prompt — rather than assuming passwordless privilege exists.
 **This PR does not install that sudoers grant** (infra provisioning outside a
 code-only change); an operator who wants `--allow-restart` to actually heal
 anything needs to add one, mirroring the existing narrow tmux-send-helper grant
-(`../runner/RUNNER.md` "The `macf-runner` capability boundary"), e.g.:
+(`../runner/RUNNER.md` "The `macf-runner` capability boundary"). Do this (+ the
+`yq` gap below + the cron wiring itself) in one shot via:
 
 ```
-# /etc/sudoers.d/macf-runner-watchdog (operator-installed; NOT auto-created by #163)
-ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart actions.runner.*.service
+cd runner && make enable-runner-watchdog
 ```
 
-Until that grant exists, `--allow-restart` still safely degrades to ALERT
+See "Runner-watchdog cron wiring" below for what that target does and the
+manual-step breakdown if you'd rather run the pieces yourself.
+
+Until the grant exists, `--allow-restart` still safely degrades to ALERT
 (`sudo -n` fails fast, the post-restart re-check reads still-not-active, the
 sweep escalates) — it never hangs the cron and never silently no-ops.
 
@@ -180,15 +183,31 @@ systemd-unit-keyed-by-repo entity doesn't fit without contorting that schema —
 this mirrors the existing `--with-routing` precedent (Increment 4: a second,
 independently-toggleable probe bolted onto the sweep rather than a schema rewrite).
 
-**Operator setup gap:** `runner-watchdog.sh` needs `yq` in addition to the
-`jq`/tmux toolchain `host-prelude.sh` already provides for `reconcile.sh`. `yq`
-is currently pinned only in `runner/devbox.json` (a project-scoped shell), not
-confirmed present in `devbox global` (what `host-prelude.sh`'s `eval "$(devbox
-global shellenv)"` exposes to cron). Until an operator runs
-`devbox global add yq-go`, the cron leg fails open with a clear one-line
-diagnostic (`yq not found ... skipping sweep`, exit 0) rather than erroring —
-consistent with the script's fail-safe posture, but it means `--with-runner-
-watchdog` is a no-op until that global package is added.
+**Operator setup gap (3 manual steps, now one command):** `--with-runner-watchdog`
+needs two things beyond what `host-prelude.sh` already provides for
+`reconcile.sh` — `yq` on the GLOBAL devbox profile, and the sudoers grant above
+— plus the cron wiring itself. `../runner/Makefile`'s **`make enable-runner-watchdog`**
+runs `enable-runner-watchdog.sh`, which does all 3, idempotently:
+
+1. `devbox global add yq-go` if `yq` isn't already on PATH (WARNS, doesn't fail,
+   if `devbox` itself is absent — the cron leg below still fails open safely).
+2. installs `/etc/sudoers.d/macf-runner-watchdog` (the grant above, keyed to the
+   invoking operator) — validated via `visudo -c` BEFORE install, mirroring
+   `../runner/setup-macf-runner-user.sh`'s sudoers-install pattern so a bad rule
+   can never lock out `sudo`.
+3. runs `install-cron.sh --execute --allow-restart --with-runner-watchdog`.
+
+Runs AS THE OPERATOR throughout (yq + cron are per-user state — a devbox global
+profile, a user crontab — and must land in the operator's, not root's) and
+escalates via `sudo` only for step 2's sudoers write; see the script's own
+header for the full privilege-split rationale. No symmetric `disable-*` target:
+`install-cron.sh --uninstall` removes the WHOLE `macf-watchdog` cron line, not
+just the runner-watchdog leg, so it isn't a clean scoped removal to wire one to.
+
+Without `yq` (steps skipped, e.g. `devbox` unavailable), the cron leg fails
+open with a clear one-line diagnostic (`yq not found ... skipping sweep`, exit
+0) rather than erroring — consistent with the script's fail-safe posture, but
+it means `--with-runner-watchdog` is a no-op until `yq` is reachable.
 
 ## Run
 

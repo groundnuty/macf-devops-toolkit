@@ -112,6 +112,22 @@ $(foreach r,$(RUNNERS),$(eval $(call _reinstall_rule,$(r))))
 setup-user:  ## Create the low-priv macf-runner user + send-helper sudoers rule (once per VM; sudo)
 	sudo bash ./setup-macf-runner-user.sh
 
+# NOT sudo-wrapped: the script runs as the operator throughout and escalates via
+# `sudo` internally ONLY for the sudoers-file write (yq + cron wiring are PER-USER
+# state — devbox global profile, user crontab — and must land in the operator's,
+# not root's). See fleet/enable-runner-watchdog.sh header "PRIVILEGE SPLIT".
+#
+# No symmetric `disable-runner-watchdog`: ../fleet/install-cron.sh --uninstall
+# removes the WHOLE `# macf-watchdog (DR-006)` cron line, not just the
+# runner-watchdog leg — when wired via --with-runner-watchdog the two legs share
+# ONE crontab line (chained with `;`), so --uninstall would also tear down the
+# base agent-liveness watchdog (fleet/reconcile.sh) as a surprising side effect.
+# That's not a clean, scoped removal to wire a "disable just the runner leg"
+# target against, so it's deliberately not added here — see delivery report.
+.PHONY: enable-runner-watchdog
+enable-runner-watchdog:  ## Enable the runner-liveness watchdog on cron (yq + sudoers grant + cron wiring; escalates for sudoers)
+	../fleet/enable-runner-watchdog.sh
+
 .PHONY: copy-vars
 copy-vars:  ## Copy a fleet's shared vars from its var_source to a repo (REPO=owner/repo FLEET=macf)
 	@[ -n "$(REPO)" ] && [ -n "$(FLEET)" ] || { echo "set REPO=owner/repo FLEET=<name>"; exit 2; }
