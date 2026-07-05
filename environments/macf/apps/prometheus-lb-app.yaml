@@ -1,0 +1,30 @@
+# ArgoCD Application for the Prometheus query LoadBalancer service.
+# Sync-wave 1: depends on the kube-prometheus-stack chart (wave 0) being up
+# so the pod label-selector resolves + klipper-lb can create the svclb pod
+# claiming node:9090. Same wave as tempo-query-lb (also a chart-dependent
+# add-on Service).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prometheus-lb
+  namespace: argocd-applications
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: operations
+  source:
+    repoURL: https://github.com/groundnuty/macf-devops-toolkit.git
+    targetRevision: HEAD
+    path: environments/macf/manifests/prometheus-lb
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

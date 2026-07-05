@@ -69,7 +69,7 @@ the offset rationale is obsolete (see Note below). Key endpoints:
 | Grafana UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3000` | `grafana-lb` Service; password via `make grafana-password`. (`make pf-grafana` still works as a fallback.) |
 | Langfuse UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3001` | `langfuse-web-lb` Service; admin login printed by `make langfuse-bootstrap` |
 | ArgoCD UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:8080` | `argocd-server-lb` Service; password via `make argocd-password` |
-| Prometheus | `make pf-prometheus` → `http://127.0.0.1:9090` | NOT host-exposed — port-forward only |
+| Prometheus | `http://orzech-dev-agents-monitoring.tail491af.ts.net:9090` | `prometheus-lb` LoadBalancer Service (ns/monitoring); reachable on every VM interface. UNAUTHENTICATED — tailnet boundary is the access control, same posture as Grafana/Langfuse/ArgoCD. (`make pf-prometheus` still works as a fallback.) |
 
 Persistent state lives on the monitoring VM's `/mnt/volume1` (`/dev/vdb`, ~200 GiB)
 — never the root disk. k3s data-dir (embedded etcd + container images), PVCs

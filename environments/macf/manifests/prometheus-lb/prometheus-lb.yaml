@@ -1,0 +1,53 @@
+# LoadBalancer Service for Prometheus's query API (:9090), so the host can
+# reach it WITHOUT `make pf-prometheus`. Mirrors `../tempo-query-lb/tempo-query-lb.yaml`
+# (the Tempo-query-API equivalent).
+#
+# Why a SECOND service alongside the chart-created `kube-prom-stack-kube-prome-prometheus`
+# ClusterIP: the prometheus-community/kube-prometheus-stack chart (via the
+# Prometheus Operator) creates a ClusterIP service for the operator-managed
+# Prometheus StatefulSet — right for in-cluster clients (Grafana's datasource,
+# `make pf-prometheus`), but a ClusterIP is not host-reachable. For any
+# host-context consumer to run PromQL without a kubectl tunnel, we need a
+# LoadBalancer service.
+#
+# Post-DR-004 (native k3s on the dedicated monitoring VM): k3s ServiceLB
+# (klipper) binds this Service's port (9090) on EVERY host interface — private
+# IP, localhost, AND the tailnet — via iptables. No k3d serverlb and no offset
+# port. Reach it at the NATIVE port:
+#   orzech-dev-agents-monitoring.tail491af.ts.net:9090  (Prometheus PromQL API)
+#
+# Routing chain host → pod (native k3s; identical shape to tempo-query-lb):
+#   <any-host-interface>:9090
+#     → svclb-prometheus-lb DaemonSet pod (klipper, hostPort 9090)
+#       → this Service's ClusterIP
+#         → pod label-selector → Prometheus StatefulSet pod
+#
+# SECURITY NOTE: this endpoint is UNAUTHENTICATED (Prometheus has no built-in
+# auth) — same posture as the existing Grafana/Langfuse/ArgoCD UI LBs, which
+# rely on the tailnet boundary (MagicDNS-only reachability, not public
+# internet) rather than app-level auth. Do not widen this beyond the tailnet.
+#
+# Selector mirrors the labels the Prometheus Operator applies to the
+# Prometheus StatefulSet pods for release `kube-prom-stack` (verified against
+# the live cluster's `kube-prom-stack-kube-prome-prometheus` Service):
+#   app.kubernetes.io/name=prometheus
+#   operator.prometheus.io/name=kube-prom-stack-kube-prome-prometheus
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-lb
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    operator.prometheus.io/name: kube-prom-stack-kube-prome-prometheus
+    macf.dev/role: stable-prometheus-query
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: prometheus
+    operator.prometheus.io/name: kube-prom-stack-kube-prome-prometheus
+  ports:
+    - name: prometheus
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
