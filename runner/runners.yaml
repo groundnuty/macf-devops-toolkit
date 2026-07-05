@@ -62,3 +62,47 @@ fleets:
           self-hosted yet), THEN merge macf#769 (the @v3.4.1 workflow bump) to activate — registering
           AFTER the bump would queue trusted routing with no runner. Fork-PR-approval must be
           all_external_contributors; the precheck (#161) enforces it at register time."
+  # ── CV fleet (Curriculum Vitae) — cv-architect. All private. Added 2026-07-05. ──
+  # Registration uses the OPERATOR's gh creds (bot not installed on these repos); private =
+  # fork-precheck SKIPs. For origin-routing to self-HOST (not just register-inert), set
+  # MACF_TRUSTED_ACTORS on the routing repo + ensure its agent-router pin is @v3.4.1+ (academic-
+  # resume is @v3.3.0 today — bump like macf#772, or it stays github-hosted).
+  - name: cv
+    registry: groundnuty/groundnuty
+    var_source: groundnuty/academic-resume
+    shared_vars: [MACF_TRUSTED_ACTORS]
+    runners:
+      - name: academic-resume
+        repo: groundnuty/academic-resume
+        visibility: private
+        status: ready            # cv-architect's GitHub routing side (workspace academic-cv pushes
+                                 # here); routes via Agent Router @v3.3.0 (needs @v3.4.1 bump to self-host).
+        note: "CV fleet routing repo (cv-architect). private = no fork surface. Deploy:
+          make runner-academic-resume. Self-hosting also needs MACF_TRUSTED_ACTORS set here +
+          the agent-router pin bumped @v3.3.0 -> @v3.4.1 (else routing stays github-hosted)."
+  # ── icsoc fleet (icsoc-2026 paper project). All private. Added 2026-07-05. ──
+  - name: icsoc
+    registry: groundnuty/groundnuty
+    var_source: groundnuty/icsoc-2026-science-agent
+    shared_vars: [MACF_TRUSTED_ACTORS]
+    runners:
+      - name: icsoc-2026-science-agent
+        repo: groundnuty/icsoc-2026-science-agent
+        visibility: private
+        status: ready            # routes via Agent Router @v3 (floating → already origin-routing-capable)
+        note: "icsoc science-agent; routes @v3. private = no fork surface. Deploy:
+          make runner-icsoc-2026-science-agent. Needs MACF_TRUSTED_ACTORS set to self-host."
+      - name: icsoc-2026-code-agent
+        repo: groundnuty/icsoc-2026-code-agent
+        visibility: private
+        status: ready            # ⚠ ROUTING UNCONFIRMED — local workspace has NO .github/workflows;
+                                 # verify the GitHub repo runs the Agent Router before deploying (else idle).
+        note: "icsoc code-agent. Confirm it routes (Agent Router) GitHub-side before provisioning —
+          bot isn't installed here so I couldn't read it. If it doesn't route, the runner sits idle."
+      - name: icsoc-2026-paper
+        repo: groundnuty/icsoc-2026-paper
+        visibility: private
+        status: ready            # ⚠ ROUTING UNCONFIRMED — this is the GitHub MIRROR of the Overleaf paper;
+                                 # local copy has no agent-router. Verify GitHub-side routing before deploy.
+        note: "icsoc paper-agent (GitHub mirror of the Overleaf project). Confirm it routes before
+          provisioning — else idle. Deploy: make runner-icsoc-2026-paper."
