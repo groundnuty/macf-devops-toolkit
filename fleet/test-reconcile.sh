@@ -7,6 +7,7 @@
 
 set -uo pipefail
 cd "$(dirname "$0")/.."   # repo root
+PWD_REPO="$PWD"           # absolute repo root (tests that chdir need it)
 REC=fleet/reconcile.sh
 MAN=fleet/desired-agents.example.yaml
 FX=fleet/testdata
@@ -144,6 +145,35 @@ else echo "  FAIL: unresolvable macf did not produce the CANNOT RECONCILE diagno
 if [ -e "$R_TMP/alerts/_watchdog-self" ]; then
   echo "  ok: 'watchdog cannot run' raises an alert sentinel (#169's core lesson)"; pass=$((pass+1))
 else echo "  FAIL: no self-alert written — the outage would stay invisible again"; fail=$((fail+1)); fi
+
+# (a2) the probe must run from the WORKSPACE ROOT, not the caller's cwd (#169).
+# `macf fleet doctor` walks up from cwd for .macf/macf-agent.json; cron's cwd is
+# $HOME, so inheriting it made the CLI abort with "Not in a MACF project" and print
+# nothing to stdout. A fake CLI records the cwd it was handed.
+CWD_PROBE="$R_TMP/cwd-probe"
+printf '#!/bin/sh\npwd > "%s"\necho \x27{"schema_version":1,"agents":[]}\x27\n' "$R_TMP/seen-cwd" > "$CWD_PROBE"
+chmod +x "$CWD_PROBE"
+( cd /tmp && MACF_FLEET_DOCTOR_CMD="$CWD_PROBE" MACF_ALERT_DIR="$R_TMP/a_cwd" \
+    bash "$PWD_REPO/fleet/reconcile.sh" --manifest "$R_TMP/manifest.yaml" >/dev/null 2>&1 ) || true
+SEEN_CWD="$(cat "$R_TMP/seen-cwd" 2>/dev/null || echo MISSING)"
+if [ "$SEEN_CWD" = "$PWD_REPO" ]; then
+  echo "  ok: fleet-doctor probe runs from the workspace root, not the caller's cwd"; pass=$((pass+1))
+else
+  echo "  FAIL: probe ran from '$SEEN_CWD', expected '$PWD_REPO' (cron's \$HOME cwd would break it again)"; fail=$((fail+1))
+fi
+
+# (a3) the probe's stderr must be SURFACED, not discarded. `2>/dev/null` threw away
+# the one message ("Not in a MACF project") that explained the whole 37-day outage.
+ERR_PROBE="$R_TMP/err-probe"
+printf '#!/bin/sh\necho "Not in a MACF project (no .macf/macf-agent.json)" >&2\nexit 1\n' > "$ERR_PROBE"
+chmod +x "$ERR_PROBE"
+ERR_OUT="$(MACF_FLEET_DOCTOR_CMD="$ERR_PROBE" MACF_ALERT_DIR="$R_TMP/a_err" \
+  bash "$PWD_REPO/fleet/reconcile.sh" --manifest "$R_TMP/manifest.yaml" 2>&1 || true)"
+if printf '%s\n' "$ERR_OUT" | grep -q 'Not in a MACF project'; then
+  echo "  ok: the probe's own stderr is surfaced in the failure diagnostic"; pass=$((pass+1))
+else
+  echo "  FAIL: probe stderr was swallowed — the explanatory message is lost again"; fail=$((fail+1))
+fi
 
 # (b) macf absent from PATH but present at the npm-global location → resolved, no self-alert
 FAKE_HOME="$R_TMP/home"; mkdir -p "$FAKE_HOME/.npm-global/bin"
