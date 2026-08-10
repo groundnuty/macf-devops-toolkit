@@ -64,7 +64,7 @@ jobs:
         with:
           oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
-          tags: tag:gha-runner
+          tags: tag:ci-runner
 
       - name: Install SSH key for VM access
         run: |
