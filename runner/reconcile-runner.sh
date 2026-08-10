@@ -64,6 +64,32 @@ SUDO_ENV=(env
   "MACF_RUNNER_DIAG=$MACF_RUNNER_DIAG")
 echo "   runner home: $MACF_RUNNER_HOME  (shared cache: $MACF_ACTION_ARCHIVE_CACHE)"
 
+# --- maintenance-lock bookkeeping (#165, DR-040 Decision 4) -------------------
+# A reinstall tears the systemd unit down on purpose. runner-watchdog.sh SKIPs a
+# runner under an active lock, so without this the teardown window looks like an
+# outage and emits a transient ALERT. (Before #169 the watchdog never actually
+# swept, so this could not fire in practice — now it can, which is what makes
+# this worth wiring rather than theoretical.)
+#
+# Crash-safety mirrors fleet/upgrade.sh exactly: the trap STOPS the heartbeat but
+# deliberately does NOT release — a halted reinstall leaves the lock in place and
+# lets its TTL free it, so an interrupted teardown is never mistaken for a healthy
+# runner. Release happens ONLY on a clean post-install verify.
+# shellcheck source=../fleet/maintenance-lock.sh
+. "$(cd "$(dirname "$0")/../fleet" && pwd)/maintenance-lock.sh"
+CURRENT_LOCK_RUNNER=""
+CURRENT_HB_PID=""
+_lock_cleanup_keep() {      # stop heartbeat; LEAVE the lock (halt/trap path)
+  [ -n "$CURRENT_HB_PID" ] && kill "$CURRENT_HB_PID" 2>/dev/null || true
+  CURRENT_HB_PID=""
+}
+_lock_cleanup_release() {   # stop heartbeat AND release (clean GREEN only)
+  _lock_cleanup_keep
+  [ -n "$CURRENT_LOCK_RUNNER" ] && lock_release "$CURRENT_LOCK_RUNNER"
+  CURRENT_LOCK_RUNNER=""
+}
+trap _lock_cleanup_keep EXIT INT TERM
+
 # 1. verify (the same check we'll prove with at the end) — skipped entirely under --force,
 # so a reinstall can never be short-circuited by "already healthy; nothing to do." (that gate
 # is exactly what left a torn-down runner dead + de-registered — see the --force comment above).
@@ -91,6 +117,16 @@ if [ "$FORCE" -ne 1 ]; then
   [ "${a:-N}" = y ] || [ "${a:-N}" = Y ] || { echo "skipped."; exit 1; }
 fi
 
+# 2-lock. Everything below this point can tear the unit down — hold the lock for the
+# WHOLE window (uninstall → install → verify), keyed on the runner NAME, the same key
+# runner-watchdog.sh and maintenance-lock.sh use. Heartbeat it so a slow reinstall
+# (download + config) can't let the TTL lapse mid-window and un-SKIP the watchdog.
+lock_acquire "$NAME" "reinstall"
+CURRENT_LOCK_RUNNER="$NAME"
+lock_heartbeat_loop "$NAME" "$MAINT_LOCK_HEARTBEAT_INTERVAL" \
+  "$(lock_heartbeat_max_iters "$MAINT_LOCK_HEARTBEAT_INTERVAL")" &
+CURRENT_HB_PID=$!
+
 # 2a. copy the fleet's shared vars from var_source (so we don't hand-set them)
 echo "-- copying $FLEET shared vars from $VAR_SOURCE → $REPO --"
 ./copy-vars.sh --to "$REPO" --fleet "$FLEET" || echo "   (var-copy had issues — continuing; verify later)"
@@ -106,6 +142,19 @@ fi
 # install-runner.sh prompts for the registration token — operator mints it, bot is 403).
 sudo "${SUDO_ENV[@]}" ./install-runner.sh --repo "$REPO" || { echo "install failed."; exit 1; }
 
-# 3. prove it — verify again with the same check
+# 3. prove it — verify again with the same check. Release the maintenance-lock ONLY
+# here, on a GREEN verify: if the reinstall left the runner broken, the lock stays
+# (its TTL frees it) so the watchdog doesn't immediately re-ALERT on a runner an
+# operator is probably still working on — and, more importantly, a half-finished
+# reinstall is never handed back as "fine".
 echo "-- verifying the freshly-registered runner --"
-./verify-runner.sh --repo "$REPO"
+if ./verify-runner.sh --repo "$REPO"; then
+  _lock_cleanup_release
+  echo "→ reinstall complete + verified; maintenance-lock released."
+else
+  rc=$?
+  _lock_cleanup_keep
+  echo "→ post-install verify FAILED — leaving the maintenance-lock in place;" >&2
+  echo "  it frees itself via its ${MAINT_LOCK_TTL}s TTL once heartbeats stop (DR-040 Decision 4)." >&2
+  exit "$rc"
+fi
