@@ -209,9 +209,28 @@ fi
 # genuine failure (auth/network/crash) yields non-JSON → "missing" → fail LOUD.
 GOT_SCHEMA="$(printf '%s' "$ACTUAL_RAW" | jq -r '.schema_version // "missing"' 2>/dev/null || echo "missing")"
 [ "$GOT_SCHEMA" = "$EXPECTED_SCHEMA" ] || {
-  echo "FATAL: '$FLEET_DOCTOR_CMD' did not return schema_version=$EXPECTED_SCHEMA (got '$GOT_SCHEMA')." >&2
-  echo "       → probe FAILED (auth/network/crash → non-JSON) OR the schema DRIFTED." >&2
-  echo "       (A DEGRADED verdict is NORMAL — doctor exits 1 with valid JSON — NOT a failure.)" >&2
+  # #169: DISCRIMINATE the failure modes. These used to share one message, and
+  # that conflation is why 37 days of "the binary isn't on cron's PATH" read as a
+  # generic probe failure: EMPTY output (command-not-found / crash-before-print)
+  # looks nothing like valid-JSON-with-a-renamed-field, and the operator response
+  # differs completely. Name which one happened.
+  if [ -z "$ACTUAL_RAW" ]; then
+    echo "FATAL: '$FLEET_DOCTOR_CMD' produced NO OUTPUT AT ALL." >&2
+    echo "       → the command did not run (binary not found / not executable) or died before printing." >&2
+    echo "       → check resolution first: command -v macf ; ls -l \$HOME/.npm-global/bin/macf" >&2
+    echo "       → under cron, PATH=/usr/bin:/bin — the npm global bin is NOT on it (#169)." >&2
+    reconcile_self_alert "fleet-doctor probe produced no output — '$FLEET_DOCTOR_CMD' did not run"
+  elif ! printf '%s' "$ACTUAL_RAW" | jq -e . >/dev/null 2>&1; then
+    echo "FATAL: '$FLEET_DOCTOR_CMD' returned NON-JSON output." >&2
+    echo "       → probe FAILED at runtime (auth 401 / network / crash). First 200 chars:" >&2
+    printf '       %s\n' "$(printf '%s' "$ACTUAL_RAW" | head -c 200)" >&2
+    reconcile_self_alert "fleet-doctor probe returned non-JSON (auth/network/crash)"
+  else
+    echo "FATAL: '$FLEET_DOCTOR_CMD' returned valid JSON but schema_version=$GOT_SCHEMA (expected $EXPECTED_SCHEMA)." >&2
+    echo "       → the SCHEMA DRIFTED — the supervisor is deliberately refusing to read a shape it doesn't understand." >&2
+    echo "       (A DEGRADED verdict is NORMAL — doctor exits 1 with valid JSON — NOT a failure.)" >&2
+    reconcile_self_alert "fleet-doctor schema drift: got schema_version=$GOT_SCHEMA, expected $EXPECTED_SCHEMA"
+  fi
   exit 2
 }
 
