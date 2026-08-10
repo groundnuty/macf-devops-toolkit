@@ -175,6 +175,19 @@ else
   echo "  FAIL: probe stderr was swallowed — the explanatory message is lost again"; fail=$((fail+1))
 fi
 
+# (a4) a SUCCESSFUL probe must CLEAR an open self-alert, or the dedup turns the
+# next real breakage into silence forever — the very failure the alert prevents.
+OK_PROBE="$R_TMP/ok-probe"
+printf '#!/bin/sh\necho \x27{"schema_version":1,"agents":[]}\x27\n' > "$OK_PROBE"; chmod +x "$OK_PROBE"
+mkdir -p "$R_TMP/a_reset"; printf 'stale alert from an earlier failure\n' > "$R_TMP/a_reset/_watchdog-self"
+MACF_FLEET_DOCTOR_CMD="$OK_PROBE" MACF_ALERT_DIR="$R_TMP/a_reset" \
+  bash "$PWD_REPO/fleet/reconcile.sh" --manifest "$R_TMP/manifest.yaml" --execute >/dev/null 2>&1 || true
+if [ ! -e "$R_TMP/a_reset/_watchdog-self" ]; then
+  echo "  ok: a successful probe clears a stale self-alert (future breakage re-alerts)"; pass=$((pass+1))
+else
+  echo "  FAIL: self-alert survived a healthy probe — dedup would silence the next outage"; fail=$((fail+1))
+fi
+
 # (b) macf absent from PATH but present at the npm-global location → resolved, no self-alert
 FAKE_HOME="$R_TMP/home"; mkdir -p "$FAKE_HOME/.npm-global/bin"
 printf '#!/bin/sh\necho \x27{"schema_version":1,"agents":[]}\x27\n' > "$FAKE_HOME/.npm-global/bin/macf"
