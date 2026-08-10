@@ -197,10 +197,25 @@ _dsw_main() {
     echo "         This is recorded in the manifest — the bundle must not imply coverage it doesn't have." >&2
   fi
 
+  # Emit the manifest provenance as ONE ready-to-pass JSON value. Callers must
+  # never hand-assemble this: the first attempt built it inline in the workflow's
+  # YAML `run:` block, where the escaped `\"` literals collided with the real
+  # quotes coming from the windows_json substitution. The result split into
+  # multiple shell words, the script saw garbage args and printed its usage, and
+  # the run failed at the LAST step. One value, quoted once, at the source.
+  local PROVENANCE_JSON
+  PROVENANCE_JSON="$(jq -cn \
+      --argjson windows "$(printf '%s\n' "$MERGED" | _dsw_windows_json)" \
+      --argjson total "$N_TOTAL" --argjson kept "$N_KEPT" --argjson clamped "$CLAMPED" \
+      --argjson span "$SPAN_REQUESTED" --argjson coverage "$COVERAGE" \
+      '{windows:$windows, clusters_total:$total, clusters_kept:$kept,
+        clamped:$clamped, span_requested_seconds:$span, coverage_seconds:$coverage}')"
+
   cat <<OUT
 filter_value=$FILTER_VALUE
 start=$START
 end=$END
+provenance_json=$PROVENANCE_JSON
 windows_json=$(printf '%s\n' "$MERGED" | _dsw_windows_json)
 clusters_total=$N_TOTAL
 clusters_kept=$N_KEPT

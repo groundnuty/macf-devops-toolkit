@@ -170,7 +170,7 @@ jobs:
                --filter-value '${{ steps.window.outputs.filter_value }}' \
                --start '${{ steps.window.outputs.start }}' \
                --end '${{ steps.window.outputs.end }}' \
-               --window-provenance '{\"windows\":${{ steps.window.outputs.windows_json }},\"clusters_total\":${{ steps.window.outputs.clusters_total }},\"clusters_kept\":${{ steps.window.outputs.clusters_kept }},\"clamped\":${{ steps.window.outputs.clamped }},\"span_requested_seconds\":${{ steps.window.outputs.span_requested }},\"coverage_seconds\":${{ steps.window.outputs.coverage_seconds }}}' \
+               --window-provenance '${{ steps.window.outputs.provenance_json }}' \
                --out-dir '$REMOTE_BUNDLE' \
                $GRAFANA_FLAG"
           # scp the bundle back to the runner. Bundle path `./bundle/` is
