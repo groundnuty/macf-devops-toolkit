@@ -176,5 +176,69 @@ expected_slug="groundnuty-macf-science-agent"
 got_slug="${slug_test//\//-}"
 [ "$got_slug" = "$expected_slug" ] && ok "repo-slug transform matches verify-runner.sh's REPO_SLUG derivation" || bad "slug transform got '$got_slug' want '$expected_slug'"
 
+echo "== _runner_watchdog_registry_json: converter chain survives cron's bare PATH (#169) =="
+# The ~37-day silent outage: the only `yq` on cron's PATH is python-yq (a jq
+# wrapper) which rejects `-o=json`, and yq-go lives inside a devbox shell cron
+# never enters. These run the REAL function under a REAL restricted PATH — no
+# mocking — so they fail if the fallback chain regresses to yq-go-only.
+ry_tmp="$(mktemp -d)"; trap 'rm -rf "$ry_tmp"' EXIT
+cat > "$ry_tmp/runners.yaml" <<'YAML'
+fleets:
+  - fleet: testfleet
+    runners:
+      - name: alpha
+        repo: owner/alpha
+        status: live
+YAML
+
+conv_json="$(PATH=/usr/bin:/bin _runner_watchdog_registry_json "$ry_tmp/runners.yaml" 2>/dev/null)"
+[ -n "$conv_json" ] && ok "converts YAML under bare cron PATH (=/usr/bin:/bin)" \
+  || bad "no converter worked under bare cron PATH — the #169 outage would recur"
+printf '%s' "$conv_json" | jq -e '.fleets[0].runners[0].name == "alpha"' >/dev/null 2>&1 \
+  && ok "converted JSON is semantically correct (round-trips the registry shape)" \
+  || bad "converted output did not round-trip the registry shape"
+printf '%s' "$conv_json" | _runner_watchdog_filter_registry "live" | grep -q '^alpha' \
+  && ok "converter output feeds the status filter end-to-end" \
+  || bad "converter output did not feed _runner_watchdog_filter_registry"
+
+# An unreadable registry must still fail (non-zero), not silently emit junk.
+_runner_watchdog_registry_json "$ry_tmp/does-not-exist.yaml" >/dev/null 2>&1 \
+  && bad "missing registry returned success" \
+  || ok "missing registry returns non-zero (caller raises the self-alert)"
+
+# A file that exists but is NOT valid YAML must fail rather than yield empty-but-ok.
+printf ':\n  - [unclosed\n' > "$ry_tmp/broken.yaml"
+_runner_watchdog_registry_json "$ry_tmp/broken.yaml" >/dev/null 2>&1 \
+  && bad "malformed YAML returned success" \
+  || ok "malformed YAML returns non-zero (output is validated, not just exit code)"
+
+echo "== _runner_watchdog_self_alert: a watchdog that CANNOT RUN alerts (#169) =="
+# Previously a bare `echo … skipping sweep; exit 0` — 5389 log lines, zero signal.
+sa_dir="$ry_tmp/alerts"; ALERT_DIR="$sa_dir"
+
+EXECUTE=0
+_runner_watchdog_self_alert "dry-run probe" >/dev/null 2>&1
+[ ! -e "$sa_dir/_watchdog-self" ] && ok "dry-run self-alert writes nothing" \
+  || bad "dry-run self-alert wrote a sentinel"
+
+EXECUTE=1
+_runner_watchdog_self_alert "yq missing" >/dev/null 2>&1
+[ -e "$sa_dir/_watchdog-self" ] && ok "--execute self-alert writes the sentinel" \
+  || bad "--execute self-alert wrote no sentinel"
+grep -q 'yq missing' "$sa_dir/_watchdog-self" \
+  && ok "self-alert records the reason (triage doesn't need the log)" \
+  || bad "self-alert body lost the reason"
+
+printf 'ORIGINAL\n' > "$sa_dir/_watchdog-self"
+_runner_watchdog_self_alert "second failure" >/dev/null 2>&1
+grep -q 'ORIGINAL' "$sa_dir/_watchdog-self" \
+  && ok "second self-alert is dedup'd (does not rewrite every 10 min)" \
+  || bad "self-alert overwrote an already-open sentinel"
+
+_runner_watchdog_reset "_watchdog-self" >/dev/null 2>&1
+[ ! -e "$sa_dir/_watchdog-self" ] \
+  && ok "a successful sweep clears the self-alert (future breakage re-alerts)" \
+  || bad "self-alert survived the recovery reset"
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

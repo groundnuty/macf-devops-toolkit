@@ -65,6 +65,7 @@ install-cron.sh — idempotently install/remove the DR-006 watchdog cron (DR-006
   --no-token              do NOT bake a GH_TOKEN mint into the cron (operator provides it)
   --uninstall             remove the macf-watchdog cron line
   --print                 print the line that WOULD be installed, don't touch crontab
+  --skip-preflight        install even if the cron-env dependency check fails (#169)
   -h, --help
 
 Installs (default) a REPORT-ONLY line logging to $LOG — watch it, then re-run with
@@ -73,6 +74,21 @@ USAGE
 }
 
 PRINT_ONLY=0
+SKIP_PREFLIGHT=0
+
+# --- cron PATH (#169) ---------------------------------------------------------
+# cron runs with PATH=/usr/bin:/bin. Neither watchdog's toolchain lives there:
+# `macf` is in the npm global prefix, and `yq-go` only exists inside a devbox
+# shell (the system /usr/bin/yq is python-yq, a different CLI). The line used to
+# rely on host-prelude.sh for this — but that file does not exist on this host, so
+# `[ -f … ] && . …` short-circuited SILENTLY and both watchdogs ran dep-less for
+# ~37 days. Bake an explicit PATH into the line instead of depending on a file
+# that may not be there; keep the prelude source as an additive extra.
+CRON_PATH="/usr/local/bin:/usr/bin:/bin"
+for d in "$HOME/.npm-global/bin" "$HOME/.nix-profile/bin" "$HOME/.local/bin"; do
+  [ -d "$d" ] && CRON_PATH="$d:$CRON_PATH"
+done
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --manifest)             MANIFEST_ARG="--manifest $2"; shift 2 ;;
@@ -84,6 +100,7 @@ while [ $# -gt 0 ]; do
     --no-token)             NO_TOKEN=1; shift ;;
     --uninstall)            UNINSTALL=1; shift ;;
     --print)                PRINT_ONLY=1; shift ;;
+    --skip-preflight)       SKIP_PREFLIGHT=1; shift ;;
     -h|--help)              usage; exit 0 ;;
     *) echo "install-cron.sh: unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -142,13 +159,67 @@ if [ "$WITH_RUNNER_WD" -eq 1 ]; then
   RUNNER_WD_CMD="; $RUNNER_WD $EXECUTE_ARG $RESTART_ARG >> $RUNNER_WD_LOG 2>&1"
 fi
 
-# the cron command: prelude (toolchain) → mint GH_TOKEN → run reconcile (+ the
-# optional runner-watchdog leg), append to the respective log(s)
-CMD="[ -f $PRELUDE ] && . $PRELUDE; ${TOKEN_PREFIX}$RECON $MANIFEST_ARG $ROUTING_ARG $EXECUTE_ARG $RESTART_ARG >> $LOG 2>&1${RUNNER_WD_CMD}"
+# the cron command: explicit PATH (#169) → prelude (extra toolchain, if present)
+# → mint GH_TOKEN → run reconcile (+ the optional runner-watchdog leg), appending
+# to the respective log(s)
+CMD="PATH=$CRON_PATH; export PATH; [ -f $PRELUDE ] && . $PRELUDE; ${TOKEN_PREFIX}$RECON $MANIFEST_ARG $ROUTING_ARG $EXECUTE_ARG $RESTART_ARG >> $LOG 2>&1${RUNNER_WD_CMD}"
 LINE="$INTERVAL $CMD $MARKER"
 
 if [ "$PRINT_ONLY" -eq 1 ]; then
   echo "$LINE"; exit 0
+fi
+
+# --- preflight: does the CRON environment actually have the toolchain? (#169) --
+# A green install MUST mean a working sweep. Both prior failures reproduced only
+# under cron's PATH — the environment nobody tested — while the operator's
+# interactive shell (devbox/npm-global on PATH) looked perfectly healthy. So probe
+# the cron-equivalent env, and aggregate ALL gaps into one report (Pattern D)
+# instead of failing on the first.
+if [ "$SKIP_PREFLIGHT" -ne 1 ]; then
+  cron_env() { env -i PATH="$CRON_PATH" HOME="$HOME" sh -c "$1" 2>/dev/null; }
+  missing=""
+
+  # 1. the macf CLI — reconcile.sh's fleet-doctor probe. Mirrors reconcile.sh's
+  #    resolution order, so preflight passes exactly when the reconciler will.
+  if [ -z "${MACF_FLEET_DOCTOR_CMD:-}" ]; then
+    macf_found=""
+    for cand in "${MACF_CLI:-}" "$(cron_env 'command -v macf')" "$HOME/.npm-global/bin/macf"; do
+      [ -n "$cand" ] && [ -x "$cand" ] && { macf_found="$cand"; break; }
+    done
+    if [ -n "$macf_found" ]; then
+      echo "  ✓ macf CLI: $macf_found"
+    else
+      missing="$missing\n  - macf CLI not resolvable from cron (PATH=$CRON_PATH, \$HOME/.npm-global/bin) — reconcile.sh's fleet-doctor probe returns empty and every sweep FATALs"
+    fi
+  else
+    echo "  ✓ macf CLI: (operator override MACF_FLEET_DOCTOR_CMD)"
+  fi
+
+  # 2. jq — hard requirement of both legs
+  if [ -n "$(cron_env 'command -v jq')" ]; then echo "  ✓ jq: $(cron_env 'command -v jq')"
+  else missing="$missing\n  - jq not on cron PATH ($CRON_PATH) — both watchdogs abort"; fi
+
+  # 3. YAML→JSON for the runner registry — exercise the REAL converter chain in
+  #    the cron env rather than trusting that a binary named `yq` is yq-go.
+  if [ "$WITH_RUNNER_WD" -eq 1 ]; then
+    RY="$(cd "$(dirname "$RUNNER_WD")" && pwd)/../runner/runners.yaml"
+    conv=""
+    if [ -n "$(cron_env "yq -o=json '$RY' 2>/dev/null | head -c1")" ];      then conv="yq-go"
+    elif [ -n "$(cron_env "yq . '$RY' 2>/dev/null | head -c1")" ];          then conv="python-yq"
+    elif [ -n "$(cron_env "python3 -c 'import yaml' >/dev/null 2>&1 && echo ok")" ]; then conv="python3+PyYAML"
+    fi
+    if [ -n "$conv" ]; then echo "  ✓ YAML→JSON: $conv"
+    else missing="$missing\n  - no working YAML→JSON converter on cron PATH — runner-watchdog.sh skips every sweep (this is exactly the #169 outage)"; fi
+  fi
+
+  if [ -n "$missing" ]; then
+    printf 'FATAL: the cron environment is missing dependencies the watchdogs need:%b\n' "$missing" >&2
+    echo "" >&2
+    echo "Installing anyway would produce a cron that runs, logs, and does NOTHING —" >&2
+    echo "the #169 failure mode (37 days of silent no-op). Fix the gaps, or re-run" >&2
+    echo "with --skip-preflight if you are deliberately installing ahead of the deps." >&2
+    exit 2
+  fi
 fi
 
 printf '%s\n%s\n' "$EXISTING" "$LINE" | grep -v '^$' | crontab -

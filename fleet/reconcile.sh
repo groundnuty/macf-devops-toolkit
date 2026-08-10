@@ -126,6 +126,52 @@ done
 command -v jq >/dev/null || { echo "FATAL: jq not found (cron needs host-prelude)" >&2; exit 2; }
 [ -f "$MANIFEST" ] || { echo "FATAL: desired-agents manifest not found: $MANIFEST" >&2; exit 2; }
 
+# --- self-alert: the reconciler itself cannot run (#169) ----------------------
+# A supervisor that dies on a dependency error is WORSE than an unsupervised agent,
+# because its silence is indistinguishable from "all healthy". Route can't-run
+# conditions through the same ALERT_DIR sentinel a real outage uses. Reserved name
+# (leading `_`, never a valid agent name), dedup'd so a persistent misconfiguration
+# doesn't rewrite it on every 10-minute tick.
+reconcile_self_alert() {
+  local why="$1" name="_watchdog-self"
+  echo "reconcile: CANNOT RECONCILE — $why" >&2
+  [ -e "$ALERT_DIR/$name" ] && { echo "    [skip] self-alert already open (dedup) — clear $ALERT_DIR/$name once fixed" >&2; return 0; }
+  if [ "$EXECUTE" -eq 1 ]; then
+    mkdir -p "$ALERT_DIR"
+    printf 'reconcile cannot run: %s\n' "$why" > "$ALERT_DIR/$name"
+    echo "    [EXECUTE] self-alert written to $ALERT_DIR/$name" >&2
+  else
+    echo "    [dry-run] would write self-alert to $ALERT_DIR/$name" >&2
+  fi
+  return 0
+}
+
+# --- resolve the macf CLI (#169) ---------------------------------------------
+# Cron runs with PATH=/usr/bin:/bin, where `macf` does NOT exist — it lives in the
+# npm global prefix ($HOME/.npm-global/bin). The bare-command default therefore
+# produced empty stdout on every tick, which the schema-assert below reported as
+# "probe FAILED", and the agent watchdog did nothing for ~37 days. Resolve to an
+# ABSOLUTE path when the operator hasn't overridden the command outright.
+# Skipped when --fleet-json supplies the probe result from a file (offline tests,
+# operator-canned fixtures) — no CLI is needed on that path.
+if [ -z "${MACF_FLEET_DOCTOR_CMD:-}" ] && [ -z "$FLEET_JSON" ]; then
+  MACF_BIN=""
+  for cand in \
+    "${MACF_CLI:-}" \
+    "$(command -v macf 2>/dev/null || true)" \
+    "$HOME/.npm-global/bin/macf" \
+    "$(npm prefix -g 2>/dev/null)/bin/macf"
+  do
+    [ -n "$cand" ] && [ -x "$cand" ] && { MACF_BIN="$cand"; break; }
+  done
+  if [ -n "$MACF_BIN" ]; then
+    FLEET_DOCTOR_CMD="$MACF_BIN fleet doctor --json"
+  else
+    reconcile_self_alert "macf CLI not found (tried \$MACF_CLI, PATH=$PATH, \$HOME/.npm-global/bin/macf, npm prefix -g) — cannot probe fleet state"
+    exit 2
+  fi
+fi
+
 # Rate-limit signature (#129): resolve from the stall-signatures allowlist (the SAME
 # pattern resume.sh nudges on — one source of truth). FAIL-OPEN to a literal fallback
 # if the file/jq read fails, so a missing allowlist degrades the backoff guard safely
