@@ -39,10 +39,10 @@ fleets:
         repo: groundnuty/macf-devops-toolkit
         visibility: public      # CORRECTED 2026-07-03 — GitHub reports PUBLIC (was mislabeled private)
         status: live            # non-ephemeral svc.sh on /mnt/volume1/macf-runners/macf-devops-toolkit (2026-07-02)
-        note: "PUBLIC repo. origin-routing (macf-actions#59) is NOT yet landed (OPEN), so
-          self-hosted fork-safety currently rests ONLY on the repo native fork-PR-approval
-          setting (operator-enabled). Once that lands, origin-routing is the defense-in-depth
-          second layer. Flagged for operator review on the devops#90 thread."
+        note: "PUBLIC repo. Two safety layers BOTH in place (corrected 2026-07-07): origin-routing
+          (macf-actions#59 CLOSED / PR #60 merged, shipped in v3.4.x — trusted actor to self-hosted,
+          everyone else to ubuntu-latest) PLUS the repo native fork-PR-approval setting
+          (all_external_contributors, enforced at register by the #161 precheck)."
       - name: macf-auditor-agent
         repo: groundnuty/macf-auditor-agent
         visibility: private

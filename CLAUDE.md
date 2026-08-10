@@ -43,6 +43,8 @@ This is the devops workspace. Layout follows `groundnuty/onedata/spice-deploymen
   - `Makefile` (thin) + `devbox.json` (helm, kubectl, k3d, grpcurl, yq-go, jq pinned)
   - `hack/*.sh` — operator scripts (smoke, langfuse-bootstrap)
 - `environments/Makefile` — shared parent Makefile; child envs `include ../Makefile`. **`make` is the operational interface** — every casual op is a target (per `feedback_devbox_makefile_interface.md`).
+- `runner/` — the self-hosted GitHub Actions runner fleet (see §"Self-hosted runner fleet" below): `runners.yaml` (THE registry — one entry generates its make targets), install/uninstall/reconcile/verify scripts, `devbox.json` + tab-completion, the fork-PR-approval precheck.
+- `fleet/` — agent supervision (DR-006/DR-031): `reconcile.sh` (agent watchdog cron), `runner-watchdog.sh` (runner liveness), `maintenance-lock.sh` (upgrade ≠ outage), `upgrade.sh`, `resume.sh`, `install-cron.sh`.
 
 ## Cluster topology + standard endpoints (live)
 
@@ -75,6 +77,37 @@ Persistent state lives on the monitoring VM's `/mnt/volume1` (`/dev/vdb`, ~200 G
 — never the root disk. k3s data-dir (embedded etcd + container images), PVCs
 (local-path), and the 6-hourly etcd snapshots all live there. See
 `feedback_use_mnt_volume1_for_heavy_storage` memory + DR-004.
+
+## Self-hosted runner fleet (routing fast-path) — live as of 2026-07-04
+
+Agent **routing** (the macf-actions Agent Router) runs on self-hosted runners on the *agents* VM
+(`orzech-dev-agents`, NOT the monitoring VM) — skipping the ~18s tailnet-join a github-hosted
+runner pays. Measured: routing job **~24s → ~13.6s (~40-45%)**; the join-skip is the dominant
+lever, plus **Lever B** (action-archive-cache) at ~2s/job. There is **no workflow-total win**
+(the always-github `pick-runner` gate + queueing wash it out) — quote the per-job number only.
+
+**`runner/runners.yaml` is THE registry** — one entry auto-generates `make runner-<name>` /
+`uninstall-<name>` / `reinstall-<name>` (+ `fleet-<fleet>`); nothing is hardcoded. Four runners
+are **live** (macf fleet), all isolated under `/mnt/volume1/macf-runners/<name>` sharing ONE
+Lever-B cache + the low-priv `macf-runner` user; CV + icsoc fleets are **registered but not yet
+provisioned**.
+
+    cd runner && devbox shell            # yq/jq/gh + tab-completion
+    make runner-<name>                   # provision (idempotent; prompts y/N)
+    make reinstall-<name>                # teardown + forced reinstall (prompt-free)
+    make verify-all                      # health-check every runner
+
+- **Tokens auto-mint from the OPERATOR's `gh` creds** (`sudo -u $SUDO_USER gh`) — the bot is
+  **always 403** on `administration:*`, so runner ops are operator-run by design.
+- **Public repos** get a **fork-PR-approval precheck** at register (requires
+  `all_external_contributors`) — the deploy refuses an unsafe public repo. Origin-routing
+  (macf-actions#60, v3.4.x) is the second layer: trusted actor → self-hosted, else ubuntu-latest.
+- **Register FIRST, activate SECOND.** A repo pinned below `@v3.4.1` targets nothing self-hosted,
+  so registering is inert+safe; bumping the pin *before* a runner exists queues routing forever.
+- **Resilience:** `Restart=always` (crash → ~5s auto-recovery) + `fleet/runner-watchdog.sh`
+  (failed/gone unit → heal or alert; skips runners under an active maintenance-lock).
+  Enable its cron with `make enable-runner-watchdog`. ⚠ **Alerts currently reach no one** —
+  Alertmanager has no receiver (devops#166); a down runner does NOT fall back to github-hosted.
 
 ## Bootstrap flow summary
 
