@@ -140,6 +140,44 @@ jobs:
             echo "::warning::Activity spans more than --max-span; bundling the most recent $KEPT of $TOTAL activity clusters. Earlier activity is EXCLUDED (recorded in manifest.json)."
           fi
 
+      # The workflow used to run whatever was checked out at ~/repos/... on the VM
+      # — the OPERATOR's working copy. It was sitting on a feature branch 70
+      # commits behind main, so every change merged to the snapshot script
+      # silently did not apply, and the run failed with `unknown arg:
+      # --window-provenance` for a flag that had been on main for hours. Nothing
+      # anywhere asserted "the VM is running the code this workflow just merged."
+      #
+      # So: CI gets its OWN checkout, pinned to this run's commit, in a CI-owned
+      # path that never touches the operator's working tree. Public repo, so the
+      # clone needs no credentials on the VM (see #176 — we keep the VM
+      # credential-free on purpose).
+      - name: Sync the VM's CI checkout to THIS commit
+        env:
+          VM_HOST: ${{ vars.OBS_RUNNER_HOST }}
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/obs-runner ubuntu@"$VM_HOST" "set -e
+            CI_DIR=\$HOME/.cache/macf-obs-snapshot
+            if [ ! -d \$CI_DIR/.git ]; then
+              git clone --quiet https://github.com/${{ github.repository }}.git \$CI_DIR
+            fi
+            cd \$CI_DIR
+            git fetch --quiet origin main
+            git checkout --quiet --detach origin/main
+            echo \"VM CI checkout now at: \$(git rev-parse --short HEAD) \$(git log -1 --pretty=%s)\""
+
+          # Pattern A at this boundary: assert the VM-side script actually
+          # SUPPORTS what we are about to send it, rather than trusting that the
+          # sync worked. A version mismatch must fail HERE, naming the cause —
+          # not three steps later as an opaque `unknown arg`.
+          ssh -i ~/.ssh/obs-runner ubuntu@"$VM_HOST" \
+            "grep -q -- '--window-provenance' \$HOME/.cache/macf-obs-snapshot/environments/macf/hack/observability-snapshot.sh" \
+            || { echo "::error::The VM's CI checkout does not support --window-provenance."; \
+                 echo "::error::Its copy of observability-snapshot.sh is older than this workflow."; \
+                 echo "::error::The sync step above did not produce the expected code — check it before anything else."; \
+                 exit 1; }
+          echo "✓ VM-side script supports the flags this run will pass"
+
       - name: Run snapshot script on the VM via SSH
         env:
           REPO: ${{ steps.ref.outputs.repo }}
@@ -163,7 +201,7 @@ jobs:
             GRAFANA_FLAG="--grafana-base '${{ vars.GRAFANA_BASE }}'"
           fi
           ssh -i ~/.ssh/obs-runner ubuntu@"$VM_HOST" \
-            "cd ~/repos/groundnuty/macf-devops-toolkit/environments/macf && \
+            "cd \$HOME/.cache/macf-obs-snapshot/environments/macf && \
              devbox run -q -- bash hack/observability-snapshot.sh \
                --mode time-window \
                --filter-key 'gen_ai.agent.name' \
