@@ -201,7 +201,22 @@ else
   # probe result (valid JSON + schema_version) from a genuine failure (auth/network/
   # crash → non-JSON). [bug caught by live dry-run 2026-06-27; offline tests via
   # --fleet-json bypass the command's exit code.]
-  ACTUAL_RAW="$($FLEET_DOCTOR_CMD 2>/dev/null || true)"
+  # Run from the WORKSPACE ROOT, and KEEP stderr (#169). Two separate bugs lived
+  # in the one line this replaces:
+  #
+  #  1. `macf fleet doctor` is cwd-SENSITIVE — it walks up from cwd for
+  #     `.macf/macf-agent.json`. cron's cwd is $HOME, which is not a MACF project,
+  #     so the CLI aborted with "Not in a MACF project" and printed NOTHING to
+  #     stdout. Resolve relative to this script instead of inheriting cron's cwd.
+  #  2. `2>/dev/null` discarded the one message that explained it. For 37 days the
+  #     probe's own diagnosis was thrown away and the supervisor reported a
+  #     generic "probe FAILED". Never silence the stderr of the thing you are
+  #     diagnosing — capture it and surface it in the failure path.
+  WS_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+  DOCTOR_ERR="$(mktemp)"
+  ACTUAL_RAW="$(cd "$WS_ROOT" && $FLEET_DOCTOR_CMD 2>"$DOCTOR_ERR" || true)"
+  DOCTOR_STDERR="$(head -c 500 "$DOCTOR_ERR" 2>/dev/null || true)"
+  rm -f "$DOCTOR_ERR"
 fi
 
 # HARD schema-version assert (a silent field-rename would blind the supervisor —
@@ -216,10 +231,11 @@ GOT_SCHEMA="$(printf '%s' "$ACTUAL_RAW" | jq -r '.schema_version // "missing"' 2
   # differs completely. Name which one happened.
   if [ -z "$ACTUAL_RAW" ]; then
     echo "FATAL: '$FLEET_DOCTOR_CMD' produced NO OUTPUT AT ALL." >&2
-    echo "       → the command did not run (binary not found / not executable) or died before printing." >&2
-    echo "       → check resolution first: command -v macf ; ls -l \$HOME/.npm-global/bin/macf" >&2
-    echo "       → under cron, PATH=/usr/bin:/bin — the npm global bin is NOT on it (#169)." >&2
-    reconcile_self_alert "fleet-doctor probe produced no output — '$FLEET_DOCTOR_CMD' did not run"
+    echo "       → the command did not run, or aborted before printing to stdout." >&2
+    [ -n "${DOCTOR_STDERR:-}" ] && { echo "       → its stderr said:" >&2; printf '       %s\n' "$DOCTOR_STDERR" >&2; }
+    echo "       → common causes: binary unresolvable under cron's PATH, or cwd is not a" >&2
+    echo "         MACF project (fleet doctor walks up from cwd for .macf/macf-agent.json)." >&2
+    reconcile_self_alert "fleet-doctor probe produced no output: ${DOCTOR_STDERR:-'(no stderr)'}"
   elif ! printf '%s' "$ACTUAL_RAW" | jq -e . >/dev/null 2>&1; then
     echo "FATAL: '$FLEET_DOCTOR_CMD' returned NON-JSON output." >&2
     echo "       → probe FAILED at runtime (auth 401 / network / crash). First 200 chars:" >&2
