@@ -9,7 +9,15 @@
 #     Queries each backend for spans/metrics/logs matching the filter
 #     within the time window. Writes JSON files to --out-dir.
 #
-#   --mode github-issue  (convenience wrapper for the per-issue use-case)
+#   --mode github-issue  (convenience wrapper — OPERATOR-RUN ONLY)
+#     Requires `gh` on PATH *and* GitHub credentials. Neither exists on the
+#     monitoring VM by design: a token passed over SSH lands in the VM's process
+#     list, and installing an authenticated gh adds a credentialed dependency to
+#     the box that holds all our telemetry. So the GH Actions workflow does the
+#     GitHub lookups on the RUNNER (where GITHUB_TOKEN already lives) and calls
+#     this script in `time-window` mode with the derived values. Use this mode
+#     from an operator shell that has gh authenticated; don't wire it into CI.
+#
 #     Inputs: --repo <owner>/<repo>, --issue <N>
 #     Pulls the issue's GitHub event timeline, derives:
 #       - actor = the agent who closed the issue
