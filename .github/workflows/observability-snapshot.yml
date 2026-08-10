@@ -121,30 +121,24 @@ jobs:
           NUMBER: ${{ steps.ref.outputs.number }}
         run: |
           set -euo pipefail
-          # Same resolution order as hack/observability-snapshot.sh's github-issue
-          # mode: closedBy → first assignee → author. Keep these in lockstep.
-          ACTOR=$(gh issue view "$NUMBER" --repo "$REPO" --json closedBy --jq '.closedBy.login // empty' 2>/dev/null || true)
-          if [ -z "$ACTOR" ]; then
-            ACTOR=$(gh issue view "$NUMBER" --repo "$REPO" --json assignees,author --jq '.assignees[0].login // .author.login // empty')
+          # ONE implementation, shared with the script's github-issue mode — the
+          # inline copy this replaces had to be kept in lockstep by hand, and had
+          # already drifted: it asked for `--json closedBy`, which this gh rejects
+          # as an unknown field, behind `2>/dev/null || true`. The error was
+          # swallowed and it ALWAYS fell through to the author fallback, which
+          # looked right only because a self-filed issue's author is usually its
+          # closer. The helper reads the REST timeline instead (#177).
+          OUT=$(bash environments/macf/hack/derive-snapshot-window.sh \
+                  --repo "$REPO" --issue "$NUMBER")
+          printf '%s\n' "$OUT"
+          printf '%s\n' "$OUT" >> "$GITHUB_OUTPUT"
+          # Surface a clamp as a workflow annotation too — a bundle covering less
+          # than the issue's full history must never be a silent detail.
+          if printf '%s\n' "$OUT" | grep -q '^clamped=1$'; then
+            KEPT=$(printf '%s\n' "$OUT" | sed -n 's/^clusters_kept=//p')
+            TOTAL=$(printf '%s\n' "$OUT" | sed -n 's/^clusters_total=//p')
+            echo "::warning::Activity spans more than --max-span; bundling the most recent $KEPT of $TOTAL activity clusters. Earlier activity is EXCLUDED (recorded in manifest.json)."
           fi
-          # GitHub renders bot logins as `app/<name>` or `<name>[bot]`; the
-          # gen_ai.agent.name resource attr stamped by claude.sh has neither.
-          AGENT_NAME=$(printf '%s' "$ACTOR" | sed -e 's,^app/,,' -e 's,\[bot\]$,,')
-          CREATED_AT=$(gh issue view "$NUMBER" --repo "$REPO" --json createdAt --jq '.createdAt')
-          CLOSED_AT=$(gh issue view "$NUMBER" --repo "$REPO" --json closedAt --jq '.closedAt // (now | todate)')
-          START_EPOCH=$(date -u -d "$CREATED_AT" +%s)
-          END_EPOCH=$(date -u -d "$CLOSED_AT" +%s)
-          if [ -z "$AGENT_NAME" ]; then
-            echo "::error::could not derive an actor for $REPO#$NUMBER (closedBy/assignee/author all empty)."
-            echo "::error::Snapshot would filter on an empty gen_ai.agent.name and bundle nothing."
-            exit 1
-          fi
-          echo "  actor=$ACTOR  filter=gen_ai.agent.name=$AGENT_NAME  window=[$START_EPOCH, $END_EPOCH]"
-          {
-            echo "filter_value=$AGENT_NAME"
-            echo "start=$START_EPOCH"
-            echo "end=$END_EPOCH"
-          } >> "$GITHUB_OUTPUT"
 
       - name: Run snapshot script on the VM via SSH
         env:
@@ -176,6 +170,7 @@ jobs:
                --filter-value '${{ steps.window.outputs.filter_value }}' \
                --start '${{ steps.window.outputs.start }}' \
                --end '${{ steps.window.outputs.end }}' \
+               --window-provenance '{\"windows\":${{ steps.window.outputs.windows_json }},\"clusters_total\":${{ steps.window.outputs.clusters_total }},\"clusters_kept\":${{ steps.window.outputs.clusters_kept }},\"clamped\":${{ steps.window.outputs.clamped }},\"span_requested_seconds\":${{ steps.window.outputs.span_requested }},\"coverage_seconds\":${{ steps.window.outputs.coverage_seconds }}}' \
                --out-dir '$REMOTE_BUNDLE' \
                $GRAFANA_FLAG"
           # scp the bundle back to the runner. Bundle path `./bundle/` is

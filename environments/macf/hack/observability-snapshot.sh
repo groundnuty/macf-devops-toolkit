@@ -6,8 +6,13 @@
 #
 #   --mode time-window  (the primitive)
 #     Inputs: --filter-key <attr>, --filter-value <val>, --start <epoch>, --end <epoch>
+#             [--window-provenance <json>]
 #     Queries each backend for spans/metrics/logs matching the filter
 #     within the time window. Writes JSON files to --out-dir.
+#     --window-provenance carries derive-snapshot-window.sh's cluster breakdown
+#     straight into manifest.json, so a CLAMPED window (one that deliberately
+#     excludes earlier activity) is visible in the bundle itself rather than only
+#     in the log of whoever produced it.
 #
 #   --mode github-issue  (convenience wrapper — OPERATOR-RUN ONLY)
 #     Requires `gh` on PATH *and* GitHub credentials. Neither exists on the
@@ -19,12 +24,23 @@
 #     from an operator shell that has gh authenticated; don't wire it into CI.
 #
 #     Inputs: --repo <owner>/<repo>, --issue <N>
-#     Pulls the issue's GitHub event timeline, derives:
-#       - actor = the agent who closed the issue
-#       - filter = gen_ai.agent.name=<actor>
-#       - time window = union of [t-5min, t+5min] around each event by actor,
-#                       collapsed to overall (start, end)
-#     Then dispatches to time-window mode.
+#     Delegates to derive-snapshot-window.sh (ONE implementation, shared with the
+#     CI path so the two cannot drift), which pulls the issue's REST timeline and
+#     derives:
+#       - actor  = whoever closed it (last `closed` event) → assignee → author
+#       - filter = gen_ai.agent.name=<actor>, [bot]/app/ prefixes stripped
+#       - window = union of [t-Δ, t+Δ] (Δ=5min) around each event BY THAT ACTOR,
+#                  merged into disjoint activity clusters, then reduced to the
+#                  most recent clusters fitting --max-span (default 6h)
+#     Then dispatches to time-window mode with the derived values.
+#
+#     NOTE (#177): this description used to be aspirational — the code actually
+#     used `createdAt → closedAt`, which on #163 meant a 903-HOUR window to
+#     capture ~40 minutes of work. Code and doc had drifted with the DOC being
+#     right; the implementation now matches. When the clusters are too far apart
+#     to fit one window, the reduction CLAMPS to the most recent activity and
+#     records exactly what it dropped in manifest.json — it never silently
+#     returns a window that covers less (or more) than it claims.
 #
 # All queries run from the VM where the cluster lives (uses kubectl
 # port-forwards and `kubectl exec`). For GH Actions remote invocation,
@@ -49,6 +65,7 @@ FILTER_KEY=""
 FILTER_VALUE=""
 START_EPOCH=""
 END_EPOCH=""
+WINDOW_PROVENANCE=""   # JSON from derive-snapshot-window.sh (#177)
 OUT_DIR=""
 REPO=""
 ISSUE=""
@@ -76,6 +93,7 @@ while [ $# -gt 0 ]; do
     --filter-value) FILTER_VALUE="$2"; shift 2 ;;
     --start)        START_EPOCH="$2"; shift 2 ;;
     --end)          END_EPOCH="$2"; shift 2 ;;
+    --window-provenance) WINDOW_PROVENANCE="$2"; shift 2 ;;
     --repo)         REPO="$2"; shift 2 ;;
     --issue)        ISSUE="$2"; shift 2 ;;
     --out-dir)      OUT_DIR="$2"; shift 2 ;;
@@ -91,29 +109,26 @@ mkdir -p "$OUT_DIR"
 # --- Mode dispatch ----------------------------------------------------------
 if [ "$MODE" = "github-issue" ]; then
   [ -z "$REPO" ] || [ -z "$ISSUE" ] && usage
-  command -v gh >/dev/null || { echo "error: gh CLI not on PATH" >&2; exit 1; }
-  echo "Deriving time window + filter from $REPO#$ISSUE GitHub events..."
-
-  ACTOR=$(gh issue view "$ISSUE" --repo "$REPO" --json closedBy --jq '.closedBy.login // empty' 2>/dev/null || true)
-  if [ -z "$ACTOR" ]; then
-    # Fallback: assignee, then issue author
-    ACTOR=$(gh issue view "$ISSUE" --repo "$REPO" --json assignees,author --jq '.assignees[0].login // .author.login // empty')
-  fi
-  # GitHub returns bot logins as `app/<name>` (or `<name>[bot]` in some
-  # endpoint shapes). Strip both forms so the filter matches the
-  # `gen_ai.agent.name` resource attr stamped by claude.sh (which has
-  # neither prefix nor suffix — just the canonical bot name).
-  AGENT_NAME=$(echo "$ACTOR" | sed -e 's,^app/,,' -e 's,\[bot\]$,,')
+  # Delegates to the SHARED derivation (#177) so this mode and the CI path can
+  # never drift apart — they were duplicated, and the duplicate had already
+  # drifted into a silently-swallowed `--json closedBy` error.
+  DERIVE="$(dirname "$0")/derive-snapshot-window.sh"
+  [ -x "$DERIVE" ] || { echo "error: $DERIVE missing/not executable" >&2; exit 1; }
+  command -v gh >/dev/null || { echo "error: gh CLI not on PATH — github-issue mode is OPERATOR-RUN; CI derives on the runner instead" >&2; exit 1; }
+  echo "Deriving actor + activity window from $REPO#$ISSUE ..."
+  DERIVED="$("$DERIVE" --repo "$REPO" --issue "$ISSUE")" || exit 1
+  FILTER_VALUE="${FILTER_VALUE:-$(printf '%s\n' "$DERIVED" | sed -n 's/^filter_value=//p')}"
   FILTER_KEY="${FILTER_KEY:-gen_ai.agent.name}"
-  FILTER_VALUE="${FILTER_VALUE:-$AGENT_NAME}"
-
-  # Build time window from the issue timeline. Use the issue's
-  # createdAt → closedAt as the outer bound (within-retention safe).
-  CREATED_AT=$(gh issue view "$ISSUE" --repo "$REPO" --json createdAt --jq '.createdAt')
-  CLOSED_AT=$(gh issue view "$ISSUE" --repo "$REPO" --json closedAt --jq '.closedAt // (now | todate)')
-  START_EPOCH=$(date -u -d "$CREATED_AT" +%s)
-  END_EPOCH=$(date -u -d "$CLOSED_AT" +%s)
-
+  START_EPOCH="$(printf '%s\n' "$DERIVED" | sed -n 's/^start=//p')"
+  END_EPOCH="$(printf '%s\n' "$DERIVED" | sed -n 's/^end=//p')"
+  WINDOW_PROVENANCE="$(printf '%s\n' "$DERIVED" | jq -Rn '
+      [inputs | select(test("^[a-z_]+=")) | capture("^(?<key>[a-z_]+)=(?<value>.*)$")] | from_entries
+      | { windows: (.windows_json | fromjson),
+          clusters_total: (.clusters_total|tonumber),
+          clusters_kept:  (.clusters_kept|tonumber),
+          clamped:        (.clamped|tonumber),
+          span_requested_seconds: (.span_requested|tonumber),
+          coverage_seconds:       (.coverage_seconds|tonumber) }' <<<"$DERIVED")"
   echo "  actor=$ACTOR  filter=$FILTER_KEY=$FILTER_VALUE  window=[$START_EPOCH, $END_EPOCH]"
 
 elif [ "$MODE" = "time-window" ]; then
@@ -447,7 +462,8 @@ cat > "$OUT_DIR/manifest.json" <<MANIFEST
     "end_epoch": $END_EPOCH,
     "start_iso": "$(date -u -d "@$START_EPOCH" +%Y-%m-%dT%H:%M:%SZ)",
     "end_iso": "$(date -u -d "@$END_EPOCH" +%Y-%m-%dT%H:%M:%SZ)",
-    "duration_seconds": $((END_EPOCH - START_EPOCH))
+    "duration_seconds": $((END_EPOCH - START_EPOCH)),
+    "provenance": ${WINDOW_PROVENANCE:-null}
   },
   "github": $([ -n "$REPO" ] && echo "{\"repo\":\"$REPO\",\"issue\":$ISSUE}" || echo "null"),
   "summary": {
