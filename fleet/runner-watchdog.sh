@@ -171,13 +171,46 @@ _runner_watchdog_decide() {
 # unit-testable with hand-written JSON and no yq dependency; yq lives on the
 # runner devbox / host-prelude, not necessarily every dev sandbox) -----------
 
-# _runner_watchdog_registry_json <runners.yaml> -> the registry as JSON on stdout
-# (via yq), or a non-zero exit if yq is missing or the file can't be read.
+# _runner_watchdog_registry_json <runners.yaml> -> the registry as JSON on stdout,
+# or a non-zero exit if no working YAML->JSON converter is available or the file
+# can't be read.
+#
+# Cron-hardened (#169): the ONLY `yq` on cron's bare PATH here is /usr/bin/yq,
+# which is **python-yq 3.1.0** (a jq wrapper) — it rejects `-o=json` outright, so
+# the original yq-go-only implementation failed on every sweep for ~37 days.
+# yq-go lives in `runner/devbox.json`, i.e. inside a devbox shell that cron never
+# enters. So probe for a converter that actually works instead of assuming a
+# flavour, and validate the OUTPUT (jq-parseable, non-empty) rather than the exit
+# code — a wrong-flavour binary can exit 0 and emit something useless.
+#   1. $MACF_YQ (explicit operator override)   2. yq-go     3. python-yq
+#   4. python3 + PyYAML (always present where python-yq is)
 _runner_watchdog_registry_json() {
-  local yaml="$1"
-  command -v yq >/dev/null 2>&1 || return 1
-  [ -f "$yaml" ] || return 1
-  yq -o=json "$yaml" 2>/dev/null
+  local yaml="$1" out
+  [ -r "$yaml" ] || return 1
+
+  _rw_emit() {  # run "$@" and echo its stdout only if it is non-empty JSON
+    local o; o="$("$@" 2>/dev/null)" || return 1
+    [ -n "$o" ] || return 1
+    printf '%s' "$o" | jq -e . >/dev/null 2>&1 || return 1
+    printf '%s' "$o"
+  }
+
+  if [ -n "${MACF_YQ:-}" ] && out="$(_rw_emit "$MACF_YQ" -o=json "$yaml")"; then
+    printf '%s' "$out"; return 0
+  fi
+  if command -v yq >/dev/null 2>&1; then
+    # yq-go
+    if out="$(_rw_emit yq -o=json "$yaml")"; then printf '%s' "$out"; return 0; fi
+    # python-yq: YAML in, JSON out via the jq it wraps
+    if out="$(_rw_emit yq . "$yaml")";      then printf '%s' "$out"; return 0; fi
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    if out="$(_rw_emit python3 -c \
+      'import sys,yaml,json; json.dump(yaml.safe_load(open(sys.argv[1])),sys.stdout)' "$yaml")"; then
+      printf '%s' "$out"; return 0
+    fi
+  fi
+  return 1
 }
 
 # _runner_watchdog_filter_registry <statuses-csv> — reads registry JSON on STDIN,
@@ -240,6 +273,30 @@ _runner_watchdog_alert() {
   fi
   if [ "$EXECUTE" -eq 1 ]; then mkdir -p "$ALERT_DIR"; fi
   _runner_watchdog_act "alert for $name ($why)" bash -c "echo '$why' > '$ALERT_DIR/$name'"
+}
+
+# _runner_watchdog_self_alert <why> — the watchdog cannot run AT ALL (missing dep,
+# unreadable registry). #169: this used to be a bare `echo … skipping sweep` + exit 0,
+# which produced 5389 identical log lines over ~37 days and no fleet-visible signal —
+# the supervision layer was down and nothing said so. "The watchdog is down" is
+# strictly worse than "a runner is down", so it takes the SAME alert path as a real
+# outage. Reserved sentinel name (leading `_`, never a valid runner name), dedup'd so
+# a persistent misconfiguration doesn't rewrite it every 10 minutes.
+_runner_watchdog_self_alert() {
+  local why="$1" name="_watchdog-self"
+  echo "runner-watchdog: CANNOT SWEEP — $why" >&2
+  if [ -e "$ALERT_DIR/$name" ]; then
+    echo "    [skip] self-alert already open (dedup) — clear $ALERT_DIR/$name once fixed" >&2
+    return 0
+  fi
+  if [ "$EXECUTE" -eq 1 ]; then
+    mkdir -p "$ALERT_DIR"
+    printf 'runner-watchdog cannot sweep: %s\n' "$why" > "$ALERT_DIR/$name"
+    echo "    [EXECUTE] self-alert written to $ALERT_DIR/$name" >&2
+  else
+    echo "    [dry-run] would write self-alert to $ALERT_DIR/$name" >&2
+  fi
+  return 0
 }
 
 # _runner_watchdog_reset <name> — clear a stale alert once the runner recovers to
@@ -316,7 +373,7 @@ _runner_watchdog_main() {
   done
 
   if ! command -v jq >/dev/null 2>&1; then
-    echo "runner-watchdog: jq not found (cron needs host-prelude) — observational tool, skipping sweep" >&2
+    _runner_watchdog_self_alert "jq not found on PATH ($PATH) — cannot sweep"
     exit 0
   fi
   if ! command -v systemctl >/dev/null 2>&1; then
@@ -326,7 +383,11 @@ _runner_watchdog_main() {
 
   local registry_json
   if ! registry_json="$(_runner_watchdog_registry_json "$RUNNERS_YAML")"; then
-    echo "runner-watchdog: yq not found, or $RUNNERS_YAML unreadable — observational tool, skipping sweep" >&2
+    if [ -r "$RUNNERS_YAML" ]; then
+      _runner_watchdog_self_alert "no working YAML->JSON converter for $RUNNERS_YAML (tried \$MACF_YQ, yq-go, python-yq, python3+PyYAML) on PATH ($PATH) — cannot sweep"
+    else
+      _runner_watchdog_self_alert "registry unreadable: $RUNNERS_YAML — cannot sweep"
+    fi
     exit 0
   fi
 
@@ -336,6 +397,10 @@ _runner_watchdog_main() {
     echo "runner-watchdog: no runners at status in [$STATUSES] found in $RUNNERS_YAML — nothing to do" >&2
     exit 0
   fi
+
+  # We got a parseable registry with at least one runner => the watchdog itself is
+  # healthy; clear any open self-alert so a FUTURE dep breakage re-alerts (#169).
+  _runner_watchdog_reset "_watchdog-self"
 
   local rc=0
   printf '%-24s %-8s %s\n' "RUNNER" "DECISION" "DETAIL"

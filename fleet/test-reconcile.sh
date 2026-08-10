@@ -117,6 +117,45 @@ if printf '%s\n' "$NT_OUT" | grep -qF 'GH_TOKEN='; then
   echo "  FAIL: --no-token still baked a token mint"; fail=$((fail+1))
 else echo "  ok: --no-token omits the token mint"; pass=$((pass+1)); fi
 
+# #169: the line must carry an EXPLICIT PATH. It previously relied solely on
+# sourcing host-prelude.sh — which does not exist on this host, so `[ -f … ] && . …`
+# short-circuited silently and both watchdogs ran for ~37 days without their
+# toolchain (`macf` off-PATH; the only `yq` being python-yq).
+if printf '%s\n' "$CRON_OUT" | grep -qE '(^|[[:space:]])PATH=[^[:space:]]*npm-global'; then
+  echo "  ok: cron line bakes an explicit PATH incl. the npm-global bin (#169)"; pass=$((pass+1))
+else echo "  FAIL: cron line has no explicit npm-global PATH — macf will be unresolvable under cron"; fail=$((fail+1)); fi
+if printf '%s\n' "$CRON_OUT" | grep -qE 'PATH=.*;[[:space:]]*export PATH'; then
+  echo "  ok: the baked PATH is exported to the watchdog children"; pass=$((pass+1))
+else echo "  FAIL: baked PATH is not exported"; fail=$((fail+1)); fi
+
+echo "== reconcile.sh resolves the macf CLI off-PATH, and self-alerts when it can't (#169) =="
+# Under cron's PATH the bare `macf fleet doctor --json` produced empty stdout, which
+# the schema-assert reported as "probe FAILED" — every 10 minutes, for 37 days, with
+# no fleet-visible signal. These pin both halves of the fix.
+R_TMP="$(mktemp -d)"
+printf -- '- agent: alpha\n  workspace: /tmp/alpha\n' > "$R_TMP/manifest.yaml"
+
+# (a) macf unresolvable anywhere → exit 2 AND a self-alert sentinel (not a silent death)
+R_OUT="$(env -i PATH=/usr/bin:/bin HOME="$R_TMP/nohome" MACF_ALERT_DIR="$R_TMP/alerts" \
+  bash fleet/reconcile.sh --manifest "$R_TMP/manifest.yaml" --execute 2>&1 || true)"
+if printf '%s\n' "$R_OUT" | grep -q 'CANNOT RECONCILE'; then
+  echo "  ok: unresolvable macf CLI fails LOUD (not an empty-probe FATAL)"; pass=$((pass+1))
+else echo "  FAIL: unresolvable macf did not produce the CANNOT RECONCILE diagnostic"; fail=$((fail+1)); fi
+if [ -e "$R_TMP/alerts/_watchdog-self" ]; then
+  echo "  ok: 'watchdog cannot run' raises an alert sentinel (#169's core lesson)"; pass=$((pass+1))
+else echo "  FAIL: no self-alert written — the outage would stay invisible again"; fail=$((fail+1)); fi
+
+# (b) macf absent from PATH but present at the npm-global location → resolved, no self-alert
+FAKE_HOME="$R_TMP/home"; mkdir -p "$FAKE_HOME/.npm-global/bin"
+printf '#!/bin/sh\necho \x27{"schema_version":1,"agents":[]}\x27\n' > "$FAKE_HOME/.npm-global/bin/macf"
+chmod +x "$FAKE_HOME/.npm-global/bin/macf"
+R_OUT2="$(env -i PATH=/usr/bin:/bin HOME="$FAKE_HOME" MACF_ALERT_DIR="$R_TMP/alerts2" \
+  bash fleet/reconcile.sh --manifest "$R_TMP/manifest.yaml" 2>&1 || true)"
+if printf '%s\n' "$R_OUT2" | grep -q 'CANNOT RECONCILE'; then
+  echo "  FAIL: macf at \$HOME/.npm-global/bin was not resolved (the exact cron case)"; fail=$((fail+1))
+else echo "  ok: macf resolved from \$HOME/.npm-global/bin despite being off-PATH"; pass=$((pass+1)); fi
+rm -rf "$R_TMP"
+
 echo "== routing-doctor 2nd probe (increment 4) — FP-ignore + stale-registration =="
 # routing-fresh CARRIES the known FPs (session_ok=false, verdict=DEGRADED, pins_consistent
 # =false); a mesh-OK agent must stay OK → proves the reconciler ignores those FPs.
