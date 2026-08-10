@@ -20,10 +20,24 @@ GitHub Actions on issue/PR close → join Tailscale → SSH to the cluster VM �
 
 The GH-hosted Actions runner joins the tailnet via `tailscale/github-action@v2`. That action authenticates using a Tailscale OAuth client with `auth_keys` scope and a tag policy.
 
+> **AS DEPLOYED (2026-08-10, #56 / PR #174): the workflow advertises `tag:ci-runner`
+> and reuses the EXISTING route-reconciler OAuth client** — not a dedicated
+> `gha-runner` client. The operator chose reuse after confirming the ACL already lets
+> `tag:ci-runner` reach the monitoring VM. The dedicated-client path below is still the
+> cleaner design and is what to follow on a fresh tailnet; this note records what is
+> actually live so the doc doesn't describe an intent nobody implemented.
+>
+> **The tradeoff being accepted:** the snapshot job and the route reconciler now share
+> one credential *and* one tag. A rotation or ACL edit made for one silently changes the
+> other's blast radius, and a revocation breaks two unrelated things at once — where the
+> second failure looks mysterious because nothing links them. If you later split them,
+> mint the dedicated client per the steps below and flip `tags:` in
+> `.github/workflows/observability-snapshot.yml` back to `tag:gha-runner`.
+
 1. **Create the OAuth client.** In Tailscale admin: Settings → OAuth clients → New client.
    - Description: `macf observability snapshot runner`
    - Scopes: `auth_keys` (write)
-   - Tags allowed: `tag:gha-runner`
+   - Tags allowed: `tag:gha-runner` *(as deployed: reusing the `tag:ci-runner` client instead — see the note above)*
    - Save the client ID + secret (only shown once).
 
 2. **Update the tailnet's ACL** to recognize the `tag:gha-runner` tag, if not already present. In the tailnet ACL JSON (Tailscale admin → Access controls), add to the `tagOwners` map:
@@ -42,6 +56,15 @@ The GH-hosted Actions runner joins the tailnet via `tailscale/github-action@v2`.
    ]
    ```
 
+   ⚠️ **Verify the tag against the ACL BEFORE relying on the connect step.** A tag the
+   OAuth client isn't permitted to advertise makes `tailscale up` return
+   `Status 400: requested tags [...] are invalid or not permitted`. Per
+   `silent-fallback-hazards.md` Instance 11, the action can exhaust its internal retries
+   on that hard error and **still exit 0** — the runner never joins, the step is green,
+   and the failure resurfaces far downstream as "the VM is unreachable", sending you to
+   debug the wrong layer entirely. That is why the workflow carries a post-connect
+   `BackendState == "Running"` assert; keep it.
+
 3. **Store the OAuth credentials as ORG-LEVEL GitHub Actions secrets** (so all sister repos inherit them):
    - `groundnuty` → Settings → Secrets and variables → Actions → New organization secret
    - `TAILSCALE_OAUTH_CLIENT_ID` = the client ID
@@ -52,16 +75,30 @@ The GH-hosted Actions runner joins the tailnet via `tailscale/github-action@v2`.
 
 The runner SSHes from inside the tailnet to the VM, runs the snapshot script, scp's the bundle back. One keypair, used by the workflow on every run.
 
-1. **Generate a keypair** (locally, NOT on the VM — the private half lives in GitHub secrets):
+1. **Generate a keypair** (locally, NOT on the VM — the private half lives in GitHub secrets).
+   **Always mint a fresh, dedicated key — never reuse an existing admin key.** The private
+   half becomes a GitHub Actions secret, readable by every workflow that can read secrets
+   and by every action in their dependency trees; an admin key there means root-equivalent
+   shell on the box holding all our telemetry and the etcd snapshots. (Checked 2026-08-10:
+   the monitoring VM's `authorized_keys` held only unrestricted human admin keys — there
+   was nothing CI-purpose to reuse even if you wanted to.)
    ```bash
    ssh-keygen -t ed25519 -f /tmp/obs-runner-key -N "" -C "macf-obs-runner@gha"
    ```
    This produces `/tmp/obs-runner-key` (private) + `/tmp/obs-runner-key.pub` (public).
 
-2. **Install the public key on the VM**, appending to `ubuntu`'s authorized_keys:
+2. **Install the public key on the MONITORING VM**, appending to `ubuntu`'s authorized_keys
+   **with restrictions** — `restrict` drops agent/port/X11 forwarding and PTY allocation,
+   and `from=` pins it to the tailnet CGNAT range so the key is useless off-tailnet:
    ```bash
-   ssh ubuntu@100.124.163.105 'cat >> ~/.ssh/authorized_keys' < /tmp/obs-runner-key.pub
+   printf 'restrict,from="100.64.0.0/10" %s\n' "$(cat /tmp/obs-runner-key.pub)" \
+     | ssh ubuntu@orzech-dev-agents-monitoring.tail491af.ts.net 'cat >> ~/.ssh/authorized_keys'
    ```
+   > **Corrected 2026-08-10:** this step previously targeted `100.124.163.105`, which is
+   > **`orzech-dev-agents` — the AGENTS VM, not the monitoring VM** (confirmed via
+   > `tailscale status`). Following it installed the snapshot key on the wrong host. Use the
+   > monitoring VM's MagicDNS name, never a hardcoded IP: the addresses are DHCP/tailnet
+   > assigned and the two VMs are easy to confuse by number alone.
 
 3. **Test SSH-via-tailscale-from-laptop** (simulates what the runner will do, before wiring the workflow):
    ```bash
