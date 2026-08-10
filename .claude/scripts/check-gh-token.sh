@@ -76,9 +76,20 @@ fi
 # Note: `${GH_TOKEN:-}` expansion is mandatory under `set -u`; a bare
 # `${GH_TOKEN:0:4}` errors with "unbound variable" when the env var
 # is unset, which is exactly the case we need to handle.
+#
+# LOCAL MITIGATION 2026-08-10 (devops, pending canonical fix in
+# groundnuty/macf#827): GitHub now mints
+# **v3 installation tokens** shaped `ghs_<installation_id>_<base64url JWT>`
+# (~383 chars, contains `.` and `-`). The `[A-Za-z0-9_]` class rejected
+# every one of them, hard-blocking all `gh` / `git push` for the bot.
+# Charset broadened to include `.` and `-` (base64url + JWT separators).
+# The Pattern-B contract is preserved: shell metacharacters and
+# whitespace are still excluded, so `GH_TOKEN='ghs_; rm -rf <sentinel>'`
+# still BLOCKS. Do NOT "restore" this to the narrower class on the next
+# macf update without re-checking the live token format first.
 GH_TOKEN_VALUE="${GH_TOKEN:-}"
 TOKEN_PREFIX="${GH_TOKEN_VALUE:0:4}"
-if [[ -z "$GH_TOKEN_VALUE" ]] || [[ ! "$GH_TOKEN_VALUE" =~ ^ghs_[A-Za-z0-9_]+$ ]]; then
+if [[ -z "$GH_TOKEN_VALUE" ]] || [[ ! "$GH_TOKEN_VALUE" =~ ^ghs_[A-Za-z0-9_.-]+$ ]]; then
   cat >&2 <<ERR
 BLOCKED by MACF attribution-trap hook: this command would post as the USER, not the BOT.
 
