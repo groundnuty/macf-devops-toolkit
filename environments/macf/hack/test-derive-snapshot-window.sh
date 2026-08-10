@@ -123,6 +123,33 @@ $DSW --events-file "$TMP/none.json" --actor alice >/dev/null 2>&1 \
   && bad "no-events case succeeded — it invented a window" \
   || ok "no attributable events -> non-zero exit (refuses to guess)"
 
+echo "== provenance_json survives being passed as ONE shell-quoted argument =="
+# The regression this guards: the workflow first hand-assembled this JSON inside
+# a YAML `run:` block, mixing escaped \" literals with the real quotes that came
+# from the windows_json substitution. Inside the outer DOUBLE-quoted ssh argument
+# those real quotes terminated the string early, the snapshot script saw garbage
+# args and printed usage, and the run died at its LAST step.
+#
+# Which assertion actually catches that: the jq-validity one. `{\"windows\":...}`
+# has literal backslashes and is NOT valid JSON, so jq rejects it. Verified by
+# running the old broken form through these checks — the single-line and
+# one-argument assertions BOTH pass on it, so neither would have caught this.
+# They're kept as complementary guards against different breakages (a multiline
+# value corrupting GITHUB_OUTPUT; an embedded quote splitting the argument), but
+# don't mistake them for the guard on THIS bug.
+pj="$($DSW --events-file "$TMP/events.json" --actor alice 2>/dev/null | sed -n 's/^provenance_json=//p')"
+[ "$(printf '%s' "$pj" | wc -l)" = "0" ] && ok "provenance_json is a single line (safe for GITHUB_OUTPUT)" \
+  || bad "provenance_json spans multiple lines"
+printf '%s' "$pj" | jq -e 'has("windows") and has("clamped") and has("coverage_seconds")' >/dev/null 2>&1 \
+  && ok "provenance_json is valid JSON with the manifest fields" || bad "provenance_json invalid: $pj"
+case "$pj" in *"'"*) bad "provenance_json contains a single quote — would break '\$ARG' wrapping" ;;
+              *)     ok "provenance_json has no single quotes (survives '...' inside the ssh command)" ;; esac
+# Prove the round-trip the workflow actually performs: wrap in '...', let the
+# shell word-split, and confirm the receiving script sees exactly ONE argument.
+n_args="$(bash -c 'set -- '"'$pj'"'; echo $#')"
+[ "$n_args" = "1" ] && ok "reaches the receiving script as exactly one argument" \
+  || bad "shell split provenance_json into $n_args arguments (the #178 CI failure)"
+
 rm -rf "$TMP"
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
