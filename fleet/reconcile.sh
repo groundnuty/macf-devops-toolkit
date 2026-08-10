@@ -250,6 +250,19 @@ GOT_SCHEMA="$(printf '%s' "$ACTUAL_RAW" | jq -r '.schema_version // "missing"' 2
   exit 2
 }
 
+# The probe SUCCEEDED => the reconciler itself is healthy. Clear any open
+# self-alert so a FUTURE breakage re-alerts instead of being dedup'd into silence
+# forever (#169). runner-watchdog.sh has always done this; reconcile.sh shipped
+# without it in #170 — an asymmetry that recreated, in the recovery path, exactly
+# the stay-silent failure the self-alert was added to prevent.
+reconcile_self_reset() {
+  local name="_watchdog-self"
+  [ "$EXECUTE" -eq 1 ] || return 0
+  [ -e "$ALERT_DIR/$name" ] && { rm -f "$ALERT_DIR/$name"; echo "    [recovered] fleet-doctor probe OK -> self-alert cleared"; }
+  return 0
+}
+reconcile_self_reset
+
 # index actual agents by ack_agent (the kebab routing-label identity, NOT name)
 ACTUAL="$(printf '%s' "$ACTUAL_RAW" \
   | jq -r '.agents[] | [(.ack_agent // "?"), (.reachable|tostring), (.accepted|tostring)] | @tsv')"
