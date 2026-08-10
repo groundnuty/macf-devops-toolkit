@@ -66,6 +66,24 @@ jobs:
           oauth-secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
           tags: tag:ci-runner
 
+      # silent-fallback-hazards.md Instance 11: NEVER trust a retry-wrapping third-party
+      # action's exit code as evidence its own internal retries succeeded. On macf#461
+      # `tailscale up` returned `Status 400: requested tags [...] are invalid or not
+      # permitted` on all five internal retries and the action STILL exited 0 — the runner
+      # never joined, the step was green, and the failure resurfaced far downstream as
+      # "Tempo unreachable", costing an extra diagnostic cycle aimed at the wrong layer.
+      # (A tag/ACL mismatch has also been observed failing loudly — which branch you get is
+      # exactly what this assert stops you from having to know.)
+      - name: Verify tailnet is actually up
+        run: |
+          tailscale status --json | jq -e '.BackendState == "Running"' >/dev/null \
+            || { echo "::error::tailnet did not come up — BackendState != Running."; \
+                 echo "::error::The connect action may have exhausted its retries and exited 0 anyway"; \
+                 echo "::error::(e.g. a tag/ACL mismatch returns Status 400 on every attempt)."; \
+                 echo "::error::Check that the OAuth client is permitted to advertise the tag in 'tags:' above."; \
+                 tailscale status || true; exit 1; }
+          echo "✓ tailnet up (BackendState=Running)"
+
       - name: Install SSH key for VM access
         run: |
           mkdir -p ~/.ssh
