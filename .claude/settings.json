@@ -10,7 +10,7 @@
   },
   "permissions": {
     "allow": [
-      "Bash",
+      "Bash(*)",
       "Read",
       "Write",
       "Edit",
@@ -19,6 +19,14 @@
       "WebFetch",
       "WebSearch",
       "Agent",
+      "Skill(macf-agent:macf-status)",
+      "Skill(macf-agent:macf-issues)",
+      "Skill(macf-agent:macf-peers)",
+      "Skill(macf-agent:macf-ping)",
+      "Skill(macf-agent:macf-notify-peer)",
+      "mcp__plugin_macf-agent_macf-agent__notify_peer",
+      "mcp__plugin_macf-agent_macf-agent__checkpoint_to_memory",
+      "Bash",
       "mcp__claude_ai_Gmail__*",
       "mcp__claude_ai_Slack__*",
       "mcp__claude_ai_PubMed__*",
@@ -28,34 +36,20 @@
       "mcp__claude_ai_PDF_Viewer__*"
     ],
     "deny": [
-      "Bash(sudo *)",
-      "Bash(rm -rf /)",
-      "Bash(docker push *)",
-      "Bash(git push --force*)",
-      "Bash(git push * --force*)",
-      "Bash(git push -f)",
-      "Bash(git push -f *)",
-      "Bash(git push * -f)",
-      "Bash(git push * -f *)",
-      "Bash(git commit --no-verify *)",
-      "Bash(git commit -n *)",
       "Read(~/.ssh/id_*)",
       "Read(~/.ssh/*.pem)",
       "Read(~/.aws/**)",
       "Read(~/.gnupg/**)",
       "Read(~/.kube/**)",
       "Read(~/.config/gcloud/**)",
-      "Read(~/.npmrc)",
-      "Read(~/.pypirc)",
-      "Read(~/.docker/config.json)",
       "Read(~/.netrc)",
       "Read(~/.config/gh/**)",
       "Read(~/.bash_history)",
       "Read(~/.zsh_history)",
-      "Write(~/.claude.json)",
-      "Edit(~/.claude.json)",
       "Write(~/.claude/settings.json)",
       "Edit(~/.claude/settings.json)",
+      "Write(~/.claude.json)",
+      "Edit(~/.claude.json)",
       "Write(~/.ssh/**)",
       "Edit(~/.ssh/**)",
       "Write(~/.aws/**)",
@@ -89,7 +83,21 @@
       "Write(~/.zprofile)",
       "Edit(~/.zprofile)",
       "Write(~/.zshenv)",
-      "Edit(~/.zshenv)"
+      "Edit(~/.zshenv)",
+      "Bash(sudo *)",
+      "Bash(rm -rf /)",
+      "Bash(git push --force*)",
+      "Bash(git push * --force*)",
+      "Bash(git push -f)",
+      "Bash(git push -f *)",
+      "Bash(git push * -f)",
+      "Bash(git push * -f *)",
+      "Bash(git commit --no-verify *)",
+      "Bash(git commit -n *)",
+      "Bash(docker push *)",
+      "Read(~/.npmrc)",
+      "Read(~/.pypirc)",
+      "Read(~/.docker/config.json)"
     ]
   },
   "sandbox": {
@@ -114,7 +122,34 @@
       "podman:*",
       "aws:*",
       "gcloud:*",
-      "az:*"
+      "az:*",
+      "gh:*",
+      "npx:*",
+      "npm:*",
+      "node:*",
+      "make:*",
+      "tmux:*",
+      "jq:*",
+      "openssl:*",
+      "grep:*",
+      "rg:*",
+      "find:*",
+      "head:*",
+      "tail:*",
+      "cat:*",
+      "ls:*",
+      "wc:*",
+      "sort:*",
+      "awk:*",
+      "sed:*",
+      "diff:*",
+      "which:*",
+      "bash:*",
+      "sh:*",
+      "xargs:*",
+      "mkdir:*",
+      "cp:*",
+      "touch:*"
     ],
     "network": {
       "allowedDomains": [
@@ -146,6 +181,9 @@
         "~/.config/gcloud",
         "~/.ssh/id_*",
         "~/.ssh/*.pem"
+      ],
+      "allowRead": [
+        "/proc/self/fd"
       ]
     }
   },
@@ -192,6 +230,15 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/scripts/check-close-keyword.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/scripts/check-auditor-never-acts.sh"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -212,6 +259,22 @@
             "type": "command",
             "command": "echo \"Branch: $(git branch --show-current 2>/dev/null || echo detached). Recent: $(git log --oneline -3 2>/dev/null || echo no-commits)\"",
             "timeout": 5000
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/scripts/check-channels-enabled.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/scripts/macf-startup-pickup.sh"
           }
         ]
       }
