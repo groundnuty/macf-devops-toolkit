@@ -1,6 +1,6 @@
 name: Agent Router
 
-# Delegates to the reusable workflow in groundnuty/macf-actions@v1.3.4
+# Delegates to the reusable workflow in groundnuty/macf-actions@v3.4.2
 # (see https://github.com/groundnuty/macf-actions for source).
 #
 # Pinned to immutable v1.3.4 — old-school SSH + tmux routing, matching
@@ -58,7 +58,7 @@ jobs:
     # user account; DR-006 Profile mode). The SSH fallback (AGENT_SSH_KEY + the devops-agent
     # entry in agent-config.json) is RETAINED through the DR-027 2-month bake — revert is a
     # one-line pin flip @v3.3.0 -> @v1.3.4.
-    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v3.3.0
+    uses: groundnuty/macf-actions/.github/workflows/agent-router.yml@v3.4.2
     with:
       project: macf
       registry-api-path: /repos/groundnuty/groundnuty
