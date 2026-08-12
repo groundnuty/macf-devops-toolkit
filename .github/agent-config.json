@@ -26,6 +26,15 @@
       "workspace_dir": "/home/ubuntu/repos/groundnuty/macf",
       "ssh_user": "ubuntu",
       "ssh_key_secret": "AGENT_SSH_KEY"
+    },
+    "auditor-agent": {
+      "app_name": "macf-auditor-agent",
+      "host": "orzech-dev-agents.tail491af.ts.net",
+      "tmux_session": "macf@auditor-agent",
+      "tmux_bin": "tmux",
+      "workspace_dir": "/home/ubuntu/repos/groundnuty/macf-auditor-agent",
+      "ssh_user": "ubuntu",
+      "ssh_key_secret": "AGENT_SSH_KEY"
     }
   },
   "label_to_status": {
