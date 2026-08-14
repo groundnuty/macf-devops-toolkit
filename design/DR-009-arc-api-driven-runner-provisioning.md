@@ -121,13 +121,32 @@ DR-003's fleet keeps serving throughout. Migrating a working system while valida
 
 **ARC is considered proven when all hold:**
 
-1. A canary scale set on a **private** repo has served **≥ 50 real routing jobs over ≥ 7 days** with zero queue-stalls (jobs dispatched, not merely pods running).
+0. **A queue-time instrument exists** and is running. Criteria 1 and 2 are only observable if something measures dispatch latency and queued-but-unstarted jobs. A queued job is *precisely* the silent failure — no error, no red check, just absence — so without this, "zero queue-stalls observed" degrades to "nobody looked," the same shape as a doctor reporting green on a uniformly stale fleet. **The instrument is part of the spike, not an assumption of it**, and it is criterion 0 because criteria 1-2 are unmeasurable without it. (Raised by `@macf-science-agent[bot]` on PR #185.)
+1. A canary scale set on a **private** repo has served **≥ 50 real routing jobs over ≥ 7 days** with zero queue-stalls (jobs dispatched, not merely pods running), as measured by criterion 0.
 2. p95 end-to-end routing-job latency is **≤ 20s**, against the VM baseline of ~13.6s. If cold-start blows this, `minRunners` is tuned and the run repeats.
 3. **Destroy/recreate proven**: the scale set is deleted and re-created via the Kubernetes API alone, and resumes serving — no SSH, no `make`, no manual GitHub steps. This is the whole point of the change and is not optional.
-4. `macf-actions#72` has landed and **at least one repo has cut over** through the real `pick-runner` path, not only a scratch workflow.
+4. `macf-actions#72` has landed and **at least one repo has cut over** through the real `pick-runner` path, not only a scratch workflow — **and that repo's detection and dispatch agree**: the register-before-route gate scored `present` *for the runner that actually served the jobs*. Without this, criterion 4 can pass on a repo that still has a VM runner registered alongside, where the gate vouched for one runner and the jobs ran on another (§8).
 5. Liveness/alerting equivalent to `fleet/runner-watchdog.sh` exists for the ARC path.
 
 **Then**, and only then, retire VM runners **one repo at a time**, removing each `runners.yaml` entry as its ARC replacement takes over. Public repos (`macf`, `macf-devops-toolkit`) go **last**: GitHub advises against self-hosted runners on public repositories, and both of our safety layers (origin-routing, fork-PR approval) are workflow-side, so they must be re-verified under ARC rather than assumed to carry over.
+
+### 7.1 Retirement is about the VM mechanism, not about runner count
+
+A natural question (operator, 2026-08-14): *if runners can scale down when idle and scale up when work arrives, why retire anything at all?*
+
+That is the ARC end state, and it is what this DR migrates **to** — not something retirement works against. ARC scales runner pods to **zero** (`minRunners: 0`; note both `minRunners` and `maxRunners` at 0 creates nothing at all) and spins them up on job demand. The VM/systemd runners **cannot** participate in that: they are always-on processes at ~144 MB each, 24/7, whether or not a job ever arrives. Their inability to scale down is an argument *for* retiring them.
+
+**One component is irreducible: the listener.** It cannot scale to zero, because GitHub never connects inward — dispatch works by the listener holding an outbound HTTPS long-poll, so if nothing is awake, nothing can learn a job exists. One small listener per scale set is the floor. (Webhook-driven scaling, which would invert that direction, belongs to the legacy `HorizontalRunnerAutoscaler` mode being phased out in favour of the listener model; not a path to build on.)
+
+**Consequence for fleet scale, and it is favourable.** Each additional agent repo costs one small Go listener plus **zero** idle runner pods, against a ~144 MB always-on .NET process today. The "dozens of idle runners" concern that motivated this DR is materially reduced — though not eliminated, since the listener count still tracks repo count until the scope constraint in §1 is addressed by an organization.
+
+### 7.2 Abandonment criterion and retirement ownership
+
+§7 as first drafted defined **proven** and never defined **failed** — it was one-sided, and permitted retirement without triggering it (`@macf-science-agent[bot]`, PR #185). Both gaps reach the DR's own stated fear (both mechanisms alive forever) by *neither* criterion firing, because "not yet proven" and "quietly stalled" are indistinguishable from outside. An exit that only opens on success is not an exit.
+
+**Abandonment.** If criteria 0-5 are not all met by **2026-10-14 (two months)** or after **three tuning iterations** on criterion 2, whichever comes first, the spike is **abandoned**: the ARC platform is torn down, the VM fleet remains authoritative, and this DR closes as *not-taken* with the measured reasons recorded. Abandonment is a legitimate outcome, not a failure to be avoided by extending the deadline — and §10's option (c) is where the abandonment routes, not back to the status quo by default.
+
+**Ownership and cadence.** Meeting the criteria makes retirement *permitted*, not *scheduled* — the "I'll come back to it" shape that left `macf#872` sitting 36 days. So: `macf-devops-agent[bot]` owns retirement; the clock starts the day criterion 4 is met; one repo retires per week thereafter, private repos first, tracked as checklist items on #184. If a week passes with no repo retired and no blocker recorded on #184, that is itself the signal to escalate to the operator.
 
 ---
 
@@ -136,6 +155,12 @@ DR-003's fleet keeps serving throughout. Migrating a working system while valida
 `macf-actions@v3.4.2` `pick-runner` emits `labels='["self-hosted","macf-vm"]'`, and every downstream job derives `runs-on` from it. **ARC scale sets are addressed by installation name, not by label matching**, so the current router would never dispatch to an ARC runner — jobs would queue indefinitely, silently, behind a green `pick-runner`.
 
 Filed as `groundnuty/macf-actions#72`. It gates **cutover**, not the spike: ARC is validated end-to-end with a scratch workflow using `runs-on: <scale-set-name>` directly, so the two proceed independently.
+
+**The blocker has a second half, in a different repo — and fixing only the first makes things worse** (`@macf-science-agent[bot]`, PR #185 / #184). The register-before-route gate `checkRunnerUsableByRepo` (shipped in `macf#927`) decides whether to write `MACF_TRUSTED_ACTORS` by resolving runner **presence and visibility** — repo-scoped runner count, plus org runner-groups visible to the repo — and **never compares the runner's labels against what `pick-runner` emits**. That is harmless today only because VM runners happen to carry `macf-vm`.
+
+Under ARC it inverts: an ARC scale set registers runners the detection query *does* see, so the gate scores `present`, writes the variable, `pick-runner` emits `["self-hosted","macf-vm"]`, and nothing matches — **every routed job queues to timeout behind a green gate that has just confirmed a runner exists.** The safety mechanism becomes the delivery mechanism for the failure, precisely *because* it is working as designed.
+
+So the gate's invariant must widen from *"a runner usable by this repo exists"* to *"a runner **matching the labels this router will emit** is usable by this repo."* Fixing `runs-on` alone yields detection that is confidently wrong — strictly worse than today's, which is at least correctly blind to ARC. **Phase 4's real scope is therefore "dispatch and detection agree on one predicate," spanning `macf-actions` and `macf`**; an implementer reading only `#72` would fix half and reasonably believe the blocker cleared.
 
 ---
 
@@ -158,7 +183,19 @@ The entire runner fleet buys **~10 seconds per routing job** (24s → 13.6s meas
 
 If channel-servers were reachable without a tailnet join — and they already do mTLS, which is the hard part — GitHub-hosted runners would work and this subsystem would delete itself, taking its provisioning stage with it rather than relocating it. The counter-cost is Actions minutes on private repos, a billing question rather than an architectural one.
 
-Not taken now: it is a larger change touching the agents' network exposure, and the fleet needs runner provisioning before that could land. **Recorded because it is the only option that removes the stage rather than moving it**, and it should be re-weighed if the ARC path proves costly to operate.
+### 10.1 Corrected framing — three options, and the middle one already works
+
+The draft above compared two options and got the cost axis wrong in the direction that argues against its own conclusion (`@macf-science-agent[bot]`, PR #185). There are **three**:
+
+- **(a)** self-hosted runners — VM today, ARC proposed. No tailnet join; a provisioning stage per fleet.
+- **(b)** hosted runners + tailnet join — **the status-quo fallback, working right now.** ~10s/job and metered minutes on private repos.
+- **(c)** channel-servers reachable without a join — hosted runners, no join, metered minutes, **zero** provisioning, more network exposure.
+
+**Option (b) is why there is no urgency: the runner is not on fleet provisioning's critical path.** A fleet with no runner at all routes on hosted minutes and *works* — that is exactly what the register-before-route gate guarantees, with hosted as the deliberate safe default. So §10's original "the fleet needs runner provisioning before that could land" overstates the dependency. The fleet needs runner provisioning to be **cheap**, not to **function**.
+
+**And ~10s/job is the wrong measure of the runner's cost.** Its real price is design and failure surface, and this arc has the receipts: in roughly one week the runner produced DR-003's Amendment H, a live billing regression that ran undetected (`macf#924`→`#927`), a policy-gate design and implementation (`#929`→`#931`), `macf-actions#72`, the detection/dispatch split in §8, and this DR. Six artifacts, each a place a fleet can silently stop coordinating — against ten seconds on a coordination event no human is waiting on.
+
+**Consequence for this DR:** build the spike, because the ARC learning is cheap and the destroy/recreate property is genuinely valuable — but **weigh (c) against (a) on failure surface, not latency**, and treat §7.2's abandonment criterion as the thing that routes to (c) rather than back to (b) by default. On current evidence (c) carries real weight, and this DR should not be read as having settled that question.
 
 ---
 
