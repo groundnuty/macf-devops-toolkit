@@ -191,12 +191,35 @@ Raised by the operator, 2026-08-14, and it is the sharpest objection to this DR:
 
 This is a real weakening of the case, and it compounds `@macf-science-agent[bot]`'s §10.1 argument: if warm pods are required to preserve the ~10s, ARC costs roughly a VM runner's idle footprint *plus* a Kubernetes dependency, purchased for provisioning ergonomics alone. That makes option (c) — removing the subsystem entirely — proportionally more attractive, not less.
 
-**Therefore: measuring cold start is a go/no-go gate, not a tuning step, and it comes FIRST.** Before the platform repo is fleshed out or the canary clock starts, deploy one scale set and measure job-assignment latency at `minRunners: 0` and `minRunners: 1`. Two numbers decide the shape of everything downstream:
+**Therefore: measuring cold start is a go/no-go gate, not a tuning step, and it comes FIRST.** Before the platform repo is fleshed out or the canary clock starts, deploy one scale set and measure job-assignment latency at `minRunners: 0` and `minRunners: 1`. This measurement reuses criterion 0's instrument, which is why criterion 0 is ordered first.
 
-- cold start comfortably under the VM baseline → scale-to-zero is viable and the original cost argument survives intact;
-- cold start above it → every latency-sensitive repo needs `minRunners: ≥1`, ARC is a provisioning-ergonomics play only, and that fact belongs in front of the operator **before** further investment rather than after.
+§7.4 resolves the tension: the operator has ruled that latency is non-negotiable, which settles the default and demotes the measurement from *decides-whether-to-proceed* to *quantifies-the-dormant-wake-cost*.
 
-This measurement reuses criterion 0's instrument, which is why criterion 0 is ordered first.
+---
+
+### 7.4 Decision: warm by default; hibernate only the dormant
+
+**Operator ruling, 2026-08-14, and it is the governing constraint on this DR:** the VM tier already gives well-tested, reasonably fast routing. **ARC's only job is to standardise provisioning of new runners. No functionality may be lost — latency above all.**
+
+Therefore:
+
+- **`minRunners: 1` is the DEFAULT** for every scale set. Active fleets — anything expected to run for a week or a month — **never scale to zero.** A warm pod is always waiting, so a routing job is assigned to a running runner and pays no cold start.
+- **Idle cost is accepted deliberately.** One warm pod per repo is roughly what the VM runner costs today, and §7.3's honest conclusion stands: for these repos ARC buys **provisioning ergonomics, not resource savings**. That is the trade the operator has explicitly chosen, and it is the correct one when the alternative is regressing the thing the subsystem exists to provide.
+- **Hibernation applies only to genuinely dormant fleets:** if a scale set has received no routing job for **5-10 days** (exact threshold to be set from observed data), `minRunners` drops 1 → 0. The first job after dormancy pays one cold start, and the controller restores `minRunners: 1` on observing activity, so only that single job is affected.
+
+#### Correction: hibernation is safe, and my earlier warning did not apply to it
+
+§7.1 warns that scaling down the listening component is "a silent outage with a timer on it." **That warning is about the LISTENER only, and it does not apply to this policy** — a distinction the earlier drafting did not make sharply enough.
+
+The listener runs **regardless of `minRunners`**; it cannot scale to zero and is not asked to. So at `minRunners: 0` the repo is **still fully reachable**: the long-poll is still held, GitHub still delivers *Job Available*, the listener still patches the replica count, and a pod still starts. The only cost is that the pod starts cold.
+
+That is the difference between **hibernation** (capacity at zero, still listening — safe, self-waking) and **deafness** (nothing listening — jobs queue forever with no error). The operator's policy is the former. My earlier answer treated the ten-day proposal as having "nothing to act on," which was true only while `minRunners: 0` was assumed to be the default; once latency mandates `minRunners: 1`, the policy has something real to act on and is sound.
+
+#### What this requires
+
+- **A signal:** last-routing-job time per scale set. ARC's listener publishes Prometheus metrics carrying repository and job labels, and criterion 0's queue-time instrument needs the same event stream — so **one instrument serves both the proving criteria and the hibernation policy**, which is a good sign the seam is in the right place.
+- **An actuator:** a small controller (or CronJob) that patches `minRunners` on the `AutoscalingRunnerSet`. `minRunners` is a mutable field on a running scale set, so this is a patch, not a redeploy.
+- **A guard:** hibernation must never apply to a scale set whose fleet is declared active. Dormancy is inferred from absence of jobs, and absence is exactly the signal that a *broken* fleet also produces — so a fleet that has silently stopped routing would look identical to one that is legitimately idle. **The hibernation controller must therefore not be the only thing watching for silence**, or it will quietly optimise a fleet's outage into a cheaper outage. Criterion 5's liveness alerting owns that distinction.
 
 ---
 
