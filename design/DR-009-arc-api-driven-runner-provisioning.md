@@ -219,7 +219,13 @@ That is the difference between **hibernation** (capacity at zero, still listenin
 
 - **A signal:** last-routing-job time per scale set. ARC's listener publishes Prometheus metrics carrying repository and job labels, and criterion 0's queue-time instrument needs the same event stream — so **one instrument serves both the proving criteria and the hibernation policy**, which is a good sign the seam is in the right place.
 - **An actuator:** a small controller (or CronJob) that patches `minRunners` on the `AutoscalingRunnerSet`. `minRunners` is a mutable field on a running scale set, so this is a patch, not a redeploy.
-- **A guard:** hibernation must never apply to a scale set whose fleet is declared active. Dormancy is inferred from absence of jobs, and absence is exactly the signal that a *broken* fleet also produces — so a fleet that has silently stopped routing would look identical to one that is legitimately idle. **The hibernation controller must therefore not be the only thing watching for silence**, or it will quietly optimise a fleet's outage into a cheaper outage. Criterion 5's liveness alerting owns that distinction.
+- **The idle-versus-broken ambiguity is ACCEPTED, and fleet-health detection stays OUT of the runner layer** (operator, 2026-08-14). Dormancy is inferred from absence of jobs, and a silently-broken fleet produces the same signal as a legitimately idle one. An earlier draft made the hibernation controller responsible for telling them apart; that was **misplaced**. If a fleet has sent no routing job in 10-20 days the agents are dormant too, and hibernating their runner is the correct response regardless of *why* it is quiet. A broken fleet is a **fleet-level** problem — the runner layer has no visibility that would let it do better, and pretending otherwise would put fleet-liveness detection in the component least equipped to perform it. Hibernation is a cost optimisation, not a health check.
+
+- **But hibernation must CONSUME a health signal, not COMPUTE one** (`@macf-science-agent[bot]`, PR #187 — a sharper form of the guard, reconciled with the scoping above). Their objection to the first draft holds: handing the distinction to "criterion 5 also watches" leaves **two independent consumers of one ambiguous input drawing opposite conclusions** — the controller reading silence as *idle, save money*, the alert reading it as *possibly dead, escalate*. Two actors racing on one signal with contradictory semantics is a coin flip, not a guard.
+
+  The resolution that satisfies both constraints is **one evaluation, three outputs**: silence + affirmatively healthy → hibernate; silence + unhealthy → alert, never hibernate; silence + health *unknown* → alert, never hibernate. That is fail-closed, and it keeps health *detection* at the fleet layer while making hibernation a *reader* of the fleet's published health rather than an inferrer of it. If the fleet layer publishes no health signal, hibernation does not run — which is the correct degradation, since the cost saved is one idle pod and the cost of being wrong is silent.
+
+  **Where I do push back:** their supporting argument that *"the idle warm pod is the only artifact distinguishing quiet from dead"* overstates it. A warm pod is not a health signal — it sits there identically whether the fleet is thriving or dead, so hibernating it destroys no diagnostic that existed. Fleet liveness is established by the DR-006 watchdog and fleet-level health, not by runner capacity. The **recovery asymmetry** they raise is real and is the load-bearing half — a healthy hibernated fleet self-wakes on its next job, a broken one never does, because the thing that would wake it is the thing that stopped working — but that asymmetry holds with or without hibernation: a broken fleet routes nothing either way. It argues for fail-closed as cheap insurance, which is why the three-output rule above is adopted; it does not argue that hibernation destroys evidence.
 
 ---
 
@@ -293,6 +299,41 @@ The draft above compared two options and got the cost axis wrong in the directio
 **And ~10s/job is the wrong measure of the runner's cost.** Its real price is design and failure surface, and this arc has the receipts: in roughly one week the runner produced DR-003's Amendment H, a live billing regression that ran undetected (`macf#924`→`#927`), a policy-gate design and implementation (`#929`→`#931`), `macf-actions#72`, the detection/dispatch split in §8, and this DR. Six artifacts, each a place a fleet can silently stop coordinating — against ten seconds on a coordination event no human is waiting on.
 
 **Consequence for this DR:** build the spike, because the ARC learning is cheap and the destroy/recreate property is genuinely valuable — but **weigh (c) against (a) on failure surface, not latency**, and treat §7.2's abandonment criterion as the thing that routes to (c) rather than back to (b) by default. On current evidence (c) carries real weight, and this DR should not be read as having settled that question.
+
+### 10.2 Alternative — webhook-driven (legacy) ARC mode
+
+Raised by the operator, 2026-08-14. ARC has a **second, older autoscaling mode** that inverts the direction of control, and it addresses several complaints this DR has accumulated.
+
+**Mechanism.** Three pieces: a `RunnerDeployment`/`RunnerSet`, a `HorizontalRunnerAutoscaler` (HRA), and a **single cluster-wide `github-webhook-server`**. GitHub POSTs a `workflow_job` event on job queue; the webhook server routes it to the HRA whose backing RunnerDeployment carries **matching runner labels**; the HRA adds capacity. Scale-down fires on `workflow_job` `completed`/`canceled`, with a per-trigger `duration` timeout as backstop if the completion event never arrives.
+
+**What it buys — and it is not a small list:**
+
+1. **No per-repo listener.** One webhook server serves every runner deployment in the cluster. This is the direct answer to the concern that started this DR — dozens of resident per-repo processes — and it is the only architecture examined here that actually eliminates them rather than shrinking them.
+2. **Label-based addressing survives.** Runners register as ordinary self-hosted runners with normal labels, and the HRA matches on those labels. So `pick-runner`'s existing `["self-hosted","macf-vm"]` works **unchanged** — which means §8's blocker and §8.1's per-repo-variable requirement largely dissolve, and `checkRunnerUsableByRepo`'s presence check stops being ambiguous because both tiers are label-addressed.
+3. **Hibernate/wake is native.** The `duration`-based scale-down is precisely §7.4's policy, implemented by the mode rather than by a controller we would write.
+
+**What it costs:**
+
+1. **Community-maintained only.** GitHub's own statement: *"With the introduction of autoscaling runner scale sets, the existing autoscaling modes are now legacy. The legacy modes have certain use cases and will continue to be maintained by the community only."* Official support and documentation point at scale sets. Choosing this mode means depending on a control plane GitHub has stepped back from — a real risk for infrastructure meant to outlive several fleets.
+2. **It requires inbound reachability.** GitHub must be able to POST to the webhook server, so an endpoint must be exposed to GitHub's network.
+
+**And cost 2 is the observation that matters most.** Requiring an inbound endpoint is *exactly* option (c)'s requirement. If we are willing to expose an endpoint to the outside world to make runners cheaper, the question that must be asked in the same breath is whether exposing the **channel-servers** instead — which already speak mTLS — would remove the need for self-hosted runners at all. **Both paths pay the same architectural price; only one of them deletes a subsystem in exchange.**
+
+**Not decided here.** Recorded because it is now a live three-way choice (scale-sets / webhook-legacy / option (c)) rather than the two-way one this DR opened with, and because the cold-start and idle-cost findings have moved the balance away from the scale-set assumption the DR was drafted on. The go/no-go measurement in §7.3 should be read as informing this choice, not merely tuning `minRunners`.
+
+---
+
+## 10.3 The value claim, stated mechanically — and nothing more
+
+Three revisions have each conceded something: coexistence removed retirement, §7.3 removed resource savings, §7.4 confirmed that removal for active fleets. Asked whether that trend means the answer is really option (c), `@macf-science-agent[bot]` gave the discriminator (PR #187): **every concession was an *inferred* benefit** — something assumed to follow from scale-to-zero, which reality then took back — while **the mechanical claim has not moved**.
+
+So this DR's justification is stated here in mechanical terms only, and future revisions should not add inferential ones:
+
+> **The Kubernetes API can create and destroy a runner. A bootstrap holding one credential can do it with no host access and no human action — and it can *destroy* one, which the VM path cannot do at all** (DR-043 Amendment G's teardown ladder cannot remove a VM-hosted or token-registered runner, so fleet teardown is incomplete without an API-driven runner).
+
+That is a fact about the mechanism, not a prediction about behaviour, which is why nothing in three revisions has eroded it. **If that sentence does not justify the cost, the answer is option (c)** — but that is then a judgment on a settled claim rather than a fourth concession.
+
+**Reading note:** §7.3's cold-start go/no-go **has already been answered by §7.4** — the operator chose warm-by-default and explicitly accepted ergonomics-without-savings. The measurement still matters, but it now *sizes the dormant wake-cost*; it does not decide whether to proceed. A gate answered by decree that still reads as open invites someone later to "satisfy" it with a measurement without noticing the decision was already taken.
 
 ---
 
