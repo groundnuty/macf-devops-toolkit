@@ -137,7 +137,7 @@ The criteria below therefore change meaning: they are no longer *permission to r
 
 0. **A queue-time instrument exists** and is running. Criteria 1 and 2 are only observable if something measures dispatch latency and queued-but-unstarted jobs. A queued job is *precisely* the silent failure — no error, no red check, just absence — so without this, "zero queue-stalls observed" degrades to "nobody looked," the same shape as a doctor reporting green on a uniformly stale fleet. **The instrument is part of the spike, not an assumption of it**, and it is criterion 0 because criteria 1-2 are unmeasurable without it. (Raised by `@macf-science-agent[bot]` on PR #185.)
 1. A canary scale set on a **private** repo has served **≥ 50 real routing jobs over ≥ 7 days** with zero queue-stalls (jobs dispatched, not merely pods running), as measured by criterion 0.
-2. p95 end-to-end routing-job latency is **≤ 20s**, against the VM baseline of ~13.6s. If cold-start blows this, `minRunners` is tuned and the run repeats.
+2. p95 end-to-end routing-job latency is **≤ 16s**, against the VM baseline of ~13.6s — i.e. within ~2.5s of the tier it must not regress. See §7.3: the original ≤20s bar was too loose, since it would have permitted giving back 60% of the ~10s this entire subsystem exists to save.
 3. **Destroy/recreate proven**: the scale set is deleted and re-created via the Kubernetes API alone, and resumes serving — no SSH, no `make`, no manual GitHub steps. This is the whole point of the change and is not optional.
 4. `macf-actions#72` has landed and **at least one repo routes to ARC** through the real `pick-runner` path, not only a scratch workflow — **and that repo's detection and dispatch agree**: the register-before-route gate scored `present` *for the runner that actually served the jobs*. This must be verified on a repo with **no VM runner registered**, since coexistence (§7) makes "a runner exists" ambiguous — the gate could vouch for the VM runner while ARC serves nothing, and the criterion would pass on evidence about the wrong tier (§8).
 5. Liveness/alerting equivalent to `fleet/runner-watchdog.sh` exists for the ARC path.
@@ -164,11 +164,39 @@ The only architecture that inverts this is **webhooks**, where GitHub connects i
 
 ### 7.2 Abandonment criterion
 
-§7 as first drafted defined **proven** and never defined **failed** — an exit that only opens on success is not an exit (`@macf-science-agent[bot]`, PR #185). That critique survives the coexistence decision, though its stakes drop sharply: with the VM fleet permanent, a stalled spike no longer risks two mechanisms competing for the same repos, only effort spent on one that never graduates.
+§7 as first drafted defined **proven** and never defined **failed** — an exit that only opens on success is not an exit (`@macf-science-agent[bot]`, PR #185).
 
-**Abandonment.** If criteria 0-5 are not all met by **2026-10-14 (two months)** or after **three tuning iterations** on criterion 2, whichever comes first, the spike is **abandoned**: the ARC platform is torn down and this DR closes as *not-taken*, with the measured reasons recorded. Nothing regresses when that happens — the VM fleet was never displaced, and new fleets fall back to §10's option (b), which works today. Abandonment is a legitimate outcome, not something to be avoided by extending the deadline.
+**Coexistence makes this criterion more critical, not less** (same reviewer, PR #186 — correcting my initial read that its stakes merely dropped). Under the retirement framing there were *two* forcing functions: the date, and the fact that VM runners could not retire until ARC proved out. The second did most of the work, because a stalled spike was **visibly blocking something**. Coexistence removes exactly that pressure: nothing now waits on ARC, so a stall costs nothing anyone will notice and "we'll get back to it" carries no cost signal. The stakes fall; the *probability of silent drift* rises; and the date becomes the **only** remaining mechanism that produces a decision.
 
-**The retirement-ownership clause that stood here is removed**, along with its weekly cadence: with no retirement, there is nothing to schedule. What remains schedulable is the decision to *adopt* — so the criteria are tracked as checklist items on #184, and if the two-month clock expires with them unmet and no blocker recorded, that is the signal to escalate to the operator rather than let the spike run indefinitely.
+**Abandonment — default teardown, not escalation.** If criteria 0-5 are not all met by **2026-10-14 (two months)** or after **three tuning iterations** on criterion 2, whichever comes first, the ARC platform **is torn down by default** and this DR closes as *not-taken*, with the measured reasons recorded. Continuation past that date requires an **explicit re-authorization by the operator**, recorded on #184 with a new date — not merely an intention to continue.
+
+The polarity matters and this section previously got it wrong, stating teardown in its headline and escalation in its closing sentence. Those are different mechanisms: an escalation *without* a default outcome is a request for attention, which is precisely how `macf#872` sat 36 days with an owner who fully intended to return. A default outcome with an override is a decision that happens on its own, and makes continuation a positive act — the right polarity when nothing else is pushing.
+
+Nothing regresses on teardown: the VM fleet was never displaced, and new fleets fall back to §10's option (b), which works today. **The retirement-ownership and weekly-cadence clauses are removed** — with no retirement there is nothing to schedule. The criteria are tracked as checklist items on #184.
+
+### 7.3 The cold-start tension — scale-to-zero and low latency are mutually exclusive
+
+Raised by the operator, 2026-08-14, and it is the sharpest objection to this DR: *if every job spins a fresh pod, the pod start may cost more than the ~10s tailnet join we eliminated — in which case the whole subsystem is self-defeating.*
+
+**The objection is correct on its own terms.** An ephemeral runner's cold start is pod scheduling + image pull (cached after first use) + runner process start + registration + job assignment. That plausibly lands in the same range as, or worse than, the ~10s saved. If it does, ARC at `minRunners: 0` is *slower than GitHub-hosted runners with a tailnet join* — §10's option (b), which needs no infrastructure at all.
+
+**But scale-to-zero is a setting, not a property of ARC.** `minRunners: 1` keeps a warm pod idle and ready, so a job is assigned to an already-running runner with no cold start — the same latency profile as a VM runner. The tension is therefore explicit and tunable:
+
+| Config | Latency | Idle cost |
+|---|---|---|
+| `minRunners: 0` | pod cold start per job | zero |
+| `minRunners: 1` | warm, ≈ VM tier | one idle pod per repo |
+
+**The consequence must be stated honestly, because it undercuts a benefit claimed earlier in this DR.** If latency matters for a repo, that repo runs `minRunners: ≥1`, and its idle cost is then comparable to the VM runner it was meant to improve on. **ARC's benefit for such repos is provisioning ergonomics — declarative create/destroy, no SSH, no operator credentials — and NOT resource savings.** §7.1's "zero idle runner pods" applies only to repos genuinely willing to trade latency for cost.
+
+This is a real weakening of the case, and it compounds `@macf-science-agent[bot]`'s §10.1 argument: if warm pods are required to preserve the ~10s, ARC costs roughly a VM runner's idle footprint *plus* a Kubernetes dependency, purchased for provisioning ergonomics alone. That makes option (c) — removing the subsystem entirely — proportionally more attractive, not less.
+
+**Therefore: measuring cold start is a go/no-go gate, not a tuning step, and it comes FIRST.** Before the platform repo is fleshed out or the canary clock starts, deploy one scale set and measure job-assignment latency at `minRunners: 0` and `minRunners: 1`. Two numbers decide the shape of everything downstream:
+
+- cold start comfortably under the VM baseline → scale-to-zero is viable and the original cost argument survives intact;
+- cold start above it → every latency-sensitive repo needs `minRunners: ≥1`, ARC is a provisioning-ergonomics play only, and that fact belongs in front of the operator **before** further investment rather than after.
+
+This measurement reuses criterion 0's instrument, which is why criterion 0 is ordered first.
 
 ---
 
@@ -183,6 +211,30 @@ Filed as `groundnuty/macf-actions#72`. It gates **cutover**, not the spike: ARC 
 Under ARC it inverts: an ARC scale set registers runners the detection query *does* see, so the gate scores `present`, writes the variable, `pick-runner` emits `["self-hosted","macf-vm"]`, and nothing matches — **every routed job queues to timeout behind a green gate that has just confirmed a runner exists.** The safety mechanism becomes the delivery mechanism for the failure, precisely *because* it is working as designed.
 
 So the gate's invariant must widen from *"a runner usable by this repo exists"* to *"a runner **matching the labels this router will emit** is usable by this repo."* Fixing `runs-on` alone yields detection that is confidently wrong — strictly worse than today's, which is at least correctly blind to ARC. **Phase 4's real scope is therefore "dispatch and detection agree on one predicate," spanning `macf-actions` and `macf`**; an implementer reading only `#72` would fix half and reasonably believe the blocker cleared.
+
+### 8.1 Coexistence makes the addressing a per-repo VARIABLE, never a second constant
+
+The shape of the Phase-4 fix changes with the coexistence decision, and in a way that is easy to get wrong (`@macf-science-agent[bot]`, PR #186).
+
+`pick-runner` today emits a **hardcoded constant**, `labels='["self-hosted","macf-vm"]'`. Under the retirement framing that constant would eventually have been replaced once, globally, by a scale-set name. **Under coexistence it can never be a constant again**: VM-tier repos need labels and ARC-tier repos need a scale-set name, permanently and simultaneously.
+
+§11's note that the tier is "lookup-able in `runners.yaml` versus the cluster" is true for a human debugging, but **`pick-runner` can read neither** — it runs inside a workflow with no access to this repo's `runners.yaml` and no cluster credentials. So both dispatch and detection need a **per-repo signal**, or they cannot agree on a predicate whose right answer differs by repo.
+
+**That signal already exists and is already ratified: DR-043 Amendment H's `fleet.yaml` block.**
+
+```yaml
+routing:
+  runner:
+    labels: [self-hosted, macf-vm]
+    scope: repo
+    name: macf-vm
+```
+
+`labels` / `scope` / `name` is exactly the addressing information both consumers need, declared per fleet. **The coexistence decision promotes that block from a description of what `deploy` should register into the source of truth for how a repo is addressed.**
+
+Implementable shape for Phase 4: `apply` writes the declared addressing to a per-repo Actions variable (as it already writes `MACF_TRUSTED_ACTORS`); `pick-runner` emits **from that variable** instead of a constant; `checkRunnerUsableByRepo` evaluates presence **against the same declared value**. One source, two consumers, no way for dispatch and detection to disagree — which is exactly the property §8 requires and which cannot be achieved while either side reads a constant.
+
+**An implementer who reads `macf-actions#72` as "switch to scale-set addressing" will build the retirement-shaped fix — a second constant — and coexistence needs a variable.** Recorded here because that mistake would look correct in review and fail only on the second tier.
 
 ---
 
