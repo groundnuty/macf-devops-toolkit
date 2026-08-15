@@ -319,7 +319,56 @@ Raised by the operator, 2026-08-14. ARC has a **second, older autoscaling mode**
 
 **And cost 2 is the observation that matters most.** Requiring an inbound endpoint is *exactly* option (c)'s requirement. If we are willing to expose an endpoint to the outside world to make runners cheaper, the question that must be asked in the same breath is whether exposing the **channel-servers** instead — which already speak mTLS — would remove the need for self-hosted runners at all. **Both paths pay the same architectural price; only one of them deletes a subsystem in exchange.**
 
-**Not decided here.** Recorded because it is now a live three-way choice (scale-sets / webhook-legacy / option (c)) rather than the two-way one this DR opened with, and because the cold-start and idle-cost findings have moved the balance away from the scale-set assumption the DR was drafted on. The go/no-go measurement in §7.3 should be read as informing this choice, not merely tuning `minRunners`.
+### 10.2.1 DECIDED: webhook mode (operator, 2026-08-15)
+
+**The operator has committed to ARC in webhook-driven mode.** Option (c) is agreed to be the better end-state but is "too big a revolution at the moment" — so it is deferred, not rejected, and §7.2's abandonment still routes there.
+
+**What this decision resolves** — five open items collapse:
+
+| Was open | Now |
+|---|---|
+| Per-repo listener pod (the original idle-cost objection) | **Gone.** One cluster-wide `github-webhook-server` serves every runner deployment. |
+| `macf-actions#72` — `runs-on` label array can't address a scale set | **Largely dissolves.** Webhook-mode runners register as ordinary self-hosted runners with normal labels, so `pick-runner`'s existing constant works unchanged. |
+| §8.1 — per-repo addressing variable | **Dissolves** for the same reason. No `fleet.yaml`-to-variable plumbing needed to make dispatch work. |
+| §8 — `checkRunnerUsableByRepo` presence/label ambiguity | **Dissolves.** Both tiers are label-addressed, so the gate's existing predicate is correct for both. |
+| §7.4 hibernation controller (a thing we would have written) | **Native.** The HRA's `duration`-based scale-down IS the policy. |
+
+**An unplanned synergy worth naming:** webhook mode's structural weakness is that scale-up is *push*. If the webhook server is unreachable when a job is queued, there is no polling fallback — the listener model self-heals by reconnecting, a missed webhook simply never arrives. **`minReplicas: 1` (§7.4's warm-by-default) mitigates exactly this**: the warm runner accepts the job without any scale-up being needed, so the webhook path is non-critical for the common case and load-bearing only for burst and for waking a hibernated fleet. The latency decision and the mode decision reinforce each other.
+
+**Consequence for label-sharing:** if a repo carries both a VM runner and an ARC runner with identical labels, GitHub dispatches to whichever is idle. That is a *good* property for gradual migration (automatic, no cutover) but it makes ARC untestable on such a repo — which is why criterion 4 requires verification on a repo with **no VM runner registered**. New fleet repos are unambiguous by construction.
+
+### 10.2.2 The new blocker this decision introduces — inbound reachability
+
+Scale-set mode needs only *outbound* connectivity, which §5 verified works. **Webhook mode requires GitHub to POST *into* the cluster, and nothing in the current topology permits that.** Verified 2026-08-15 on the monitoring VM:
+
+```
+ip -4 -o addr:   ens3 192.168.102.15/24   (private LAN, DHCP)
+                 tailscale0 100.120.127.76/32
+default route:   via 192.168.102.1 dev ens3
+public egress:   149.156.10.142            (NAT — matches no local interface)
+```
+
+**No public IP on any interface.** The VM egresses through an institutional NAT it does not control, so `api.github.com` has no route to a webhook endpoint here. This is a hard prerequisite, not a tuning detail: without it, webhook mode cannot scale up at all.
+
+Candidate resolutions, in preference order:
+
+1. **Tailscale Funnel** — exposes a tailnet service to the public internet over Tailscale's relays, HTTPS on 443/8443/10000, which suits a webhook receiver. Uses infrastructure already in place. **Status: unverified.** `tailscale funnel status` returns "No serve config", which shows it is unconfigured but does *not* establish whether the tailnet policy permits it — Funnel requires a `nodeAttrs` grant in the ACL, which is operator-controlled. **This must be confirmed before Phase 2 proceeds.**
+2. **Institutional port-forward** on the NAT gateway — unlikely to be available on a university network, and brittle if it is.
+3. **A relay/tunnel** (Cloudflare Tunnel or similar) — works, but adds a third-party dependency to the routing path.
+
+**Security note:** any of these places a **publicly-reachable endpoint** in front of the cluster — a materially different posture from today's tailnet-only boundary, and the first such endpoint in this stack. GitHub's webhook secret (HMAC signature validation) is mandatory, not optional, and the receiver must reject unsigned or mis-signed payloads. This is the one place where the "unauthenticated is fine on the tailnet" reasoning used elsewhere in this repo explicitly does **not** apply.
+
+**The parallel with option (c) is now exact and should be weighed deliberately:** webhook mode requires exposing an inbound endpoint to make runners cheaper; option (c) requires exposing the channel-servers to delete runners entirely. Both pay the same architectural price. Only one removes a subsystem. The operator has chosen the former on grounds of revolution-size, with the latter explicitly deferred rather than dismissed.
+
+### 10.2.3 What does NOT change
+
+Unaffected by the mode decision, still required:
+
+- **The CoreDNS `ts.net` stanza (§5).** Runner pods must still reach the agents' channel-servers *outbound* over the tailnet; that path and its MagicDNS gap are identical in both modes.
+- **The GitHub App with `Administration: Read and write`** — runner registration is the same operation either way.
+- **Criterion 0's queue-time instrument** — still the only way criteria 1-2 are observable, and still the hibernation signal.
+- **`minReplicas: 1` warm-by-default** (§7.4) — now doing double duty, per §10.2.1.
+- **The legacy-mode support risk** — the chart is `actions-runner-controller`, not `gha-runner-scale-set`, and GitHub's own guidance points at the latter. This is a standing dependency risk, accepted with the decision.
 
 ---
 
