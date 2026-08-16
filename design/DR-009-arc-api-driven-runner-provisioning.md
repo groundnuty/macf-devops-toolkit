@@ -390,11 +390,42 @@ public egress:   149.156.10.142            (NAT — matches no local interface)
 
 Candidate resolutions, in preference order:
 
-1. **Tailscale Funnel** — exposes a tailnet service to the public internet over Tailscale's relays, HTTPS on 443/8443/10000, which suits a webhook receiver. Uses infrastructure already in place. **Status: unverified.** `tailscale funnel status` returns "No serve config", which shows it is unconfigured but does *not* establish whether the tailnet policy permits it — Funnel requires a `nodeAttrs` grant in the ACL, which is operator-controlled. **This must be confirmed before Phase 2 proceeds.**
+1. **Tailscale Funnel** — exposes a tailnet service to the public internet over Tailscale's relays, HTTPS on 443/8443/10000, which suits a webhook receiver. Uses infrastructure already in place. **Status: RESOLVED — the prerequisite was already satisfied (verified 2026-08-16).** See §10.2.2c.
 2. **Institutional port-forward** on the NAT gateway — unlikely to be available on a university network, and brittle if it is.
 3. **A relay/tunnel** (Cloudflare Tunnel or similar) — works, but adds a third-party dependency to the routing path.
 
 **Security note:** any of these places a **publicly-reachable endpoint** in front of the cluster — a materially different posture from today's tailnet-only boundary, and the first such endpoint in this stack. GitHub's webhook secret (HMAC signature validation) is mandatory, not optional, and the receiver must reject unsigned or mis-signed payloads. This is the one place where the "unauthenticated is fine on the tailnet" reasoning used elsewhere in this repo explicitly does **not** apply.
+
+#### 10.2.2c RESOLVED — Funnel prerequisites were already in place (verified 2026-08-16)
+
+The operator supplied a Tailscale API key to settle this rather than leave it as an operator-gated unknown. **No ACL change is required — the grant already exists**, and the earlier "unverified / must be confirmed before Phase 2" status was over-cautious.
+
+Tailnet policy (`GET /api/v2/tailnet/-/acl`, backed up before inspection):
+
+```json
+"nodeAttrs": [ { "target": ["autogroup:member"], "attr": ["funnel"] } ]
+```
+
+Tailnet DNS: `{"magicDNS": true}`.
+
+**Confirmed at the node itself**, which is the load-bearing check — a policy grant does not prove the node holds the capability. `tailscale status --json | .Self.CapMap` on the monitoring VM:
+
+```
+funnel
+https
+https://tailscale.com/cap/funnel-ports?ports=443,8443,10000
+```
+
+So the monitoring node **holds** `funnel` and `https`, and Funnel is permitted on 443 / 8443 / 10000 — exactly what an HTTPS webhook receiver needs. `tailscale funnel status` returning "No serve config" earlier meant *unconfigured*, never *unpermitted*; conflating those is what produced the false blocker.
+
+**Nothing is configured, and deliberately so.** The serve config that points Funnel at the webhook receiver belongs in Phase 2, when a receiver exists to point at. Enabling Funnel now would create public exposure serving nothing.
+
+**Still outstanding for this path, and both belong to Phase 2:**
+
+- An **end-to-end reachability proof** — Funnel being permitted is not proof that a POST from the public internet arrives. That test is cheap but is itself a brief public exposure, so it is operator-gated.
+- **HMAC validation remains mandatory** (§10.2.2). The `autogroup:member` grant is broad — *any* member device may funnel — so the tailnet does not constrain what gets exposed; only the receiver's own signature check does.
+
+**Handling note for whoever automates this:** the policy was fetched with `Accept: application/json`, which **strips HuJSON comments**. Any future write-back must use the HuJSON form or it will silently delete the operator's policy comments. Nothing was written during this inspection.
 
 #### 10.2.2a Webhook-delivery health needs an owner — `minReplicas: 1` is what hides its failure
 
