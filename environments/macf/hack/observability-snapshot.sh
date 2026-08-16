@@ -93,7 +93,19 @@ while [ $# -gt 0 ]; do
     --filter-value) FILTER_VALUE="$2"; shift 2 ;;
     --start)        START_EPOCH="$2"; shift 2 ;;
     --end)          END_EPOCH="$2"; shift 2 ;;
-    --window-provenance) WINDOW_PROVENANCE="$2"; shift 2 ;;
+    --window-provenance)
+      # Reject a malformed value HERE, where the caller and the value are both
+      # still visible, rather than 400 lines later inside the manifest heredoc
+      # where it becomes an opaque jq column number (#177).
+      if [ -n "$2" ] && ! printf '%s' "$2" | jq empty 2>/dev/null; then
+        echo "error: --window-provenance is not valid JSON" >&2
+        echo "  received (${#2} bytes): $2" >&2
+        echo "  hint: it must survive shell quoting intact — pass it as ONE" >&2
+        echo "        single-quoted argument, and remember GitHub Actions" >&2
+        echo "        substitutes \${{ }} textually before the shell parses." >&2
+        exit 1
+      fi
+      WINDOW_PROVENANCE="$2"; shift 2 ;;
     --repo)         REPO="$2"; shift 2 ;;
     --issue)        ISSUE="$2"; shift 2 ;;
     --out-dir)      OUT_DIR="$2"; shift 2 ;;
@@ -478,6 +490,28 @@ cat > "$OUT_DIR/manifest.json" <<MANIFEST
 MANIFEST
 
 echo
+# Validate the manifest we just wrote BEFORE announcing success. Without this,
+# a malformed interpolation surfaces as `jq: parse error: Invalid numeric
+# literal at line N, column M` from the summary print below — after "OK bundle
+# written", with no indication of WHICH value was bad, and with the bundle
+# already on disk looking complete. Observed on run 31945194424 (#177) and not
+# reproducible by hand with the same script, same checkout and same arguments,
+# so the failing value is not recoverable after the fact — the fix is to make
+# the script report it at the moment it happens instead of leaving a number to
+# reverse-engineer. Same shape as everything else here: assert the invariant at
+# the boundary rather than let a downstream consumer discover it.
+if ! jq empty "$OUT_DIR/manifest.json" 2>/dev/null; then
+  echo "FATAL: generated manifest.json is not valid JSON." >&2
+  echo "  jq says:" >&2
+  jq empty "$OUT_DIR/manifest.json" 2>&1 | sed 's/^/    /' >&2
+  echo "  The interpolated values that can carry malformed JSON are:" >&2
+  echo "    --window-provenance : ${WINDOW_PROVENANCE:-<unset>}" >&2
+  echo "    warnings           : ${WARNINGS_JSON:-<unset>}" >&2
+  echo "    counters           : tempo=${TEMPO_HITS:-<unset>} langfuse=${LANGFUSE_HITS:-<unset>} loki=${LOKI_STREAMS:-<unset>} ch=${CH_ROWS:-<unset>} prom=${PROM_SERIES:-<unset>}" >&2
+  echo "  offending manifest, with line numbers:" >&2
+  nl -ba "$OUT_DIR/manifest.json" | sed 's/^/    /' >&2
+  exit 1
+fi
 echo "OK bundle written to $OUT_DIR"
 echo "  manifest summary:"
 jq '.summary' "$OUT_DIR/manifest.json"
