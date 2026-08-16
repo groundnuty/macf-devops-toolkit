@@ -111,7 +111,26 @@ Using raw tailnet IPs instead was considered and rejected: this repo's own conve
 
 **A new dedicated GitHub App** (e.g. `macf-runner-provisioner`) rather than extending the devops-agent App. Repo-scoped ARC needs `Administration: Read and write`; granting that to the devops bot would permanently widen its power across every repo it is installed on and destroy the 403 that currently makes runner operations deliberately operator-gated. The new App's credential lives only as a cluster Secret, referenced by `githubConfigSecret`. (Org scope would need only `Self-hosted runners: R/W` — one more small argument for the org path if it is ever taken.)
 
-**Host on the monitoring k3s for the spike.** It is proven viable above and is the fastest path to validation. This is explicitly a **spike-scoped** decision to be revisited before cutover, because it co-locates CI workloads with the observability stack.
+**Host: the observability k3s cluster — a deliberate compromise, not the ideal.** Operator ruling, 2026-08-15: *"we are deploying it on the observability Kubernetes, we are not deploying another cluster"*, and — stated in the same breath — *"normally it would be ideal to have a dedicated cluster, I agree, but at the moment we are compromising."*
+
+Both halves are load-bearing, so record them together:
+
+- **The target state is a dedicated runner cluster.** Collocation is accepted for cost and operational simplicity — a second cluster means another failure domain, another upgrade cadence, another provisioning step — not because sharing is better.
+- **It is therefore not "spike-scoped, revisit before cutover"** (the earlier framing, now retired) **nor permanent.** It is a compromise held until a dedicated cluster is worth its overhead.
+
+An interim revision proposed moving to a dedicated cluster on the agents VM immediately, reading the decoupling constraint as a mandate for *physical* separation. That over-read it: the constraint is about **dependency**, not **location**. Sharing a cluster by accident is exactly what the operator described.
+
+**This is precisely why §6.1 is a hard invariant rather than a style preference.** The decoupling rule is what makes the compromise safe *now* and what makes the eventual move cheap *later* — if nothing in the runner platform depends on the observability stack, relocating it is a redeploy against a different `destination`, not a migration. **Every coupling admitted today is a tax on the move to the ideal.** That is the standard §6.1 has to be enforced against.
+
+**Correction (2026-08-15):** an earlier revision claimed `/mnt/volume1` on the monitoring VM was "at 72%" and used it as a reason to revisit hosting. **That figure was wrong — it came from a `df` run on the *agents* VM (where the DR-003 runners live) and was misattributed to the monitoring host.** Measured directly over ssh:
+
+| | monitoring VM | agents VM |
+|---|---|---|
+| `/mnt/volume1` | **36G of 196G (19%)** | 134G of 196G (72%) |
+| `/` | 7.3G of 96G (8%) | 84G of 96G (87%) |
+| mem available | 46 GB of 55 | 39 GB of 55 |
+
+The monitoring cluster has ~160 GB free and 46 GB RAM available — ample. The disk pressure is on the *agents* VM, which is where the VM-tier runners already live.
 
 **Correction (2026-08-15):** an earlier revision of this paragraph claimed `/mnt/volume1` on the monitoring VM was "at 72%" and used it as a second reason to revisit. **That figure was wrong — it came from a `df` run on the *agents* VM (where the DR-003 runners live) and was misattributed to the monitoring host.** Measured directly over ssh:
 
@@ -139,7 +158,9 @@ If the answer is no, the artifact is coupled and must be changed. Concretely, th
 2. **The `coredns-custom` `ts.net` stanza (§5).** This is coupling to the *cluster*, not to observability — it exists so runner pods can resolve the agents' channel-servers. It travels with the runner platform if it moves, and it is a no-op for anything else on the cluster. Acceptable, but it must live in `runner-platform` so a move carries it, never in `environments/macf/`.
 3. **Shared argocd.** If the platform is delivered by the monitoring cluster's argocd instance, that instance becomes a dependency. Acceptable for the spike since argocd is a delivery mechanism rather than a runtime one — but the manifests must be plain enough that `helm install` / `kubectl apply` works without argocd at all, which is also what makes the repo portable per §4.
 
-**Consequence:** because nothing in the runner platform may depend on the observability stack, moving it to another cluster later is a **relocation, not a migration** — redeploy the same manifests against a different `destination`. That property is the point of §4's separate repo, and §6.1 is what keeps it true in practice rather than in intention.
+**Direction of dependency, stated once:** runner tier → *may report to* → observability tier. Never the reverse, and never a runtime dependency in either direction. Concretely for §7.4: **hibernation and scale-up decisions must keep working when Prometheus is down** — they read from the GitHub API and ARC's own state, never from the observability stack.
+
+**Consequence:** because nothing in the runner platform may depend on the observability stack, moving it to a dedicated cluster later is a **relocation, not a migration** — redeploy the same manifests against a different `destination`. Since §6 records a dedicated cluster as the *target state*, that property is not a nice-to-have: it is the mechanism that keeps the compromise reversible.
 
 ---
 
@@ -435,7 +456,11 @@ If Funnel drops, the `nodeAttrs` grant is revoked, or the serve config is lost a
 
 It is observable without new infrastructure: **GitHub records per-hook delivery status**, so failed deliveries are queryable. **Webhook-delivery success is the health signal for the scale-up path, and nothing else watches it** — so it belongs in criterion 0's instrument alongside queue-time. Without it, "autoscaling works" is asserted by absence-of-complaint.
 
-#### 10.2.2b Node exposure inventory — audited 2026-08-15
+**Per §6.1 this instrument must be self-contained.** It reads from the GitHub API and from ARC's own state, not from the observability stack — so webhook-delivery health and hibernation decisions keep working when Prometheus does not. Exporting these metrics *to* the observability tier is welcome; *depending* on it is not.
+
+#### 10.2.2b Node exposure inventory — audited 2026-08-15 (LIVE, and load-bearing)
+
+> **An interim revision marked this audit "superseded / moot" on the assumption that a dedicated runner cluster would put the Funnel endpoint on a different node.** The operator's 2026-08-15 ruling (§6) settles the opposite: the runner platform is collocated on the observability cluster. **So the Funnel endpoint WILL land on the node running Prometheus, Tempo, Grafana, Langfuse and ArgoCD, and this table is a direct input to that decision rather than background.** The un-mooting is worth stating loudly, because a security audit that was retired on a premise that then reversed is exactly the kind of thing that stays retired by inertia.
 
 The larger risk is not the webhook receiver, which is the well-secured part. It is that **this node's other services were built assuming the tailnet is the access control** (CLAUDE.md states this explicitly for Prometheus). Funnel is port- and path-scoped, so exposing one receiver does not expose them — but it enlarges the blast radius of any future serve-config mistake on a node full of services that assume no unauthenticated caller can reach them.
 
