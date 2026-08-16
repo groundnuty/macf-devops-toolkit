@@ -109,7 +109,26 @@ Using raw tailnet IPs instead was considered and rejected: this repo's own conve
 
 ## 6. Decision 4/5 — credential and host
 
-**A new dedicated GitHub App** (e.g. `macf-runner-provisioner`) rather than extending the devops-agent App. Repo-scoped ARC needs `Administration: Read and write`; granting that to the devops bot would permanently widen its power across every repo it is installed on and destroy the 403 that currently makes runner operations deliberately operator-gated. The new App's credential lives only as a cluster Secret, referenced by `githubConfigSecret`. (Org scope would need only `Self-hosted runners: R/W` — one more small argument for the org path if it is ever taken.)
+**A new dedicated GitHub App** (`macf-runner-provisioner`) rather than extending the devops-agent App.
+
+**Provisioned and verified 2026-08-16** (operator-created; the blocker is cleared):
+
+| | |
+|---|---|
+| App | `macf-runner-provisioner`, owner `groundnuty` |
+| App ID | `4613177` (Client ID `Iv23liDfFLotsU87OjzE`) |
+| Installation ID | `154151387` |
+| Private key | `orzech-dev-agents-monitoring:~/runner-provisioner.pem` |
+| `repository_selection` | `all` |
+| Permissions | `administration: write`, `actions: read`, `metadata: read` |
+
+Verified by minting a real installation token against the live API — not read off the settings page. `administration: write` is exactly what repo-scoped ARC requires, and the devops-agent App keeps its deliberate 403, so the blast-radius separation §6 argued for is intact.
+
+Two notes for whoever operationalises this:
+
+- **The key was mode `644` (world-readable to any user on that VM) and is now `600`.** It is a private key with `administration: write` across the account; anything less than `600` is a finding in its own right.
+- **`repository_selection: all` is a deliberate testing posture** (operator: *"it's for the whole account, not a single repository… we are fine with it at the moment while we are testing"*). It is broader than this DR's steady-state intent: a dedicated App scoped to *all* repos can administer any repo in the account, so the separation achieved is from the devops bot, not from the rest of the fleet. **Narrowing the installation to the canary repo is the tightening step** once the spike proves out — worth doing before anything long-lived depends on it.
+- The key currently lives in a home directory on the monitoring VM. Per this section its destination is a **Kubernetes Secret** referenced by `githubConfigSecret`; the VM copy should be removed once the Secret exists, so the credential has one home rather than two. Repo-scoped ARC needs `Administration: Read and write`; granting that to the devops bot would permanently widen its power across every repo it is installed on and destroy the 403 that currently makes runner operations deliberately operator-gated. The new App's credential lives only as a cluster Secret, referenced by `githubConfigSecret`. (Org scope would need only `Self-hosted runners: R/W` — one more small argument for the org path if it is ever taken.)
 
 **Host: the observability k3s cluster — a deliberate compromise, not the ideal.** Operator ruling, 2026-08-15: *"we are deploying it on the observability Kubernetes, we are not deploying another cluster"*, and — stated in the same breath — *"normally it would be ideal to have a dedicated cluster, I agree, but at the moment we are compromising."*
 
