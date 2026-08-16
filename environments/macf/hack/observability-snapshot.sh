@@ -503,11 +503,34 @@ echo
 if ! jq empty "$OUT_DIR/manifest.json" 2>/dev/null; then
   echo "FATAL: generated manifest.json is not valid JSON." >&2
   echo "  jq says:" >&2
-  jq empty "$OUT_DIR/manifest.json" 2>&1 | sed 's/^/    /' >&2
+  # `|| true` is load-bearing under `set -euo pipefail` (line 60): jq exits
+  # non-zero here BY DESIGN, pipefail propagates that through the pipe, and
+  # errexit then kills the script MID-DUMP — printing jq's message and none of
+  # the diagnostics below it. Caught only by actually walking this branch
+  # (@macf-science-agent[bot], PR #191); the first version of this block shipped
+  # the bug it exists to prevent.
+  jq empty "$OUT_DIR/manifest.json" 2>&1 | sed 's/^/    /' >&2 || true
   echo "  The interpolated values that can carry malformed JSON are:" >&2
   echo "    --window-provenance : ${WINDOW_PROVENANCE:-<unset>}" >&2
   echo "    warnings           : ${WARNINGS_JSON:-<unset>}" >&2
   echo "    counters           : tempo=${TEMPO_HITS:-<unset>} langfuse=${LANGFUSE_HITS:-<unset>} loki=${LOKI_STREAMS:-<unset>} ch=${CH_ROWS:-<unset>} prom=${PROM_SERIES:-<unset>}" >&2
+  # CI's provenance_json was verified byte-identical to a value that parses by
+  # hand, so value-corruption is already partly ruled out and a dump of the
+  # values alone would spend the next occurrence re-confirming that. These
+  # discriminate ENVIRONMENT divergence from value corruption — the hypothesis
+  # byte-identity does NOT eliminate. ("Invalid numeric literal" is a
+  # parser-level complaint, and both jq's version and the numeric locale are
+  # plausible sources of a parse that differs between CI and an interactive
+  # shell.) Suggested by @macf-science-agent[bot] on PR #191.
+  echo "  environment (CI vs interactive divergence candidates):" >&2
+  echo "    jq        : $(jq --version 2>&1)  [$(command -v jq)]" >&2
+  echo "    locale    : LC_ALL=${LC_ALL:-<unset>} LC_NUMERIC=${LC_NUMERIC:-<unset>} LANG=${LANG:-<unset>}" >&2
+  echo "    shell     : $BASH_VERSION" >&2
+  # The value as THIS step sees it, which is not necessarily the value the
+  # caller logged — a transformation between those two points is the one
+  # candidate byte-identity leaves open. Length + checksum make the comparison
+  # exact without depending on the dump above being visually inspected.
+  echo "    provenance bytes=${#WINDOW_PROVENANCE} md5=$(printf '%s' "${WINDOW_PROVENANCE:-}" | md5sum | cut -d' ' -f1)" >&2
   echo "  offending manifest, with line numbers:" >&2
   nl -ba "$OUT_DIR/manifest.json" | sed 's/^/    /' >&2
   exit 1
