@@ -490,9 +490,21 @@ for _pair in "summary.tempo_traces=${TEMPO_HITS:-}" \
              "window.start_epoch=${START_EPOCH:-}" \
              "window.end_epoch=${END_EPOCH:-}"; do
   _k="${_pair%%=*}"; _v="${_pair#*=}"
-  case "$_v" in
-    ''|*[!0-9-]*) _bad_field "$_k" "$_v" ;;
-  esac
+  # Delegate to the parser that will actually consume the manifest, rather than
+  # hand-rolling a character class. The first attempt used `*[!0-9-]*`, which is
+  # a MEMBERSHIP test ("contains only these characters") where a SHAPE test is
+  # needed — it disagreed with jq in six of nine cases (@macf-science-agent[bot],
+  # #192): it accepted `1-2-3`, `--`, `-` and `12-` (not JSON numbers, so they
+  # would slip past this key-anchored check and be caught only by the post-hoc
+  # backstop — which reports the shifting line number this block exists to
+  # eliminate, precisely for the weirdest inputs), and rejected `12.5` and `1e3`,
+  # which ARE valid JSON. That second half matters operationally: these seven
+  # values are query results from Prometheus/Tempo/Loki/ClickHouse/Langfuse, not
+  # values we own, and Prometheus aggregations return floats routinely — so a
+  # predicate tightened past the invariant we actually own turns a provider's
+  # format into an outage (the check-gh-token.sh v3-token shape, again).
+  # Validate what we own: "emits valid JSON".
+  printf '%s' "$_v" | jq -e 'type == "number"' >/dev/null 2>&1 || _bad_field "$_k" "$_v"
 done
 
 cat > "$OUT_DIR/manifest.json" <<MANIFEST
