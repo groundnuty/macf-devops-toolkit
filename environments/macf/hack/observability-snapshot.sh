@@ -463,6 +463,38 @@ fi
 WARNINGS_JSON=$(cat "$WARNINGS_TMP")
 rm -f "$WARNINGS_TMP"
 
+# Validate every interpolated value BY KEY before assembling the manifest.
+#
+# The post-hoc check below catches a malformed manifest, but it reports jq's
+# line/column — and `WARNINGS_JSON` is multi-line, so manifest line numbers
+# SHIFT with the warning count. A coordinate that moves under the reader sends
+# them to the wrong field with full confidence (@macf-science-agent[bot], #191;
+# same reasoning as macf#934's gate messages naming the failure rather than a
+# count). Anchoring on the key is stable; anchoring on the position is not.
+_bad_field() {
+  echo "FATAL: manifest field '$1' would emit invalid JSON." >&2
+  echo "  value (${#2} bytes): $2" >&2
+  echo "  this is a KEY-anchored report — manifest line numbers shift with the" >&2
+  echo "  warning count, so do not anchor a diagnosis on jq's line number." >&2
+  exit 1
+}
+printf '%s' "${WINDOW_PROVENANCE:-null}" | jq empty 2>/dev/null \
+  || _bad_field "window.provenance" "${WINDOW_PROVENANCE:-<unset>}"
+printf '%s' "${WARNINGS_JSON:-[]}"      | jq empty 2>/dev/null \
+  || _bad_field "warnings" "${WARNINGS_JSON:-<unset>}"
+for _pair in "summary.tempo_traces=${TEMPO_HITS:-}" \
+             "summary.langfuse_traces=${LANGFUSE_HITS:-}" \
+             "summary.loki_streams=${LOKI_STREAMS:-}" \
+             "summary.clickhouse_rows=${CH_ROWS:-}" \
+             "summary.prometheus_series=${PROM_SERIES:-}" \
+             "window.start_epoch=${START_EPOCH:-}" \
+             "window.end_epoch=${END_EPOCH:-}"; do
+  _k="${_pair%%=*}"; _v="${_pair#*=}"
+  case "$_v" in
+    ''|*[!0-9-]*) _bad_field "$_k" "$_v" ;;
+  esac
+done
+
 cat > "$OUT_DIR/manifest.json" <<MANIFEST
 {
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
