@@ -72,6 +72,13 @@ the offset rationale is obsolete (see Note below). Key endpoints:
 | Langfuse UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3001` | `langfuse-web-lb` Service; admin login printed by `make langfuse-bootstrap` |
 | ArgoCD UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:8080` | `argocd-server-lb` Service; password via `make argocd-password` |
 | Prometheus | `http://orzech-dev-agents-monitoring.tail491af.ts.net:9090` | `prometheus-lb` LoadBalancer Service (ns/monitoring); reachable on every VM interface. UNAUTHENTICATED — tailnet boundary is the access control, same posture as Grafana/Langfuse/ArgoCD. (`make pf-prometheus` still works as a fallback.) |
+| **Runner provisioning API** | `http://orzech-dev-agents-monitoring.tail491af.ts.net:8088` | `runner-api-lb` (ns/arc-system) — the `runner-platform` contract. **`GET /` returns the full spec**, served from the same ConfigMap as the code so it cannot drift. Same unauthenticated-on-tailnet posture, but it MUTATES, so `OWNER_ALLOWLIST` is on by default. |
+
+⚠ **LoadBalancer ports are a cluster-wide shared namespace on k3s.** A collision leaves the loser at
+`EXTERNAL-IP: <pending>` while the port still ANSWERS from the winning service — a health check then
+returns `200` from the wrong thing. Claimed: `3000` grafana · `3001` langfuse · `3200` tempo ·
+`4317/4318` collector · `8000` runner-webhook · `8080` argocd · `8088` runner-api · `9090`
+prometheus. Re-derive live before adding a Service.
 
 Persistent state lives on the monitoring VM's `/mnt/volume1` (`/dev/vdb`, ~200 GiB)
 — never the root disk. k3s data-dir (embedded etcd + container images), PVCs
@@ -141,6 +148,32 @@ make smoke                     # OTLP round-trip — Tempo + Langfuse legs
   ports (`:4317/:4318/:3200`) directly — see the topology table above. Any lingering
   `:14318`/`:13200` references in docs/scripts are stale and should point at the
   monitoring-VM FQDN + native ports (devops#101 sweep).
+
+## `groundnuty/runner-platform` — API-driven runner provisioning (live as of 2026-08-19)
+
+A **separate private repo** (fleet-agnostic on purpose — CV and icsoc are meant to reuse it) holding
+the Kubernetes platform that provisions GitHub Actions runners on demand. Design: `design/DR-009`.
+
+**The contract is four HTTP calls, and it documents itself** — `GET /` on the endpoint above returns
+the spec, served from the same ConfigMap as the code. **Read that before this section**; it is
+current by construction and this is not.
+
+    POST /runners {repo, labels, warm, max, fleet, credentials}   DELETE /runners/{owner}/{repo}
+    GET  /runners/{owner}/{repo}                                  GET    /runners[?fleet=X]
+
+- **Nothing is built or compiled.** Stock `python:3.12-alpine`, code injected via kustomize
+  `configMapGenerator`, deployed by ArgoCD app-of-apps. Only infra requirements are Kubernetes +
+  Tailscale.
+- **Fleets bring their own GitHub App.** A private App installs only on its *owning* account, so one
+  platform identity can serve exactly one account. `credentials` is therefore usually required, is
+  keyed per repo, and is **write-only** in storage (RBAC withholds `get`/`list`) — so callers must
+  send it on every provision.
+- **`warm: 1` is mandatory, not a default.** Cold start ≈15s exceeds the ~12s the tailnet-join skip
+  saves, so a hibernated runner is slower than GitHub-hosted. Hibernation also has a ~10-min floor.
+- **VM runners are NOT retired** (DR-009 extends DR-003). This is the provisioning path for *new*
+  fleets; the four live VM runners keep serving.
+- **Tailscale Funnel does not work here** — it never publishes a public DNS record, so GitHub
+  webhooks 502. Scale-up uses pull-based HRA `metrics` instead; no inbound path is needed.
 
 ## Related repos (read-only reference)
 
