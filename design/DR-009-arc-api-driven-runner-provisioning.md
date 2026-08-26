@@ -535,3 +535,106 @@ That is a fact about the mechanism, not a prediction about behaviour, which is w
 - **Because both tiers can satisfy "a runner exists," any presence-based check is now ambiguous by construction.** This is not hypothetical — it is exactly the register-before-route gate's failure mode in §8, and coexistence makes it permanent rather than transitional. Every such check must resolve *which tier*, not merely *whether*.
 - One listener pod per repo remains. If that count becomes objectionable, the fix is an organization, not a different controller — a decision this DR deliberately leaves open, and whose first step is a five-minute test: create a free org and check whether `POST /orgs/<x>/actions/runners/registration-token` returns 200.
 - Public and private repos stay on **separate pools** under every future shape. This survives an org migration and is the one irreversible mistake available here.
+
+---
+
+## Amendment A (2026-08-26) — the platform holds no GitHub identity; fleets lend theirs
+
+**Five findings from building and running the thing, recorded because they currently live only in
+commit messages and issue threads.** A finding in a thread is an intention
+(`macf-science-agent`, macf#1189); this is the artifact.
+
+### A1 — a private GitHub App installs ONLY on its owning account, so one platform identity cannot serve a fleet
+
+The original design assumed the platform would hold a credential and register runners with it. That
+is **structurally impossible beyond one account**: a private App installs only on the account that
+owns it — a GitHub rule, not a permissions setting, unaffected by controlling both accounts.
+
+Symptom when violated, and it is a nasty one: everything on our side succeeds. Objects apply, the API
+returns `200`, and the failure appears **minutes later at a different layer** (`Failed to get new
+registration token`, or `404` listing that repo's runs). It reads as a transient.
+
+**Decision: `POST /runners` accepts a `credentials` block** (`app_id`, `installation_id`,
+`private_key`); the runner registers with the *fleet's* App via `githubAPICredentialsFrom`. The
+platform needs no GitHub identity, and therefore works on an account nobody here controls.
+
+- **Keyed per REPO**, not per owner (operator ruling: each agent has its own App on its own repo), so
+  the credential's scope and the runner's scope match exactly.
+- **Set on BOTH the `RunnerDeployment` and the `HorizontalRunnerAutoscaler`.** The autoscaler's
+  metrics poller makes its own GitHub calls; setting only the first yields a runner that registers
+  fine while **burst scale-up is silently dead** — a half-working runner whose broken half appears
+  only under load.
+- **Rotation must roll the pod.** The Secret changing is not enough: the spec is byte-identical (the
+  secretRef name derives from the repo), so apply is a no-op and the running pod keeps its
+  registration from the *old* App. A credential **fingerprint** is stamped on the pod template to
+  force recreation. A fleet rebuild rotates App identities *by construction* — GitHub gives no way to
+  reuse an App whose key you no longer hold — so **rotation is the normal path, not an edge case.**
+
+### A2 — EXPORT-CLASS GAP, and the most serious item here
+
+By macf#943's discriminator — *does the private key leave the vault* — this platform is an
+**export-class consumer**, and has been since 2026-08-19.
+
+    arc-system:runner-api                      get secrets: no    ← cannot read them back
+    arc-system:arc-actions-runner-controller   get secrets: yes   ← must, to mint tokens
+
+    3 credentials exported, with NO recorded ceiling for any of them
+
+macf#943 requires the permission set be **recorded in `fleet.lock` at export**, with
+`current ⊆ recorded` asserted. That never happened. **A ratchet that was never engaged is
+indistinguishable from no ratchet** — and worse, it reads as protection to anyone who knows the rule
+exists but not whether it fired (`macf-science-agent`, macf#1189).
+
+Mitigations are real but do not change the class: storage is **write-only** (RBAC grants
+`create/update/patch/delete` on secrets and withholds `get`/`list`, so the API can install and remove
+a credential but never read one) and teardown now removes them. The honest statement is *"the key
+lives in a cluster Secret the ARC controller and any cluster-admin can read."*
+
+**Owed:** freeze and record a ceiling for the three existing exports, and make the contract refuse a
+credential with no recorded ceiling. Marked **scope-level** per macf#1167's shape — recorded
+provenance plus surfaced-every-run — so this record cannot quietly go stale the way the three
+exports did.
+
+### A3 — "symmetric destroy" was an undefined predicate, and became false silently
+
+The contract claimed `DELETE` removes exactly what `POST` created. Provision created **three** objects
+and teardown removed **two**, leaving GitHub App private keys in the cluster permanently — on the rung
+whose entire purpose is leaving nothing behind (DR-043 Amendment I5).
+
+It was true when written; the next change made it false, **silently, because nothing asserted it**.
+Same class as DR-043 Amendment K's three corrections: a load-bearing word with no operational meaning.
+
+Fixed (`delete` on secrets, still no `get`), and — the durable half — **asserted in `bin/selftest.sh`,
+which now derives the created set from `render()` itself.** The first version of that assertion
+grepped for kind names that live elsewhere, so two of three checks *skipped*; a skipped check is
+indistinguishable from a passing one. Verified by breaking teardown on purpose and confirming exit 1.
+
+### A4 — reviving a destroyed runner has a precondition (DR-043 Amendment K3's axis)
+
+K3 established that the teardown ladder's revival column measures **operator consent clicks, not
+preconditions**. The runner rung acquired one after I3 was written: re-provisioning now requires **the
+fleet's own App credential**, because of A1. Still 0 clicks, so the rung placement is unchanged — but
+by K3's own logic a precondition belongs written down, and this is where it lives.
+
+### A5 — `available` answers a question nobody asked (OPEN)
+
+`GET /runners/{owner}/{repo}` returns `available: 1` when Kubernetes has a pod, which reads like an
+answer to *"is a runner usable?"* while answering *"did Kubernetes accept the objects?"*. Those
+disagreed persistently during the rotation bug, and the response note is weaker than the number.
+
+**Not fixed, and deliberately not fixed hastily.** Reading the pod's registration state would be a
+*third* derived signal, and this whole class comes from derived signals disagreeing. **Only GitHub
+knows** — which is why the caller-side gate asserting there independently is the design's strength
+rather than a workaround. Candidate fixes: rename the field to something unambiguously cluster-side,
+or return `ok: null` rather than a truthy-looking value. It is a contract change with a live caller
+(macf#943), so it needs their input, not a unilateral edit.
+
+### What did NOT change
+
+VM runners are not retired (§7); `warm: 1` remains mandatory (§7.3 — measured cold start ~15s exceeds
+the ~12s the tailnet-join skip saves); the decoupling invariant (§6.1) holds — none of the above reads
+from an observability stack.
+
+**References:** macf#943 (key-class rule, export discriminator) · macf#1189 (the credential path and
+this disclosure) · macf#1167 (the scope-level marker shape) · DR-043 Amendments I3/I5 (the ladder
+rung), K0 (the assert-it-or-it-is-prose test that found A3), K3 (the preconditions axis).
