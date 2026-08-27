@@ -160,6 +160,12 @@ tempo_count() {
   resp="$(curl -sS -m 12 -G "$TEMPO_URL/api/search" \
     --data-urlencode "q=$q" --data-urlencode "start=$START" --data-urlencode "end=$NOW" \
     --data-urlencode "limit=5" 2>/dev/null)" || { echo "ERR"; return; }
+  # `curl -sS` (no `-f`) exits 0 on any HTTP status, so a 4xx/5xx error body
+  # reaches here too — without this guard, `.traces | length` on a body with
+  # no `traces` key evaluates `null | length` -> 0, i.e. a QUERY FAILURE
+  # silently renders as "no telemetry", exactly the shape #199 exists to
+  # eliminate, one layer in. Fail loud instead (mirrors tempo_observed_names()).
+  printf '%s' "$resp" | jq -e 'has("traces")' >/dev/null 2>&1 || { echo "ERR"; return; }
   printf '%s' "$resp" | jq -r '.traces | length' 2>/dev/null || echo "ERR"
 }
 
