@@ -18,13 +18,23 @@
 #                                      security/liveness-relevant logic, including
 #                                      the WEDGED branch — job-wedge detection,
 #                                      see runner-watchdog.sh's own header)
-#   - _runner_watchdog_wedge_sample — the pure job-wedge predicate (last journal
-#                                      event + worker-process count -> wedged?);
-#                                      same "factor the I/O out of the decision"
-#                                      shape as _runner_watchdog_decide itself.
-#                                      The I/O halves that FEED it
-#                                      (_runner_watchdog_last_job_event via
-#                                      journalctl, _runner_watchdog_worker_count
+#   - _runner_watchdog_wedge_sample — the pure SINGLE-sample job-wedge shape
+#                                      predicate (last journal event +
+#                                      worker-process count -> wedge-SHAPED?);
+#                                      same "factor the I/O out of the
+#                                      decision" shape as _runner_watchdog_decide
+#                                      itself.
+#   - _runner_watchdog_wedge_confirmed — the pure TWO-sample identity check
+#                                      that actually confirms WEDGED: both
+#                                      samples must be wedge-shaped AND share
+#                                      the SAME journal timestamp (else two
+#                                      different jobs straddling the grace
+#                                      window could misdiagnose as one
+#                                      continuous wedge — see its own
+#                                      "same shape, timestamp ADVANCED" test).
+#                                      The I/O halves that FEED both of the
+#                                      above (_runner_watchdog_last_job_event
+#                                      via journalctl, _runner_watchdog_worker_count
 #                                      via pgrep, and the grace-period wrapper
 #                                      _runner_watchdog_check_wedge) are thin
 #                                      wrappers around those external tools and
@@ -115,6 +125,47 @@ check_wedge_sample "last event 'Running job' + 2 workers -> healthy, NOT wedged"
 check_wedge_sample "last event 'completed with' + 0 workers -> idle, NOT wedged" "completed with" "0" "0"
 check_wedge_sample "no job event seen yet (empty) + 0 workers -> NOT wedged"     "" "0" "0"
 check_wedge_sample "worker-count omitted defaults to 0 (still detects wedge)"    "Running job" "" "1"
+
+echo "== _runner_watchdog_wedge_confirmed: two-sample identity check (peer-review fix) =="
+# Peer-review catch: a bare shape match on BOTH samples is not proof of one
+# continuous wedge -- it can also occur for TWO DIFFERENT jobs straddling the
+# grace window (job A claimed with no worker yet; job A finishes, job B is
+# claimed a moment later, ALSO caught with no worker yet). Requiring the
+# journal timestamp to be IDENTICAL across both samples is what tells the two
+# cases apart.
+check_wedge_confirmed() {
+  local desc="$1" ts1="$2" event1="$3" count1="$4" ts2="$5" event2="$6" count2="$7" want="$8" got
+  got="$(_runner_watchdog_wedge_confirmed "$ts1" "$event1" "$count1" "$ts2" "$event2" "$count2")"
+  [ "$got" = "$want" ] && ok "$desc -> $want" || bad "$desc got '$got' want '$want'"
+}
+
+# --- the exact case named in review: same shape, DIFFERENT job -> NOT wedged ---
+check_wedge_confirmed "same wedge-shape, timestamp ADVANCED (different job claim) -> NOT confirmed (progress made)" \
+  "2026-08-27T00:26:40+0000" "Running job" "0" \
+  "2026-08-27T00:28:10+0000" "Running job" "0" \
+  "0"
+# --- the positive case: same shape, SAME timestamp (same stuck claim) -> confirmed ---
+check_wedge_confirmed "same wedge-shape, timestamp UNCHANGED (same stuck claim) -> CONFIRMED wedged" \
+  "2026-08-27T00:26:40+0000" "Running job" "0" \
+  "2026-08-27T00:26:40+0000" "Running job" "0" \
+  "1"
+# --- additional coverage beyond the 2 named cases ---
+check_wedge_confirmed "first sample not wedge-shaped (has a worker) -> NOT confirmed regardless of ts" \
+  "2026-08-27T00:26:40+0000" "Running job" "1" \
+  "2026-08-27T00:26:40+0000" "Running job" "0" \
+  "0"
+check_wedge_confirmed "second sample recovered (worker now present) -> NOT confirmed even with matching ts" \
+  "2026-08-27T00:26:40+0000" "Running job" "0" \
+  "2026-08-27T00:26:40+0000" "Running job" "1" \
+  "0"
+check_wedge_confirmed "second sample now 'completed with' (job finished) -> NOT confirmed" \
+  "2026-08-27T00:26:40+0000" "Running job" "0" \
+  "2026-08-27T00:28:10+0000" "completed with" "0" \
+  "0"
+check_wedge_confirmed "both timestamps empty (runner never ran a job either sample) -> NOT confirmed (no vacuous match on empty)" \
+  "" "" "0" \
+  "" "" "0" \
+  "0"
 
 echo "== _runner_watchdog_restart: WEDGED reuses the SAME --allow-restart gate as HEAL (no new flag) =="
 # task-spec minimum #3: "restart gated off without --allow-restart". WEDGED's

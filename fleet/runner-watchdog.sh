@@ -29,11 +29,15 @@
 # Observed live: a runner sat `active` for ~2 HOURS with that repo's routing
 # queued dark the entire time, and this watchdog logged "OK" on every 10-minute
 # sweep because ActiveState was the only signal it checked. See the "job-wedge
-# detection" comment block further down (next to _runner_watchdog_wedge_sample)
-# for the full incident evidence and the new WEDGED decision branch this adds —
-# same HEAL action (`systemctl restart`, same --allow-restart gate), just a
-# distinct label so the sweep table / alert text names the real failure instead
-# of a false "not active".
+# detection" comment block further down (next to _runner_watchdog_wedge_sample /
+# _runner_watchdog_wedge_confirmed) for the full incident evidence and the new
+# WEDGED decision branch this adds — same HEAL action (`systemctl restart`,
+# same --allow-restart gate), just a distinct label so the sweep table / alert
+# text names the real failure instead of a false "not active". Confirmation
+# requires TWO samples WEDGE_GRACE_S apart that are not just both wedge-shaped
+# but demonstrably the SAME stuck claim (identical journal timestamp) — a
+# single shape match, or two shape matches from two DIFFERENT jobs straddling
+# the grace window, never confirms WEDGED on their own.
 #
 # DRY-RUN BY DEFAULT (mirrors reconcile.sh exactly): prints the decision + the
 # command it WOULD run; --execute acts; --allow-restart gates the actual
@@ -67,9 +71,10 @@
 #                 nothing logged beyond the sweep table row.
 #     -> WEDGED : active-state == "active" AND wedged == "1" — the unit LOOKS up
 #                 (systemd sees the listener running) but it has claimed a job
-#                 and no Runner.Worker process is executing it. See the
-#                 "job-wedge detection" block below (next to
-#                 _runner_watchdog_wedge_sample) for the incident this closes.
+#                 and no Runner.Worker process is executing it, CONFIRMED by
+#                 two identical-timestamp samples (not just two shape matches
+#                 — see the "job-wedge detection" block below, next to
+#                 _runner_watchdog_wedge_confirmed, for why identity matters).
 #                 Same HEAL action as the branch below (`systemctl restart`,
 #                 gated behind --allow-restart) — kept as a DISTINCT label
 #                 (not folded into HEAL) purely so the sweep table / alert text
@@ -163,6 +168,28 @@ JOB_EVENT_LOOKBACK_LINES="${MACF_RUNNER_JOB_EVENT_LOOKBACK:-200}"
 # worker-spawn latency and comfortably below the 10-minute sweep cadence; only
 # paid on the rare tick whose first sample already looks wedge-shaped — the
 # common case (no job / a job with a worker already up) costs zero sleep.
+#
+# SWEEP-DURATION CEILING (per-runner, SERIAL sleeps — read this before raising
+# either WEDGE_GRACE_S or the live-runner count): the main loop calls
+# _runner_watchdog_check_wedge once per `status: live` registry entry, one
+# after another, and each wedge-SHAPED runner (not just confirmed-wedged —
+# the FIRST sample alone triggers the sleep) pays its own WEDGE_GRACE_S
+# serially before the next runner is even looked at. Worst case — EVERY live
+# runner sampling wedge-shaped on the same sweep tick (plausible: a shared
+# network blip or an upstream GitHub incident hitting every runner's
+# JobDispatcher at once) — is (live-runner count) * WEDGE_GRACE_S added to
+# that sweep's wall-clock time. At today's 4 live runners * 90s = 360s, this
+# is comfortably under the 600s (10-minute) cron cadence (install-cron.sh),
+# but the margin is thinner than it looks: it is NOT a hard guarantee, cron
+# does not itself prevent an overlapping invocation if one sweep runs long
+# (no flock/lockfile around the whole script), and an overlapping invocation
+# could each independently decide to restart the SAME runner. If the live
+# count grows meaningfully past today's 4, or WEDGE_GRACE_S is raised, redo
+# this arithmetic against the actual cron interval before shipping the
+# change — and consider capping the total per-sweep grace budget (e.g. only
+# pay the grace for the first N wedge-shaped runners, deferring the rest to
+# the next sweep) or fencing the whole sweep with a lockfile, rather than
+# assuming today's margin still holds.
 WEDGE_GRACE_S="${MACF_RUNNER_WEDGE_GRACE_S:-90}"
 EXECUTE=0
 ALLOW_RESTART=0
@@ -363,16 +390,47 @@ _runner_watchdog_state() {
 #   a threshold would either false-positive on slow-but-healthy jobs or be set
 #   so high it stops catching real wedges promptly.
 #
-# _runner_watchdog_last_job_event <service> -> the most recent job-lifecycle
-# marker in the unit's journal: "Running job" | "completed with" | "" (neither
-# has appeared in the lookback window — e.g. a runner that has never run a job
-# yet). Reads JOB_EVENT_LOOKBACK_LINES lines, not just the last 1 — journalctl's
-# tail can interleave with other unit chatter (registration pings, heartbeats),
-# so `tail -1` after the grep is what actually finds the LAST job marker.
+#   TWO SAMPLES ARE NOT ENOUGH ON THEIR OWN — THEY MUST BE THE **SAME** CLAIM
+#   (peer-review catch): re-sampling "claimed a job, no worker" 90s apart does
+#   NOT by itself prove one continuous wedge. It can also occur for TWO
+#   DIFFERENT jobs straddling the grace window — job A claimed, no worker yet
+#   (sample 1, wedge-shaped); job A finishes and job B is claimed a moment
+#   later, its worker also not yet up (sample 2, wedge-shaped) — a healthy,
+#   busy runner that would misdiagnose as WEDGED and get restarted mid-job.
+#   The fix: capture the journal's OWN timestamp for the claim event alongside
+#   the marker text, and require the timestamp to be IDENTICAL across both
+#   samples before confirming WEDGED (see _runner_watchdog_wedge_confirmed
+#   below). If the timestamp advanced, a NEW event was logged between samples
+#   — the runner has demonstrably made progress and is not wedged, regardless
+#   of shape.
+#
+# _runner_watchdog_last_job_event <service> -> "<iso-timestamp>\t<marker>" for
+# the most recent job-lifecycle line in the unit's journal, where <marker> is
+# "Running job" | "completed with"; empty ("\t" alone, i.e. both fields empty)
+# if neither has appeared in the lookback window (e.g. a runner that has never
+# run a job yet). `-o short-iso` (not `-o cat`) so the timestamp survives —
+# see "TWO SAMPLES ARE NOT ENOUGH" above for why the timestamp matters as much
+# as the marker text. Reads JOB_EVENT_LOOKBACK_LINES lines, not just the last
+# 1 — journalctl's tail can interleave with other unit chatter (registration
+# pings, heartbeats), so `tail -1` after the grep is what actually finds the
+# LAST job-lifecycle line.
 _runner_watchdog_last_job_event() {
-  local svc="$1"
-  journalctl -u "$svc" -n "$JOB_EVENT_LOOKBACK_LINES" --no-pager -o cat 2>/dev/null \
-    | grep -oE 'Running job|completed with' | tail -1
+  local svc="$1" line ts marker
+  line="$(journalctl -u "$svc" -n "$JOB_EVENT_LOOKBACK_LINES" --no-pager -o short-iso 2>/dev/null \
+    | grep -E 'Running job|completed with' | tail -1)"
+  if [ -z "$line" ]; then
+    printf '\t\n'
+    return 0
+  fi
+  # short-iso's timestamp is the line's first whitespace-separated field
+  # (e.g. "2026-08-27T00:26:40+0000"), with no embedded spaces.
+  ts="${line%% *}"
+  case "$line" in
+    *'Running job'*)    marker="Running job" ;;
+    *'completed with'*) marker="completed with" ;;
+    *)                   marker="" ;;
+  esac
+  printf '%s\t%s\n' "$ts" "$marker"
 }
 
 # _runner_watchdog_worker_count <name> -> number of live Runner.Worker
@@ -395,11 +453,12 @@ _runner_watchdog_worker_count() {
 }
 
 # _runner_watchdog_wedge_sample <last-job-event> <worker-count> -> "1" if THIS
-# single sample looks wedged (last event is a job claim, zero workers for it),
-# else "0". PURE — no I/O, always returns 0 — unit-tested directly (see
-# test-runner-watchdog.sh). The two I/O-touching functions above feed it real
-# data; _runner_watchdog_check_wedge below is what actually decides WEDGED (it
-# re-samples across a grace window rather than trusting a single call of this).
+# single sample LOOKS wedge-shaped (last event is a job claim, zero workers
+# for it), else "0". PURE — no I/O, always returns 0 — unit-tested directly
+# (see test-runner-watchdog.sh). A single call of this is a SHAPE check only —
+# it does NOT by itself prove a wedge; see _runner_watchdog_wedge_confirmed
+# below for why a second, identity-checked sample is required before WEDGED
+# is ever reported.
 _runner_watchdog_wedge_sample() {
   local last_event="$1" count="${2:-0}"
   if [ "$last_event" = "Running job" ] && [ "$count" -eq 0 ] 2>/dev/null; then
@@ -409,24 +468,59 @@ _runner_watchdog_wedge_sample() {
   fi
 }
 
-# _runner_watchdog_check_wedge <service> <name> -> "1" iff STILL wedge-shaped
-# after the WEDGE_GRACE_S grace window, "0" otherwise. Re-samples rather than
-# trusting one read — see WEDGE_GRACE_S's own comment — so the ORDINARY gap
-# between a runner's JobDispatcher claiming a job and Runner.Worker actually
-# spawning it is never mistaken for a wedge. Costs zero sleep on the
-# overwhelmingly common case where the first sample already isn't wedge-shaped
-# (no job running, or a job with its worker already up).
+# _runner_watchdog_wedge_confirmed <ts1> <event1> <count1> <ts2> <event2> <count2>
+# -> "1" iff BOTH samples independently look wedge-shaped (per
+# _runner_watchdog_wedge_sample) AND the journal timestamp is IDENTICAL across
+# both. PURE — no I/O, always returns 0 — unit-tested directly.
+#
+# The timestamp-identity requirement is the fix for a peer-review-caught false
+# positive: two wedge-shaped samples WEDGE_GRACE_S apart do NOT by themselves
+# prove one continuous wedge — they can also occur for TWO DIFFERENT jobs
+# straddling the grace window (job A claimed with no worker yet at t0; job A
+# finishes and job B is claimed a moment later, ALSO caught with no worker yet
+# at t0+WEDGE_GRACE_S). That shape is a healthy, busy runner — restarting it
+# would kill a live job. Requiring ts1 == ts2 rules this out: if the
+# timestamp advanced, a NEW journal line was logged between samples, which
+# means the runner made progress and is not wedged, REGARDLESS of shape —
+# same-shape-different-timestamp is explicitly NOT confirmed here (see its
+# own test case). An empty timestamp (no job event ever seen) never confirms
+# either, since "" = "" would otherwise vacuously match two never-ran
+# runners — guarded by requiring ts1 to be non-empty.
+_runner_watchdog_wedge_confirmed() {
+  local ts1="$1" event1="$2" count1="$3" ts2="$4" event2="$5" count2="$6"
+  [ "$(_runner_watchdog_wedge_sample "$event1" "$count1")" = "1" ] || { echo "0"; return 0; }
+  [ "$(_runner_watchdog_wedge_sample "$event2" "$count2")" = "1" ] || { echo "0"; return 0; }
+  if [ -n "$ts1" ] && [ "$ts1" = "$ts2" ]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+# _runner_watchdog_check_wedge <service> <name> -> "1" iff CONFIRMED wedged
+# after the WEDGE_GRACE_S grace window (per _runner_watchdog_wedge_confirmed
+# — same shape AND same journal timestamp across both samples), "0"
+# otherwise. Re-samples rather than trusting one read — see WEDGE_GRACE_S's
+# own comment — so the ORDINARY gap between a runner's JobDispatcher claiming
+# a job and Runner.Worker actually spawning it is never mistaken for a wedge.
+# Costs zero sleep on the overwhelmingly common case where the first sample
+# already isn't wedge-shaped (no job running, or a job with its worker
+# already up).
 _runner_watchdog_check_wedge() {
-  local svc="$1" name="$2" event count
-  event="$(_runner_watchdog_last_job_event "$svc")"
-  count="$(_runner_watchdog_worker_count "$name")"
-  [ "$(_runner_watchdog_wedge_sample "$event" "$count")" = "1" ] || { echo "0"; return 0; }
+  local svc="$1" name="$2"
+  local sample1 ts1 event1 count1 sample2 ts2 event2 count2
+
+  sample1="$(_runner_watchdog_last_job_event "$svc")"
+  ts1="${sample1%%$'\t'*}"; event1="${sample1#*$'\t'}"
+  count1="$(_runner_watchdog_worker_count "$name")"
+  [ "$(_runner_watchdog_wedge_sample "$event1" "$count1")" = "1" ] || { echo "0"; return 0; }
 
   sleep "$WEDGE_GRACE_S"
 
-  event="$(_runner_watchdog_last_job_event "$svc")"
-  count="$(_runner_watchdog_worker_count "$name")"
-  _runner_watchdog_wedge_sample "$event" "$count"
+  sample2="$(_runner_watchdog_last_job_event "$svc")"
+  ts2="${sample2%%$'\t'*}"; event2="${sample2#*$'\t'}"
+  count2="$(_runner_watchdog_worker_count "$name")"
+  _runner_watchdog_wedge_confirmed "$ts1" "$event1" "$count1" "$ts2" "$event2" "$count2"
 }
 
 # _runner_watchdog_alert <name> <why> — dedup'd sentinel (one open alert per
