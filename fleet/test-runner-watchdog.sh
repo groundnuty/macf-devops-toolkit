@@ -14,8 +14,22 @@
 # step of the PR instead (dry-run against the real runners on the host). What IS
 # unit-tested here, with zero systemctl dependency:
 #
-#   - _runner_watchdog_decide       — the pure 3-input decision table (the actual
-#                                      security/liveness-relevant logic)
+#   - _runner_watchdog_decide       — the pure 4-input decision table (the actual
+#                                      security/liveness-relevant logic, including
+#                                      the WEDGED branch — job-wedge detection,
+#                                      see runner-watchdog.sh's own header)
+#   - _runner_watchdog_wedge_sample — the pure job-wedge predicate (last journal
+#                                      event + worker-process count -> wedged?);
+#                                      same "factor the I/O out of the decision"
+#                                      shape as _runner_watchdog_decide itself.
+#                                      The I/O halves that FEED it
+#                                      (_runner_watchdog_last_job_event via
+#                                      journalctl, _runner_watchdog_worker_count
+#                                      via pgrep, and the grace-period wrapper
+#                                      _runner_watchdog_check_wedge) are thin
+#                                      wrappers around those external tools and
+#                                      are exercised live, same as the
+#                                      systemctl-touching functions above.
 #   - _runner_watchdog_filter_registry — the status-filter jq query, hand-fed JSON
 #                                      (no yq — yq lives on the runner devbox /
 #                                      host-prelude, not every dev sandbox)
@@ -45,10 +59,12 @@ echo "== sourcing is side-effect-free (no sweep ran, defaults intact) =="
 [ "$EXECUTE" -eq 0 ] && ok "EXECUTE defaults to 0 after source (main() did not run)" || bad "EXECUTE was mutated by sourcing"
 [ "$ALLOW_RESTART" -eq 0 ] && ok "ALLOW_RESTART defaults to 0 after source" || bad "ALLOW_RESTART was mutated by sourcing"
 
-echo "== _runner_watchdog_decide: pure 3-input decision table (no I/O) =="
+echo "== _runner_watchdog_decide: pure 4-input decision table (no I/O) =="
+# 6th arg (wedged) is OPTIONAL and defaults to "0" — every pre-existing 5-arg
+# call below (written before job-wedge detection existed) is unaffected.
 check_decision() {
-  local desc="$1" active="$2" loaded="$3" locked="$4" want="$5" got
-  got="$(_runner_watchdog_decide "$active" "$loaded" "$locked")"
+  local desc="$1" active="$2" loaded="$3" locked="$4" want="$5" wedged="${6:-0}" got
+  got="$(_runner_watchdog_decide "$active" "$loaded" "$locked" "$wedged")"
   [ "$got" = "$want" ] && ok "$desc -> $want" || bad "$desc got '$got' want '$want'"
 }
 
@@ -65,6 +81,52 @@ check_decision "masked unit -> ALERT (nothing to restart)"           "inactive" 
 check_decision "lock-active + unit ALSO torn down -> SKIP wins"       "unknown"  "not-found" "1" "SKIP"
 check_decision "lock-active + unit healthy -> still SKIP (don't touch mid-maintenance)" "active" "loaded" "1" "SKIP"
 check_decision "unknown/empty active-state (query hiccup) -> HEAL, never silently OK" "" "loaded" "0" "HEAL"
+
+echo "== _runner_watchdog_decide: WEDGED (active-but-not-working, macf-devops-toolkit job-wedge fix) =="
+# The incident this closes: a runner's unit stayed ActiveState=active for ~2h
+# while a job it had claimed was never actually run by any Runner.Worker (a
+# same-instant cancellation raced the claim) — is-active alone reported "OK"
+# throughout. WEDGED is the 4th input (wedged="1") overriding what would
+# otherwise read as healthy.
+check_decision "active+loaded+unlocked+wedged=1 -> WEDGED (new state)" \
+  "active" "loaded" "0" "WEDGED" "1"
+check_decision "active+loaded+unlocked+wedged=0 -> still OK (has a worker, healthy)" \
+  "active" "loaded" "0" "OK" "0"
+check_decision "wedged flag only matters when active -- inactive+wedged=1 still -> HEAL (existing branch wins, not a new one)" \
+  "inactive" "loaded" "0" "HEAL" "1"
+check_decision "maintenance lock overrides WEDGED too -- SKIP wins (don't fight an in-flight reinstall)" \
+  "active" "loaded" "1" "SKIP" "1"
+check_decision "unit not loaded overrides WEDGED too -- ALERT wins (nothing to check a wedge on)" \
+  "unknown" "not-found" "0" "ALERT" "1"
+
+echo "== _runner_watchdog_wedge_sample: pure job-wedge predicate (no I/O) =="
+check_wedge_sample() {
+  local desc="$1" event="$2" count="$3" want="$4" got
+  got="$(_runner_watchdog_wedge_sample "$event" "$count")"
+  [ "$got" = "$want" ] && ok "$desc -> $want" || bad "$desc got '$got' want '$want'"
+}
+
+# --- "wedged detected" (task-spec minimum #1) ---
+check_wedge_sample "last event 'Running job' + 0 workers -> looks wedged"        "Running job" "0" "1"
+# --- "healthy-with-worker NOT flagged" (task-spec minimum #2) ---
+check_wedge_sample "last event 'Running job' + 1 worker -> healthy, NOT wedged" "Running job" "1" "0"
+check_wedge_sample "last event 'Running job' + 2 workers -> healthy, NOT wedged" "Running job" "2" "0"
+# --- additional coverage beyond the 2 named minimums ---
+check_wedge_sample "last event 'completed with' + 0 workers -> idle, NOT wedged" "completed with" "0" "0"
+check_wedge_sample "no job event seen yet (empty) + 0 workers -> NOT wedged"     "" "0" "0"
+check_wedge_sample "worker-count omitted defaults to 0 (still detects wedge)"    "Running job" "" "1"
+
+echo "== _runner_watchdog_restart: WEDGED reuses the SAME --allow-restart gate as HEAL (no new flag) =="
+# task-spec minimum #3: "restart gated off without --allow-restart". WEDGED's
+# heal action is _runner_watchdog_restart -- the SAME function HEAL already
+# uses (see runner-watchdog.sh's WEDGED case) -- so this proves the existing
+# gate covers the new state without any code path bypassing it.
+ALLOW_RESTART=0
+out="$(_runner_watchdog_restart wedged-test actions.runner.does-not-exist.wedged.service)"; rc=$?
+[ "$rc" -eq 1 ] && ok "WEDGED-triggered restart, no --allow-restart -> held (rc=1)" || bad "expected held rc=1, got $rc"
+printf '%s' "$out" | grep -qF "[held]" && ok "WEDGED-triggered restart without --allow-restart logs [held]" || bad "missing [held] marker: $out"
+printf '%s' "$out" | grep -qF "systemctl" && bad "WEDGED held path should NOT print a systemctl command at all" || ok "WEDGED held path never mentions systemctl (no new flag needed to suppress it)"
+ALLOW_RESTART=0   # already 0; restore explicit for clarity of subsequent tests
 
 echo "== _runner_watchdog_filter_registry: status filter (hand-fed JSON, no yq) =="
 FIXTURE='{"fleets":[{"name":"macf","runners":[
