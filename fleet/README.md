@@ -124,14 +124,30 @@ credential boundary documented in `../runner/RUNNER.md` "The security model").
 |---|---|
 | maintenance lock active for this runner's `name` | **SKIP** (checked first — an in-flight `make reinstall-<name>` tears the unit down on purpose) |
 | unit not `loaded` (masked / torn down / never installed) | **ALERT** (dedup'd sentinel — needs an operator-minted token to re-register, this script can't do it unattended) |
-| unit `loaded` + `ActiveState=active` | **OK** |
+| unit `loaded` + `ActiveState=active`, executing (or not currently claiming) a job | **OK** |
+| unit `loaded` + `ActiveState=active` **but** its journal's last job event is a claim with no `Runner.Worker` process for it, confirmed past a grace window | **WEDGED** (job-wedge — see RUNNER.md "Fleet-visible liveness"; healed the same way as HEAL below) |
 | unit `loaded` but not active (inactive/failed/dead/activating-stuck) | **HEAL** (`systemctl restart`, gated behind `--allow-restart`; re-checked after restart — still not active → escalate to **ALERT**) |
 
-The whole tiered response is ONE 3-input pure function,
-`_runner_watchdog_decide <active-state> <unit-loaded> <lock-active>`, unit-tested
-in `test-runner-watchdog.sh` without touching `systemctl` at all (same
-"factor the decision table out of the `gh`/`systemctl`-calling wrapper" shape
-as `runner/fork-pr-approval-check.sh`'s `_fork_approval_decide`).
+`ActiveState=active` alone is a PROXY ("is the listener process up"), not the
+INVARIANT this watchdog protects ("can this runner execute a routed job right
+now") — a job-claim raced by a same-instant cancellation can leave a runner's
+JobDispatcher wedged (no worker ever spawned, no completion ever logged) while
+the unit itself never goes inactive. **WEDGED** closes that blind spot by
+cross-checking the unit's own journal against its live processes before
+trusting `active` at face value; see `runner-watchdog.sh`'s own "job-wedge
+detection" comment for the incident (~2h of routing queued dark while every
+sweep logged OK) and `runner/RUNNER.md`'s bulk-cancel hazard note for how it
+was triggered.
+
+The whole tiered response is ONE 4-input pure function,
+`_runner_watchdog_decide <active-state> <unit-loaded> <lock-active> [<wedged>]`,
+unit-tested in `test-runner-watchdog.sh` without touching `systemctl` at all
+(same "factor the decision table out of the `gh`/`systemctl`-calling wrapper"
+shape as `runner/fork-pr-approval-check.sh`'s `_fork_approval_decide`). The
+`wedged` input is itself derived from a pure predicate,
+`_runner_watchdog_wedge_sample <last-job-event> <worker-count>`, fed by
+effectful `journalctl`/`pgrep` wrappers exercised live (same as the
+`systemctl`-touching helpers).
 
 **Only sweeps `status: live` registry entries** (`MACF_RUNNER_WATCHDOG_STATUSES`,
 default `live`) — `runners.yaml` also carries `ready`/staged entries (e.g. `macf`,

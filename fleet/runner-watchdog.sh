@@ -18,6 +18,27 @@
 # torn-down/de-registered unit needs an operator-minted token to re-register, which
 # this script cannot do unattended — RUNNER.md "Setup sequence" step 3).
 #
+# EXTENDED DETECTION — job-wedge (active-but-not-working): the loaded/active
+# checks above are a PROXY for runner health ("is the listener process up"), not
+# the INVARIANT this watchdog actually exists to protect ("can this runner
+# execute a routed job right now"). That proxy has a live blind spot: a runner
+# can claim a job, have the claim raced by a same-instant cancellation, and end
+# up with its JobDispatcher wedged — no Runner.Worker ever spawned, no
+# completion ever logged, the slot never released — while `systemctl` still
+# reports `ActiveState=active` because the LISTENER process itself never died.
+# Observed live: a runner sat `active` for ~2 HOURS with that repo's routing
+# queued dark the entire time, and this watchdog logged "OK" on every 10-minute
+# sweep because ActiveState was the only signal it checked. See the "job-wedge
+# detection" comment block further down (next to _runner_watchdog_wedge_sample /
+# _runner_watchdog_wedge_confirmed) for the full incident evidence and the new
+# WEDGED decision branch this adds — same HEAL action (`systemctl restart`,
+# same --allow-restart gate), just a distinct label so the sweep table / alert
+# text names the real failure instead of a false "not active". Confirmation
+# requires TWO samples WEDGE_GRACE_S apart that are not just both wedge-shaped
+# but demonstrably the SAME stuck claim (identical journal timestamp) — a
+# single shape match, or two shape matches from two DIFFERENT jobs straddling
+# the grace window, never confirms WEDGED on their own.
+#
 # DRY-RUN BY DEFAULT (mirrors reconcile.sh exactly): prints the decision + the
 # command it WOULD run; --execute acts; --allow-restart gates the actual
 # `systemctl restart` behind operator sign-off (same shape as reconcile.sh's Tier-2
@@ -37,22 +58,38 @@
 # THE PURE DECISION (zero I/O; unit-tested directly — see test-runner-watchdog.sh,
 # same shape as runner/fork-pr-approval-check.sh's `_fork_approval_decide`):
 #
-#   _runner_watchdog_decide <active-state> <unit-loaded> <lock-active>
-#     -> SKIP  : lock-active == "1" — maintenance in progress, don't fight it.
-#                Checked FIRST so it overrides even an ALERT-shaped reading
-#                (unit torn down mid-reinstall looks identical to "de-registered").
-#     -> ALERT : unit-loaded != "loaded" — de-registered / masked / never
-#                installed. Nothing to restart; needs an operator to re-register
-#                (`make -C runner reinstall-<name>`, RUNNER.md).
-#     -> OK    : active-state == "active" — healthy, quiet, nothing logged beyond
-#                the sweep table row.
-#     -> HEAL  : loaded but not active (inactive/failed/dead/activating-stuck) —
-#                attempt `systemctl restart`, gated behind --allow-restart.
+#   _runner_watchdog_decide <active-state> <unit-loaded> <lock-active> [<wedged>]
+#     -> SKIP   : lock-active == "1" — maintenance in progress, don't fight it.
+#                 Checked FIRST so it overrides even an ALERT/WEDGED-shaped
+#                 reading (unit torn down mid-reinstall looks identical to
+#                 "de-registered"; a maintenance-driven restart looks identical
+#                 to "wedged").
+#     -> ALERT  : unit-loaded != "loaded" — de-registered / masked / never
+#                 installed. Nothing to restart; needs an operator to re-register
+#                 (`make -C runner reinstall-<name>`, RUNNER.md).
+#     -> OK     : active-state == "active" AND wedged != "1" — healthy, quiet,
+#                 nothing logged beyond the sweep table row.
+#     -> WEDGED : active-state == "active" AND wedged == "1" — the unit LOOKS up
+#                 (systemd sees the listener running) but it has claimed a job
+#                 and no Runner.Worker process is executing it, CONFIRMED by
+#                 two identical-timestamp samples (not just two shape matches
+#                 — see the "job-wedge detection" block below, next to
+#                 _runner_watchdog_wedge_confirmed, for why identity matters).
+#                 Same HEAL action as the branch below (`systemctl restart`,
+#                 gated behind --allow-restart) — kept as a DISTINCT label
+#                 (not folded into HEAL) purely so the sweep table / alert text
+#                 names the real failure instead of a misleading "not active".
+#     -> HEAL   : loaded but not active (inactive/failed/dead/activating-stuck) —
+#                 attempt `systemctl restart`, gated behind --allow-restart.
+#
+# `wedged` defaults to "0" when the 4th positional is omitted, so every
+# pre-existing 3-arg call site (including every OK/HEAL/ALERT/SKIP test written
+# before job-wedge detection existed) is unaffected.
 #
 # The "restart failed -> escalate to ALERT" leg is NOT a distinct branch in the
 # decision table — it's a SECOND read of the post-restart ActiveState fed back
 # through the exact same OK/HEAL predicate (see _runner_watchdog_restart below),
-# so the whole tiered response reduces to one 3-input truth table, not two.
+# so the whole tiered response reduces to one 4-input truth table, not two.
 #
 # DUAL-PURPOSE FILE (source for pure-function tests, execute for the real sweep):
 # no existing fleet/ script needs both — reconcile.sh is only ever exec'd (never
@@ -113,6 +150,47 @@ RESTART_SETTLE_S="${MACF_RUNNER_RESTART_SETTLE_S:-3}"
 # Override to "" if the watchdog cron itself runs as root. See fleet/README.md /
 # RUNNER.md for the sudoers line an operator needs to grant this non-interactively.
 SUDO_CMD="${MACF_RUNNER_WATCHDOG_SUDO:-sudo -n}"
+# Same per-runner base dir + <name> layout every other runner script keys on
+# (RUNNER.md "Multi-runner-per-host layout") — used ONLY to attribute a live
+# Runner.Worker process to a specific runner by its cmdline path (see
+# _runner_watchdog_worker_count below). Not otherwise used by this script.
+RUNNER_BASE="${MACF_RUNNER_BASE:-/mnt/volume1/macf-runners}"
+# How far back to read a unit's journal when looking for its last job-lifecycle
+# marker ("Running job" / "completed with"). journalctl's tail can interleave
+# with other unit chatter (registration pings, heartbeats), so `-n 1` is not
+# reliably the last JOB event — see "job-wedge detection" below.
+JOB_EVENT_LOOKBACK_LINES="${MACF_RUNNER_JOB_EVENT_LOOKBACK:-200}"
+# Grace window between observing "job claimed, no worker yet" and re-checking
+# before declaring the runner WEDGED (see "job-wedge detection" below). Bridges
+# the ORDINARY gap between a JobDispatcher claiming a job and Runner.Worker
+# actually spawning — without it, a routine job start caught mid-spawn by a
+# sweep tick would misdiagnose as a wedge. 90s is comfortably above observed
+# worker-spawn latency and comfortably below the 10-minute sweep cadence; only
+# paid on the rare tick whose first sample already looks wedge-shaped — the
+# common case (no job / a job with a worker already up) costs zero sleep.
+#
+# SWEEP-DURATION CEILING (per-runner, SERIAL sleeps — read this before raising
+# either WEDGE_GRACE_S or the live-runner count): the main loop calls
+# _runner_watchdog_check_wedge once per `status: live` registry entry, one
+# after another, and each wedge-SHAPED runner (not just confirmed-wedged —
+# the FIRST sample alone triggers the sleep) pays its own WEDGE_GRACE_S
+# serially before the next runner is even looked at. Worst case — EVERY live
+# runner sampling wedge-shaped on the same sweep tick (plausible: a shared
+# network blip or an upstream GitHub incident hitting every runner's
+# JobDispatcher at once) — is (live-runner count) * WEDGE_GRACE_S added to
+# that sweep's wall-clock time. At today's 4 live runners * 90s = 360s, this
+# is comfortably under the 600s (10-minute) cron cadence (install-cron.sh),
+# but the margin is thinner than it looks: it is NOT a hard guarantee, cron
+# does not itself prevent an overlapping invocation if one sweep runs long
+# (no flock/lockfile around the whole script), and an overlapping invocation
+# could each independently decide to restart the SAME runner. If the live
+# count grows meaningfully past today's 4, or WEDGE_GRACE_S is raised, redo
+# this arithmetic against the actual cron interval before shipping the
+# change — and consider capping the total per-sweep grace budget (e.g. only
+# pay the grace for the first N wedge-shaped runners, deferring the rest to
+# the next sweep) or fencing the whole sweep with a lockfile, rather than
+# assuming today's margin still holds.
+WEDGE_GRACE_S="${MACF_RUNNER_WEDGE_GRACE_S:-90}"
 EXECUTE=0
 ALLOW_RESTART=0
 
@@ -140,16 +218,24 @@ GitHub token is 403 on administration:read, so this never calls the runners API
 is in \$MACF_RUNNER_WATCHDOG_STATUSES (default: "live") — staged/"ready" runners
 have no service yet by design.
 
-Exit: 0 = all OK/skipped/no-runners; 1 = HEAL/ALERT needed; 2 = usage error.
+An 'active' unit is ALSO cross-checked against its own journal + running
+processes for a job-wedge (claimed a job, no Runner.Worker executing it — see
+the script's "job-wedge detection" comment) before being reported OK; a
+confirmed wedge reports WEDGED and heals the same way HEAL does (systemctl
+restart, gated behind --allow-restart).
+
+Exit: 0 = all OK/skipped/no-runners; 1 = HEAL/ALERT/WEDGED needed; 2 = usage error.
 USAGE
 }
 
 # --- pure decision (unit-tested; zero I/O) -----------------------------------
-# _runner_watchdog_decide <active-state> <unit-loaded> <lock-active> -> prints
-# exactly one of SKIP|ALERT|OK|HEAL, always returns 0. See the file header's
-# "THE PURE DECISION" comment for the full rationale per branch.
+# _runner_watchdog_decide <active-state> <unit-loaded> <lock-active> [<wedged>]
+# -> prints exactly one of SKIP|ALERT|OK|WEDGED|HEAL, always returns 0. See the
+# file header's "THE PURE DECISION" comment for the full rationale per branch.
+# <wedged> defaults to "0" (not wedged) when omitted — pre-existing 3-arg call
+# sites are unaffected.
 _runner_watchdog_decide() {
-  local active="$1" loaded="$2" locked="$3"
+  local active="$1" loaded="$2" locked="$3" wedged="${4:-0}"
   if [ "$locked" = "1" ]; then
     echo "SKIP"
     return 0
@@ -159,6 +245,10 @@ _runner_watchdog_decide() {
     return 0
   fi
   if [ "$active" = "active" ]; then
+    if [ "$wedged" = "1" ]; then
+      echo "WEDGED"
+      return 0
+    fi
     echo "OK"
     return 0
   fi
@@ -261,6 +351,176 @@ _runner_watchdog_state() {
   [ "$prop" = "LoadState" ] && fallback="not-found"
   val="$(systemctl show "$svc" -p "$prop" --value 2>/dev/null || true)"
   printf '%s\n' "${val:-$fallback}"
+}
+
+# --- job-wedge detection ------------------------------------------------------
+#
+# WHY is-active IS NOT ENOUGH:
+#
+#   `systemctl show <svc> -p ActiveState` answers a PROXY question — "is the
+#   runner's LISTENER process up" — which stays true for as long as the .NET
+#   process itself hasn't crashed. It does NOT answer the actual INVARIANT this
+#   watchdog exists to protect — "can this runner execute a routed job right
+#   now" (RUNNER.md: "a down self-hosted runner does NOT fall back to
+#   github-hosted — it makes that repo's trusted routing queue forever").
+#
+#   Live incident: a runner claimed a job, and a cancellation for that SAME job
+#   arrived in the same instant. The runner's own _diag log:
+#
+#       00:26:40 JobDispatcher] Running job: route / config
+#       00:26:40 JobDispatcher] Start renew job request for job 35452e21
+#       00:26:40 JobDispatcher] Job cancellation request 35452e21 received
+#       00:26:40 JobDispatcher] Stop renew job request
+#
+#   No Runner.Worker process was ever spawned, no completion was ever logged,
+#   and the job slot was never released — but the systemd unit's listener
+#   process never died, so ActiveState stayed `active` throughout. This
+#   watchdog logged "OK" on every 10-minute sweep for ~2 HOURS while routing
+#   for that repo queued dark:
+#
+#       macf   OK   actions.runner.groundnuty-macf.macf-vm-orzech-dev-agents.service active
+#
+#   Detection reads the unit's OWN journal for its last job-lifecycle event
+#   ("Running job" vs "completed with") and cross-checks it against whether a
+#   Runner.Worker process for THIS runner actually exists. A legitimately
+#   long-running job is NOT a false positive here — a long job HAS a worker
+#   process the whole time it runs; only a wedge has neither a worker nor a
+#   completion. That is why this checks the INVARIANT (is it executing work)
+#   rather than a duration-threshold PROXY (how long has it been running) —
+#   a threshold would either false-positive on slow-but-healthy jobs or be set
+#   so high it stops catching real wedges promptly.
+#
+#   TWO SAMPLES ARE NOT ENOUGH ON THEIR OWN — THEY MUST BE THE **SAME** CLAIM
+#   (peer-review catch): re-sampling "claimed a job, no worker" 90s apart does
+#   NOT by itself prove one continuous wedge. It can also occur for TWO
+#   DIFFERENT jobs straddling the grace window — job A claimed, no worker yet
+#   (sample 1, wedge-shaped); job A finishes and job B is claimed a moment
+#   later, its worker also not yet up (sample 2, wedge-shaped) — a healthy,
+#   busy runner that would misdiagnose as WEDGED and get restarted mid-job.
+#   The fix: capture the journal's OWN timestamp for the claim event alongside
+#   the marker text, and require the timestamp to be IDENTICAL across both
+#   samples before confirming WEDGED (see _runner_watchdog_wedge_confirmed
+#   below). If the timestamp advanced, a NEW event was logged between samples
+#   — the runner has demonstrably made progress and is not wedged, regardless
+#   of shape.
+#
+# _runner_watchdog_last_job_event <service> -> "<iso-timestamp>\t<marker>" for
+# the most recent job-lifecycle line in the unit's journal, where <marker> is
+# "Running job" | "completed with"; empty ("\t" alone, i.e. both fields empty)
+# if neither has appeared in the lookback window (e.g. a runner that has never
+# run a job yet). `-o short-iso` (not `-o cat`) so the timestamp survives —
+# see "TWO SAMPLES ARE NOT ENOUGH" above for why the timestamp matters as much
+# as the marker text. Reads JOB_EVENT_LOOKBACK_LINES lines, not just the last
+# 1 — journalctl's tail can interleave with other unit chatter (registration
+# pings, heartbeats), so `tail -1` after the grep is what actually finds the
+# LAST job-lifecycle line.
+_runner_watchdog_last_job_event() {
+  local svc="$1" line ts marker
+  line="$(journalctl -u "$svc" -n "$JOB_EVENT_LOOKBACK_LINES" --no-pager -o short-iso 2>/dev/null \
+    | grep -E 'Running job|completed with' | tail -1)"
+  if [ -z "$line" ]; then
+    printf '\t\n'
+    return 0
+  fi
+  # short-iso's timestamp is the line's first whitespace-separated field
+  # (e.g. "2026-08-27T00:26:40+0000"), with no embedded spaces.
+  ts="${line%% *}"
+  case "$line" in
+    *'Running job'*)    marker="Running job" ;;
+    *'completed with'*) marker="completed with" ;;
+    *)                   marker="" ;;
+  esac
+  printf '%s\t%s\n' "$ts" "$marker"
+}
+
+# _runner_watchdog_worker_count <name> -> number of live Runner.Worker
+# processes attributable to THIS runner. Attribution is via the worker's own
+# cmdline path — each runner's binary lives under its OWN
+# $RUNNER_BASE/<name>/actions-runner/ (RUNNER.md "Multi-runner-per-host
+# layout"), so the path segment IS the runner identity; no PID-tracking or
+# process-start-time heuristics needed, and one runner's worker can never be
+# mistaken for a sibling runner's. `pgrep` (not `ps | grep`) deliberately —
+# same tool runner/verify-runner.sh already uses for its own Listener check —
+# because pgrep excludes ITS OWN pid from the match by design, whereas a
+# `ps aux | grep <pattern>` pipeline can self-match the grep process itself
+# (the classic "grep grep" hazard) since the pattern text appears in grep's
+# own argv too. NEVER errors on zero matches (`pgrep -c` exits 1 with no
+# match but still prints "0"; `|| true` here keeps this a plain count).
+_runner_watchdog_worker_count() {
+  local name="$1" n
+  n="$(pgrep -c -f "${RUNNER_BASE}/${name}/.*Runner\.Worker" 2>/dev/null)" || true
+  printf '%s\n' "${n:-0}"
+}
+
+# _runner_watchdog_wedge_sample <last-job-event> <worker-count> -> "1" if THIS
+# single sample LOOKS wedge-shaped (last event is a job claim, zero workers
+# for it), else "0". PURE — no I/O, always returns 0 — unit-tested directly
+# (see test-runner-watchdog.sh). A single call of this is a SHAPE check only —
+# it does NOT by itself prove a wedge; see _runner_watchdog_wedge_confirmed
+# below for why a second, identity-checked sample is required before WEDGED
+# is ever reported.
+_runner_watchdog_wedge_sample() {
+  local last_event="$1" count="${2:-0}"
+  if [ "$last_event" = "Running job" ] && [ "$count" -eq 0 ] 2>/dev/null; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+# _runner_watchdog_wedge_confirmed <ts1> <event1> <count1> <ts2> <event2> <count2>
+# -> "1" iff BOTH samples independently look wedge-shaped (per
+# _runner_watchdog_wedge_sample) AND the journal timestamp is IDENTICAL across
+# both. PURE — no I/O, always returns 0 — unit-tested directly.
+#
+# The timestamp-identity requirement is the fix for a peer-review-caught false
+# positive: two wedge-shaped samples WEDGE_GRACE_S apart do NOT by themselves
+# prove one continuous wedge — they can also occur for TWO DIFFERENT jobs
+# straddling the grace window (job A claimed with no worker yet at t0; job A
+# finishes and job B is claimed a moment later, ALSO caught with no worker yet
+# at t0+WEDGE_GRACE_S). That shape is a healthy, busy runner — restarting it
+# would kill a live job. Requiring ts1 == ts2 rules this out: if the
+# timestamp advanced, a NEW journal line was logged between samples, which
+# means the runner made progress and is not wedged, REGARDLESS of shape —
+# same-shape-different-timestamp is explicitly NOT confirmed here (see its
+# own test case). An empty timestamp (no job event ever seen) never confirms
+# either, since "" = "" would otherwise vacuously match two never-ran
+# runners — guarded by requiring ts1 to be non-empty.
+_runner_watchdog_wedge_confirmed() {
+  local ts1="$1" event1="$2" count1="$3" ts2="$4" event2="$5" count2="$6"
+  [ "$(_runner_watchdog_wedge_sample "$event1" "$count1")" = "1" ] || { echo "0"; return 0; }
+  [ "$(_runner_watchdog_wedge_sample "$event2" "$count2")" = "1" ] || { echo "0"; return 0; }
+  if [ -n "$ts1" ] && [ "$ts1" = "$ts2" ]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+# _runner_watchdog_check_wedge <service> <name> -> "1" iff CONFIRMED wedged
+# after the WEDGE_GRACE_S grace window (per _runner_watchdog_wedge_confirmed
+# — same shape AND same journal timestamp across both samples), "0"
+# otherwise. Re-samples rather than trusting one read — see WEDGE_GRACE_S's
+# own comment — so the ORDINARY gap between a runner's JobDispatcher claiming
+# a job and Runner.Worker actually spawning it is never mistaken for a wedge.
+# Costs zero sleep on the overwhelmingly common case where the first sample
+# already isn't wedge-shaped (no job running, or a job with its worker
+# already up).
+_runner_watchdog_check_wedge() {
+  local svc="$1" name="$2"
+  local sample1 ts1 event1 count1 sample2 ts2 event2 count2
+
+  sample1="$(_runner_watchdog_last_job_event "$svc")"
+  ts1="${sample1%%$'\t'*}"; event1="${sample1#*$'\t'}"
+  count1="$(_runner_watchdog_worker_count "$name")"
+  [ "$(_runner_watchdog_wedge_sample "$event1" "$count1")" = "1" ] || { echo "0"; return 0; }
+
+  sleep "$WEDGE_GRACE_S"
+
+  sample2="$(_runner_watchdog_last_job_event "$svc")"
+  ts2="${sample2%%$'\t'*}"; event2="${sample2#*$'\t'}"
+  count2="$(_runner_watchdog_worker_count "$name")"
+  _runner_watchdog_wedge_confirmed "$ts1" "$event1" "$count1" "$ts2" "$event2" "$count2"
 }
 
 # _runner_watchdog_alert <name> <why> — dedup'd sentinel (one open alert per
@@ -405,7 +665,7 @@ _runner_watchdog_main() {
   local rc=0
   printf '%-24s %-8s %s\n' "RUNNER" "DECISION" "DETAIL"
   printf '%-24s %-8s %s\n' "------" "--------" "------"
-  local name repo locked svc loaded active decision
+  local name repo locked svc loaded active wedged decision
   while IFS=$'\t' read -r name repo; do
     [ -n "$name" ] || continue
     if [ -z "$repo" ]; then
@@ -424,7 +684,18 @@ _runner_watchdog_main() {
       loaded="not-found"; active="unknown"
     fi
 
-    decision="$(_runner_watchdog_decide "$active" "$loaded" "$locked")"
+    # The job-wedge cross-check is only worth paying for in EXACTLY the blind
+    # spot is-active can't see through — an unlocked, loaded, active unit
+    # (see "job-wedge detection" above _runner_watchdog_last_job_event). A
+    # locked/torn-down/inactive unit is already decided by the branches below
+    # regardless of wedge state, so skip the (occasionally WEDGE_GRACE_S-long)
+    # check entirely rather than pay it for nothing.
+    wedged=0
+    if [ "$locked" -eq 0 ] && [ "$loaded" = "loaded" ] && [ "$active" = "active" ]; then
+      wedged="$(_runner_watchdog_check_wedge "$svc" "$name")"
+    fi
+
+    decision="$(_runner_watchdog_decide "$active" "$loaded" "$locked" "$wedged")"
     case "$decision" in
       SKIP)
         printf '%-24s %-8s %s\n' "$name" "SKIP" "maintenance lock active ($(lock_info "$name")) — not touched"
@@ -436,6 +707,18 @@ _runner_watchdog_main() {
       ALERT)
         printf '%-24s %-8s %s\n' "$name" "ALERT" "no actions.runner service loaded for $repo (torn down / never installed?)"
         _runner_watchdog_alert "$name" "no systemd service loaded for $repo — re-register via: make -C runner reinstall-$name"
+        rc=1
+        ;;
+      WEDGED)
+        printf '%-24s %-8s %s\n' "$name" "WEDGED" "$svc active but job claimed with no worker executing it (job-wedge; see file header)"
+        if _runner_watchdog_restart "$name" "$svc"; then
+          : # healed — same "quiet beyond the log line" contract as HEAL below;
+            # the sweep-table row + [healed] line ARE the fleet-visible signal.
+        else
+          local restart_note="held, no --allow-restart"
+          [ "$ALLOW_RESTART" -eq 1 ] && restart_note="attempted and failed"
+          _runner_watchdog_alert "$name" "$svc wedged (job claimed, no Runner.Worker) — restart $restart_note"
+        fi
         rc=1
         ;;
       HEAL)

@@ -394,6 +394,29 @@ missing/masked or the restart doesn't bring it back. See
 the maintenance-lock composition, and the `install-cron.sh --with-runner-watchdog`
 wiring.
 
+**Also detects job-wedge (unit `active`, no job actually running):** `is-active`
+alone is a PROXY ("is the listener process up"), not the INVARIANT this
+watchdog protects ("can this runner execute a routed job right now") — a
+runner can claim a job, have the claim raced by a same-instant cancellation,
+and end up with its JobDispatcher wedged (no `Runner.Worker` ever spawned, no
+completion ever logged, slot never released) while the systemd unit stays
+`active` throughout. `runner-watchdog.sh` cross-checks an `active` unit's own
+journal + running processes for exactly this and reports `WEDGED` (healed the
+same way as the other tiers — `systemctl restart`, gated behind
+`--allow-restart`) — see the script's own "job-wedge detection" comment for
+the full incident this closes.
+
+> **Hazard — bulk-cancelling queued workflow runs can trigger this wedge.** The
+> incident that motivated `WEDGED` detection was caused by cancelling a batch
+> of queued runs: one cancellation landed in the SAME instant the runner
+> claimed that job, and the runner's JobDispatcher never recovered — no worker
+> spawned, no completion logged, the unit staying `active` with routing queued
+> dark for ~2 hours before anyone noticed. If you need to bulk-cancel queued
+> `gh run` / workflow runs on a repo with a live self-hosted runner attached,
+> **pace the cancellations** (don't fire them all at once) **or stop the
+> runner's service first** (`sudo systemctl stop <unit>`, restart it once the
+> cancellations are done) rather than cancelling against a live runner.
+
 ## Lever B — action-archive-cache (the ~2s/job optimization)
 
 The runner deletes `_work/_actions` and **re-fetches every `uses:` action from codeload on every
