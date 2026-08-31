@@ -68,7 +68,7 @@ the offset rationale is obsolete (see Note below). Key endpoints:
 | **Stable OTLP HTTP** | `http://orzech-dev-agents-monitoring.tail491af.ts.net:4318/v1/traces` | `central-collector-lb` LoadBalancer Service; reachable on every VM interface. Testers + smoke scripts + agents use this. |
 | **Stable OTLP gRPC** | `orzech-dev-agents-monitoring.tail491af.ts.net:4317` | Same routing |
 | **Tempo query API** | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3200` | `tempo-query-lb` LoadBalancer Service (ns/tempo). The route-receipt reconciler's `TEMPO_QUERY_ENDPOINT` points here. |
-| Grafana UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3000` | `grafana-lb` Service; password via `make grafana-password`. (`make pf-grafana` still works as a fallback.) |
+| Grafana UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3000` | `grafana-lb` Service; password via `make grafana-password`. (`make pf-grafana` still works as a fallback.) 401 despite a correct-looking password? `make grafana-reset-password` (devops-toolkit#183 — see values/kube-prometheus-stack.yaml:21). |
 | Langfuse UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3001` | `langfuse-web-lb` Service; admin login printed by `make langfuse-bootstrap` |
 | ArgoCD UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:8080` | `argocd-server-lb` Service; password via `make argocd-password` |
 | Prometheus | `http://orzech-dev-agents-monitoring.tail491af.ts.net:9090` | `prometheus-lb` LoadBalancer Service (ns/monitoring); reachable on every VM interface. UNAUTHENTICATED — tailnet boundary is the access control, same posture as Grafana/Langfuse/ArgoCD. (`make pf-prometheus` still works as a fallback.) |

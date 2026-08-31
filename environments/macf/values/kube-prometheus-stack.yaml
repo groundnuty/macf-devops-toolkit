@@ -18,10 +18,57 @@ grafana:
   # v12 default in 84.0.0. If a dashboard plugin breaks after install,
   # Grafana 12 migration notes: https://grafana.com/docs/grafana/latest/upgrade-guide/upgrade-v12.0/
   enabled: true
-  # Random admin password is generated into `kube-prom-stack-grafana` Secret.
-  # Retrieve via:
-  #   kubectl -n monitoring get secret kube-prom-stack-grafana \
-  #     -o jsonpath='{.data.admin-password}' | base64 -d
+  # --- Password-seeding semantics (READ BEFORE DEBUGGING A GRAFANA 401) -------
+  # `adminPassword: ""` makes the chart GENERATE a random password into the
+  # `kube-prom-stack-grafana` Secret's `.data.admin-password` on every render.
+  # `GF_SECURITY_ADMIN_PASSWORD` — the pod env var this chart sources from
+  # that same Secret — only seeds Grafana's `admin` row in the DB at FIRST
+  # DATABASE INIT. The PVC persists the user table across every later
+  # restart/upgrade, so once an `admin` row exists, the env var is read once
+  # at container start and never resyncs the DB again.
+  #
+  # The grafana chart nominally protects the Secret's own value against this
+  # via a `lookup()` call in its Secret template (reuse the live Secret's
+  # value instead of generating a new one, so plain `helm upgrade` is
+  # stable). FACT (confirmed against ArgoCD's docs): that guard is INERT
+  # under ArgoCD, because ArgoCD renders Helm sources via `helm template`
+  # (client-side, no live cluster access), and `lookup()` always returns
+  # empty in that mode — so any ArgoCD re-render of this chart computes a
+  # FRESH random password, not the live one.
+  #
+  # MEASURED 2026-08-31 — the churn-frequency question is SETTLED, and the
+  # answer is "rare", so no `ignoreDifferences` is warranted:
+  #
+  #   t0  resourceVersion=23834279  pw-sha=fa130653eb82
+  #   t1  resourceVersion=23834279  pw-sha=fa130653eb82   (75s later)
+  #   -> STABLE. The Secret is NOT rewritten on every reconcile.
+  #
+  # ArgoCD does track it (`argocd.argoproj.io/tracking-id` is present on the
+  # Secret), so a re-render CAN change it — but empirically that happened
+  # ONCE in ~19 days, consistent with an occasional hard refresh rather than
+  # continuous churn.
+  #
+  # So: `make grafana-reset-password` is the whole fix. `ignoreDifferences`
+  # (as `apps/argocd-app.yaml:28` does for `argocd-secret`) and
+  # `admin.existingSecret` were both CONSIDERED AND REJECTED — each adds
+  # permanent surface to prevent a once-per-few-weeks event whose recovery is
+  # already one idempotent command. Revisit only if the value starts drifting
+  # often; re-run the two-sample resourceVersion check above to establish that
+  # rather than assuming it.
+  #
+  # SYMPTOM: this bug looks like nothing is wrong. Pod env matches the
+  # Secret, `/api/health` is green, the deployment is internally consistent —
+  # the ONLY signal is `POST /login` 401ing with the password `make
+  # grafana-password` just printed. A 401 with an otherwise-consistent
+  # secret/pod-env IS this bug (devops-toolkit#183 has the forensics).
+  #
+  # REMEDY: `make grafana-reset-password` reconciles the DB to whatever the
+  # Secret currently holds (`grafana cli admin reset-admin-password`, in-pod,
+  # password piped via stdin — never argv). Safe + idempotent; a no-op if
+  # they already match. This does not stop the Secret from drifting again —
+  # it just makes recovery a one-command operation instead of a forensic
+  # investigation. Retrieve the (now-true) password with `make
+  # grafana-password`.
   adminPassword: ""
   service:
     type: ClusterIP

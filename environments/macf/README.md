@@ -32,7 +32,7 @@ make sync                # force argocd hard-refresh on every app
 make nuke                # teardown: cluster + registry + /mnt/volume1 data
 ```
 
-Individual targets: `cluster-up`, `cluster-down`, `registry-up`, `registry-down`, `argocd-bootstrap`, `pf-grafana`, `pf-tempo`, `pf-collector`, `pf-langfuse`, `grafana-password`, `langfuse-secrets`, `smoke`, `lint`, `env-test`, `help`.
+Individual targets: `cluster-up`, `cluster-down`, `registry-up`, `registry-down`, `argocd-bootstrap`, `pf-grafana`, `pf-tempo`, `pf-collector`, `pf-langfuse`, `grafana-password`, `grafana-reset-password`, `langfuse-secrets`, `smoke`, `lint`, `env-test`, `help`.
 
 ### Langfuse (phase 2)
 
@@ -134,12 +134,13 @@ From that point on, `git commit && git push` is the deploy command. No more `hel
 All services reached via `kubectl port-forward` (no ingress in the spike). Each has a Makefile target:
 
 ```
-make pf-grafana          # http://127.0.0.1:3000
-make pf-tempo            # http://127.0.0.1:3200 + OTLP 4317/4318
-make pf-collector        # Collector OTLP 4317/4318
-make pf-argocd           # http://127.0.0.1:8080
-make grafana-password    # print Grafana admin password
-make argocd-password     # print ArgoCD admin password
+make pf-grafana              # http://127.0.0.1:3000
+make pf-tempo                # http://127.0.0.1:3200 + OTLP 4317/4318
+make pf-collector            # Collector OTLP 4317/4318
+make pf-argocd               # http://127.0.0.1:8080
+make grafana-password        # print Grafana's admin-password SECRET (can drift from the DB — see values/kube-prometheus-stack.yaml:21)
+make grafana-reset-password  # realign the DB to the Secret when `grafana-password`'s output 401s
+make argocd-password         # print ArgoCD admin password
 ```
 
 ## Version matrix (verified 2026-04-24)
