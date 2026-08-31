@@ -203,7 +203,7 @@ exposed on every interface — reach by the Tailscale FQDN
 | OTLP HTTP | `http://orzech-dev-agents-monitoring.tail491af.ts.net:4318/v1/traces` | `central-collector-lb`; all interfaces |
 | OTLP gRPC | `orzech-dev-agents-monitoring.tail491af.ts.net:4317` | Same routing |
 | Tempo query API | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3200` | Trace search + timeline |
-| Grafana UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3000` | `grafana-lb`; password via `make grafana-password` |
+| Grafana UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3000` | `grafana-lb`; password via `make grafana-password` (401 despite a correct-looking password? `make grafana-reset-password` — see values/kube-prometheus-stack.yaml:21) |
 | Langfuse UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:3001` | `langfuse-web-lb`; login via `make langfuse-bootstrap` |
 | ArgoCD UI | `http://orzech-dev-agents-monitoring.tail491af.ts.net:8080` | `argocd-server-lb`; password via `make argocd-password` |
 | Prometheus | `make pf-prometheus` → `http://127.0.0.1:9090` | NOT host-exposed — port-forward |

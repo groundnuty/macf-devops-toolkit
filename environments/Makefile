@@ -309,8 +309,12 @@ pf-prometheus:  ## Prometheus UI/query API at http://127.0.0.1:9090 — needed f
 # ################################################################################
 
 .PHONY: grafana-password
-grafana-password:  ## Print the Grafana admin password
+grafana-password:  ## Print Grafana's admin-password SECRET (the DB's actual password can drift from this — see values/kube-prometheus-stack.yaml:21 + `make grafana-reset-password`)
 	@$(DEVBOX_RUN) kubectl -n monitoring get secret kube-prom-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d && echo
+
+.PHONY: grafana-reset-password
+grafana-reset-password:  ## Realign Grafana's DB admin password to match the Secret (devops-toolkit#183). Operator-invoked only — see script header before running.
+	@bash hack/grafana-reset-password.sh
 
 .PHONY: argocd-password
 argocd-password:  ## Print the ArgoCD admin password (from initial-admin-secret)
