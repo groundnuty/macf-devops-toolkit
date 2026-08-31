@@ -44,6 +44,21 @@
 # Env overrides (mirror check-fleet-telemetry-ingestion.sh's naming):
 #   GRAFANA_NS, GRAFANA_SECRET, GRAFANA_DEPLOY, GRAFANA_CONTAINER, GRAFANA_USER
 #   MACF_MON_HOST, MACF_GRAFANA_URL
+#
+# NOTE on the stdin hop: this pipes the password through `kubectl exec -i`
+# (local process -> API server -> container stdin) rather than reading it
+# from the pod's own $GF_SECURITY_ADMIN_PASSWORD env var inside an in-pod
+# `sh -c`. That in-pod form is what was hand-run to fix the live cluster for
+# #183 and is a documented fallback if this one ever misbehaves:
+#   kubectl -n monitoring exec <pod> -c grafana -- sh -c \
+#     'printf "%s" "$GF_SECURITY_ADMIN_PASSWORD" | grafana cli --homepath /usr/share/grafana admin reset-admin-password --password-from-stdin'
+# Deliberately NOT used as the default here: GF_SECURITY_ADMIN_PASSWORD is
+# only resynced from the Secret at container start, so it can itself be
+# stale in exactly the failure case this script exists to fix. Pulling the
+# Secret fresh (below) and piping it in is the correct source of truth;
+# `kubectl exec -i` forwards stdin byte-for-byte same as a local pipe, and
+# `printf '%s'` sends no trailing newline in either form (grafana cli reads
+# to EOF, not to a newline delimiter).
 
 set -euo pipefail
 
@@ -74,6 +89,19 @@ PASSWORD=$(kubectl -n "$GRAFANA_NS" get secret "$GRAFANA_SECRET" \
   echo "FATAL: empty admin-password in secret/$GRAFANA_SECRET (ns/$GRAFANA_NS)" >&2
   exit 1
 }
+
+# --- pre-flight: is $GRAFANA_URL even reachable? --------------------------------
+# Checked BEFORE the mutating step so an unreachable verify-endpoint reports
+# as "can't verify, fix your network path" rather than the misleading
+# "FATAL: reset did not take" a post-hoc 000/timeout would otherwise produce
+# after a reset that actually succeeded in-cluster.
+HEALTH_CODE=$(curl -sS -m 10 -o /dev/null -w '%{http_code}' "$GRAFANA_URL/api/health" 2>/dev/null || echo "000")
+if [ "$HEALTH_CODE" != "200" ]; then
+  echo "FATAL: GET $GRAFANA_URL/api/health -> $HEALTH_CODE (expected 200) — can't reach Grafana" >&2
+  echo "  to verify from here. Not resetting anything yet — fix reachability first (MACF_GRAFANA_URL" >&2
+  echo "  override, tailnet connectivity, etc.), or the reset's own success will be unverifiable." >&2
+  exit 1
+fi
 
 # --- realign the DB: password piped via stdin, NEVER argv ----------------------
 # `grafana cli admin reset-admin-password <pw>` (positional arg) would put the

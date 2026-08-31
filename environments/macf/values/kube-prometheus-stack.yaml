@@ -27,18 +27,31 @@ grafana:
   # restart/upgrade, so once an `admin` row exists, the env var is read once
   # at container start and never resyncs the DB again.
   #
-  # The grafana chart nominally protects against this via a `lookup()` call
-  # in its Secret template (reuse the live Secret's value instead of
-  # generating a new one, so plain `helm upgrade` is stable). **That guard is
-  # INERT under ArgoCD**: ArgoCD renders Helm sources via `helm template`
-  # (client-side, no live cluster access), under which `lookup()` always
-  # returns empty — so every ArgoCD render (re)generates a FRESH random
-  # password, and with this app's `syncPolicy.automated.selfHeal: true`, that
-  # fresh value gets reapplied to the Secret whenever ArgoCD detects the
-  # (perpetual) drift. The DB, meanwhile, never moves — so the Secret and the
-  # DB can and do diverge. (Same class of problem `apps/argocd-app.yaml`
-  # already works around for `argocd-secret` via `ignoreDifferences` — no
-  # equivalent exists yet for this Secret.)
+  # The grafana chart nominally protects the Secret's own value against this
+  # via a `lookup()` call in its Secret template (reuse the live Secret's
+  # value instead of generating a new one, so plain `helm upgrade` is
+  # stable). FACT (confirmed against ArgoCD's docs): that guard is INERT
+  # under ArgoCD, because ArgoCD renders Helm sources via `helm template`
+  # (client-side, no live cluster access), and `lookup()` always returns
+  # empty in that mode — so any ArgoCD re-render of this chart computes a
+  # FRESH random password, not the live one.
+  #
+  # UNVERIFIED HYPOTHESIS — do not treat as settled: exactly how OFTEN that
+  # re-render actually happens in this deployment (and hence how often the
+  # Secret's value churns) is NOT established. #183's own forensics argue
+  # against "every reconcile": the pod (recreated 2026-08-12, secret created
+  # 2026-06-17) had a pod-env hash matching the live Secret's hash at filing
+  # time, and only ONE value change was observed over the following ~19
+  # days — inconsistent with continuous per-reconcile churn, consistent with
+  # occasional re-renders (e.g. this repo's `make sync` forces a hard
+  # refresh on every app, or a periodic manifest-cache expiry). Before
+  # acting on the churn-frequency question (e.g. adding `ignoreDifferences`
+  # for this Secret — `apps/argocd-app.yaml:28` already does exactly that
+  # for `argocd-secret`, so there's in-repo precedent if this pans out),
+  # confirm it first:
+  #   kubectl -n argocd-applications get app kube-prometheus-stack \
+  #     -o jsonpath='{range .status.resources[?(@.kind=="Secret")]}{.name}{"\t"}{.status}{"\n"}{end}'
+  #   # + sample secret/kube-prom-stack-grafana's resourceVersion twice, ~5min apart
   #
   # SYMPTOM: this bug looks like nothing is wrong. Pod env matches the
   # Secret, `/api/health` is green, the deployment is internally consistent —
@@ -49,10 +62,10 @@ grafana:
   # REMEDY: `make grafana-reset-password` reconciles the DB to whatever the
   # Secret currently holds (`grafana cli admin reset-admin-password`, in-pod,
   # password piped via stdin — never argv). Safe + idempotent; a no-op if
-  # they already match. This does not stop the Secret from drifting again on
-  # a future ArgoCD sync — it just makes recovery a one-command operation
-  # instead of a forensic investigation. Retrieve the (now-true) password
-  # with `make grafana-password`.
+  # they already match. This does not stop the Secret from drifting again —
+  # it just makes recovery a one-command operation instead of a forensic
+  # investigation. Retrieve the (now-true) password with `make
+  # grafana-password`.
   adminPassword: ""
   service:
     type: ClusterIP
