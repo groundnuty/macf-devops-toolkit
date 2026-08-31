@@ -36,22 +36,25 @@ grafana:
   # empty in that mode — so any ArgoCD re-render of this chart computes a
   # FRESH random password, not the live one.
   #
-  # UNVERIFIED HYPOTHESIS — do not treat as settled: exactly how OFTEN that
-  # re-render actually happens in this deployment (and hence how often the
-  # Secret's value churns) is NOT established. #183's own forensics argue
-  # against "every reconcile": the pod (recreated 2026-08-12, secret created
-  # 2026-06-17) had a pod-env hash matching the live Secret's hash at filing
-  # time, and only ONE value change was observed over the following ~19
-  # days — inconsistent with continuous per-reconcile churn, consistent with
-  # occasional re-renders (e.g. this repo's `make sync` forces a hard
-  # refresh on every app, or a periodic manifest-cache expiry). Before
-  # acting on the churn-frequency question (e.g. adding `ignoreDifferences`
-  # for this Secret — `apps/argocd-app.yaml:28` already does exactly that
-  # for `argocd-secret`, so there's in-repo precedent if this pans out),
-  # confirm it first:
-  #   kubectl -n argocd-applications get app kube-prometheus-stack \
-  #     -o jsonpath='{range .status.resources[?(@.kind=="Secret")]}{.name}{"\t"}{.status}{"\n"}{end}'
-  #   # + sample secret/kube-prom-stack-grafana's resourceVersion twice, ~5min apart
+  # MEASURED 2026-08-31 — the churn-frequency question is SETTLED, and the
+  # answer is "rare", so no `ignoreDifferences` is warranted:
+  #
+  #   t0  resourceVersion=23834279  pw-sha=fa130653eb82
+  #   t1  resourceVersion=23834279  pw-sha=fa130653eb82   (75s later)
+  #   -> STABLE. The Secret is NOT rewritten on every reconcile.
+  #
+  # ArgoCD does track it (`argocd.argoproj.io/tracking-id` is present on the
+  # Secret), so a re-render CAN change it — but empirically that happened
+  # ONCE in ~19 days, consistent with an occasional hard refresh rather than
+  # continuous churn.
+  #
+  # So: `make grafana-reset-password` is the whole fix. `ignoreDifferences`
+  # (as `apps/argocd-app.yaml:28` does for `argocd-secret`) and
+  # `admin.existingSecret` were both CONSIDERED AND REJECTED — each adds
+  # permanent surface to prevent a once-per-few-weeks event whose recovery is
+  # already one idempotent command. Revisit only if the value starts drifting
+  # often; re-run the two-sample resourceVersion check above to establish that
+  # rather than assuming it.
   #
   # SYMPTOM: this bug looks like nothing is wrong. Pod env matches the
   # Secret, `/api/health` is green, the deployment is internally consistent —
