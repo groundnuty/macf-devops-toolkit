@@ -21,6 +21,15 @@ SRC_NAME="${SRC_NAME:-langfuse-clickhouse}"
 NS_DST="${NS_DST:-otel}"
 DST_NAME="${DST_NAME:-langfuse-clickhouse-creds}"
 
+# --- refuse to run against the wrong cluster (devops-toolkit#202) --------------
+# Writes a new Secret in ns/otel from a password read out of ns/langfuse —
+# same ambient-kubectl-context exposure as grafana-reset-password.sh. Before
+# ANY kubectl call.
+SCRIPT_DIR="$(dirname -- "${BASH_SOURCE[0]:-$0}")"
+# shellcheck source=./assert-cluster-identity.sh
+. "$SCRIPT_DIR/assert-cluster-identity.sh"
+assert_cluster_identity || exit 1
+
 echo "Reading password from ${NS_SRC}/${SRC_NAME}..."
 PW=$(kubectl -n "$NS_SRC" get secret "$SRC_NAME" -o jsonpath='{.data.password}' | base64 -d)
 if [ -z "$PW" ]; then
