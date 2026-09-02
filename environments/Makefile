@@ -265,6 +265,12 @@ argocd-bootstrap:  ## Install argocd + argocd-apps (app-of-apps) — one-time
 
 .PHONY: sync
 sync:  ## Force argocd hard-refresh on every app
+	@# Cluster-identity guard (devops-toolkit#202) — mutates (annotate) on
+	@# whatever cluster is ambient; invoked through the SAME $(DEVBOX_RUN)
+	@# wrapper as the mutating call below it so both resolve kubectl/KUBECONFIG
+	@# identically (devbox.json pins KUBECONFIG; a bare `kubectl` here could in
+	@# principle resolve differently). Override: MACF_SKIP_CLUSTER_CHECK=1.
+	@$(DEVBOX_RUN) bash hack/assert-cluster-identity.sh
 	@$(DEVBOX_RUN) bash -c 'kubectl get app -A -o json | jq -r ".items[] | \"\(.metadata.namespace) \(.metadata.name)\"" | while read ns name; do kubectl -n $$ns annotate --overwrite app $$name argocd.argoproj.io/refresh=hard; done'
 
 .PHONY: status

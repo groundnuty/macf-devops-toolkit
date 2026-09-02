@@ -33,6 +33,24 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  # Don't fight the chart's generated admin credential. Same pattern, and the
+  # same reason, as apps/argocd-app.yaml's block for `argocd-secret`.
+  #
+  # `grafana.adminPassword: ""` makes the chart GENERATE a random password into
+  # this Secret on render. `GF_SECURITY_ADMIN_PASSWORD` seeds the Grafana DB
+  # only at FIRST database init, and the PVC outlives re-renders — so every
+  # regeneration leaves the published password authenticating against nothing,
+  # silently, until someone tries to log in and gets a 401 from a deployment
+  # that is otherwise perfectly consistent (#183).
+  #
+  # Observed at least twice, once inside a ~2-day window. Without this,
+  # `make grafana-reset-password` has to be re-run after each one.
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: kube-prom-stack-grafana
+      jsonPointers:
+        - /data/admin-password
   syncPolicy:
     automated:
       prune: true

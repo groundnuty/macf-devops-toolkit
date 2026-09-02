@@ -72,6 +72,15 @@ GRAFANA_URL="${MACF_GRAFANA_URL:-http://$MON_HOST:3000}"
 
 echo "=== grafana-reset-password: ns/$GRAFANA_NS secret/$GRAFANA_SECRET -> $GRAFANA_DEPLOY ==="
 
+# --- refuse to run against the wrong cluster (devops-toolkit#202) --------------
+# Before ANY kubectl call — the near-miss that opened #202 was this script
+# resolving deployment/kube-prom-stack-grafana against whatever context
+# happened to be ambient. Fail loud here, before we even ask kubectl anything.
+SCRIPT_DIR="$(dirname -- "${BASH_SOURCE[0]:-$0}")"
+# shellcheck source=./assert-cluster-identity.sh
+. "$SCRIPT_DIR/assert-cluster-identity.sh"
+assert_cluster_identity || exit 1
+
 # --- resolve the pod dynamically -----------------------------------------------
 # `kubectl exec deployment/<name>` resolves to whichever pod the Deployment
 # currently owns at call time — never hardcode a pod name, it changes on

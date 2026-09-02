@@ -38,6 +38,16 @@ OTEL_NS="${OTEL_NS:-otel}"
 
 echo "=== langfuse-bootstrap: ns/$LANGFUSE_NS + ns/$OTEL_NS ==="
 
+# --- refuse to run against the wrong cluster (devops-toolkit#202) --------------
+# This script rotates ALL Langfuse secrets and TRUNCATEs Postgres tables —
+# unlike grafana-reset-password.sh's near-miss, running THIS against the
+# wrong cluster would destroy real data there, not just fail cleanly. Before
+# ANY kubectl call.
+SCRIPT_DIR="$(dirname -- "${BASH_SOURCE[0]:-$0}")"
+# shellcheck source=./assert-cluster-identity.sh
+. "$SCRIPT_DIR/assert-cluster-identity.sh"
+assert_cluster_identity || exit 1
+
 # Ensure namespaces exist (argocd creates them via syncOptions=CreateNamespace=true,
 # but if running pre-argocd-sync, we need them).
 kubectl create namespace "$LANGFUSE_NS" --dry-run=client -o yaml | kubectl apply -f -
