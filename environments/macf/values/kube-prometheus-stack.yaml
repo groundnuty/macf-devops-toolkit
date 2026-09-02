@@ -36,25 +36,30 @@ grafana:
   # empty in that mode — so any ArgoCD re-render of this chart computes a
   # FRESH random password, not the live one.
   #
-  # MEASURED 2026-08-31 — the churn-frequency question is SETTLED, and the
-  # answer is "rare", so no `ignoreDifferences` is warranted:
+  # ArgoCD REGENERATES this Secret's value, and each regeneration silently
+  # breaks login until someone resets the DB. `ignoreDifferences` on
+  # `/data/admin-password` in apps/kube-prometheus-stack-app.yaml is what stops
+  # it; `make grafana-reset-password` remains the recovery path for a value
+  # that has ALREADY diverged.
   #
-  #   t0  resourceVersion=23834279  pw-sha=fa130653eb82
-  #   t1  resourceVersion=23834279  pw-sha=fa130653eb82   (75s later)
-  #   -> STABLE. The Secret is NOT rewritten on every reconcile.
+  # OBSERVED (a floor, deliberately not a rate — see below):
+  #   #183 filed      admin-password sha16=ef27e938...
+  #   2026-08-31      admin-password sha16=5eb2d99b...   CHANGED
+  #   2026-09-02      pw-sha 6ff79953 vs fa130653 (08-31, same method)  CHANGED
+  #   => at least 2 confirmed regenerations; one inside a ~2-day window,
+  #      each one silent until a login failed.
   #
-  # ArgoCD does track it (`argocd.argoproj.io/tracking-id` is present on the
-  # Secret), so a re-render CAN change it — but empirically that happened
-  # ONCE in ~19 days, consistent with an occasional hard refresh rather than
-  # continuous churn.
+  # A PRIOR VERSION OF THIS COMMENT CLAIMED THE OPPOSITE, and the way it was
+  # wrong is the reason this paragraph exists. It reported "STABLE — once in
+  # ~19 days, so ignoreDifferences is unwarranted" on the strength of sampling
+  # resourceVersion TWICE, 75 SECONDS APART. A 75-second window cannot
+  # distinguish "never churns" from "churns daily" — the measurement could not
+  # have come out any other way, whichever hypothesis was true, so it
+  # discriminated nothing while carrying the full authority of a number.
+  # It survived review because it had the FORM of evidence.
   #
-  # So: `make grafana-reset-password` is the whole fix. `ignoreDifferences`
-  # (as `apps/argocd-app.yaml:28` does for `argocd-secret`) and
-  # `admin.existingSecret` were both CONSIDERED AND REJECTED — each adds
-  # permanent surface to prevent a once-per-few-weeks event whose recovery is
-  # already one idempotent command. Revisit only if the value starts drifting
-  # often; re-run the two-sample resourceVersion check above to establish that
-  # rather than assuming it.
+  # So: do not replace the floor above with a rate unless the window could
+  # actually have falsified it — days of sampling, not seconds.
   #
   # SYMPTOM: this bug looks like nothing is wrong. Pod env matches the
   # Secret, `/api/health` is green, the deployment is internally consistent —
