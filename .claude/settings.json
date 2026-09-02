@@ -24,8 +24,8 @@
       "Skill(macf-agent:macf-peers)",
       "Skill(macf-agent:macf-ping)",
       "Skill(macf-agent:macf-notify-peer)",
-      "mcp__plugin_macf-agent_macf-agent__notify_peer",
-      "mcp__plugin_macf-agent_macf-agent__checkpoint_to_memory",
+      "mcp__macf-agent__notify_peer",
+      "mcp__macf-agent__checkpoint_to_memory",
       "Bash",
       "mcp__claude_ai_Gmail__*",
       "mcp__claude_ai_Slack__*",
@@ -46,43 +46,24 @@
       "Read(~/.config/gh/**)",
       "Read(~/.bash_history)",
       "Read(~/.zsh_history)",
-      "Write(~/.claude/settings.json)",
       "Edit(~/.claude/settings.json)",
-      "Write(~/.claude.json)",
       "Edit(~/.claude.json)",
-      "Write(~/.ssh/**)",
       "Edit(~/.ssh/**)",
-      "Write(~/.aws/**)",
       "Edit(~/.aws/**)",
-      "Write(~/.gnupg/**)",
       "Edit(~/.gnupg/**)",
-      "Write(~/.kube/**)",
       "Edit(~/.kube/**)",
-      "Write(~/.config/gcloud/**)",
       "Edit(~/.config/gcloud/**)",
-      "Write(~/.gitconfig)",
       "Edit(~/.gitconfig)",
-      "Write(~/.npmrc)",
       "Edit(~/.npmrc)",
-      "Write(~/.pypirc)",
       "Edit(~/.pypirc)",
-      "Write(~/.docker/config.json)",
       "Edit(~/.docker/config.json)",
-      "Write(~/.netrc)",
       "Edit(~/.netrc)",
-      "Write(~/.config/gh/**)",
       "Edit(~/.config/gh/**)",
-      "Write(~/.bashrc)",
       "Edit(~/.bashrc)",
-      "Write(~/.zshrc)",
       "Edit(~/.zshrc)",
-      "Write(~/.profile)",
       "Edit(~/.profile)",
-      "Write(~/.bash_profile)",
       "Edit(~/.bash_profile)",
-      "Write(~/.zprofile)",
       "Edit(~/.zprofile)",
-      "Write(~/.zshenv)",
       "Edit(~/.zshenv)",
       "Bash(sudo *)",
       "Bash(rm -rf /)",
@@ -271,10 +252,12 @@
         ]
       },
       {
+        "matcher": "startup",
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/scripts/macf-startup-pickup.sh"
+            "command": "$CLAUDE_PROJECT_DIR/.claude/scripts/macf-startup-pickup.sh",
+            "timeout": 120
           }
         ]
       }
@@ -338,5 +321,8 @@
         ]
       }
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "macf-agent"
+  ]
 }
