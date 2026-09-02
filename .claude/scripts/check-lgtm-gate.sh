@@ -18,14 +18,29 @@
 # (no macf-agent MCP server) AND consumer workspaces (startup window,
 # transient disconnect). Same reasoning UC-4 (PR #275) demonstrated.
 #
-# Override: MACF_SKIP_LGTM_CHECK=1 bypasses (for legitimate operator-
-# allowed exceptions per pr-discipline.md §"When the reviewer is absent
-# or unreachable" — reporter-sanctioned self-merge, urgent revert, etc.).
+# Override: MACF_SKIP_LGTM_CHECK=1 bypasses (launch-time / operator only —
+# per pr-discipline.md §"When the reviewer is absent or unreachable" —
+# reporter-sanctioned self-merge, urgent revert, etc.).
+#
+# Operator-sanctioned exception, agent-usable (groundnuty/macf#822 Part 2,
+# direction (c) — operator + science + auditor-advisory approved): when
+# MACF_OPERATOR_LOGIN is configured (env.identity, from macf-agent.json
+# `operator_login`), a PR comment authored by THAT login containing the
+# exact marker `[macf-sanction-merge]` clears the gate — un-forgeable,
+# since an agent cannot post a GitHub comment attributed to the operator's
+# own account. Unset (the default) → this path is off and the gate
+# behaves exactly as before #822 Part 2.
 #
 # Refs: groundnuty/macf#270 (this hook); pr-discipline.md (canonical
 #       rule, distributed via `macf rules refresh`); DR-023 amendment
 #       (bash-form decision rule); macf#262 / PR #263 (LGTM rule
-#       codification); PR #275 / macf#244+#272 (empirical pattern).
+#       codification); PR #275 / macf#244+#272 (empirical pattern);
+#       groundnuty/macf#822 (operator-login sanction-comment path);
+#       groundnuty/macf#938 (credential-refresh + auth-failure-fails-
+#       closed — the ambient $GH_TOKEN is a 1-hour installation token,
+#       so a long session's `gh pr view` call below can hit an
+#       authentication failure that is unrelated to whether a review
+#       exists; see the `macf_hook_gh` call below).
 set -euo pipefail
 
 # Cheap exit on operator override — no stdin read, no parsing.
@@ -70,9 +85,34 @@ fi
 # the first bare integer token (not preceded by `=` so it's not a flag
 # value like `--retries=3`).
 PR_NUMBER=""
+# groundnuty/macf#1409 defect 1: `sed` is line-oriented (it applies its
+# substitution independently to EACH line of a multi-line $COMMAND, then
+# prints every line — matched-and-stripped or not). Stripping the
+# `gh pr merge ` prefix against the WHOLE (possibly multi-line) $COMMAND
+# therefore leaves every line BEFORE the actual merge line completely
+# untouched in the output, and the forward token walk below then finds
+# the first bare integer on ANY earlier line — not necessarily the PR
+# number (a `seq 1 8` or a `|| exit 1` on a preamble line reproduces
+# this). The `[[ "$COMMAND" =~ $GH_MERGE_PATTERN ]]` match above is NOT
+# line-oriented (bash's `=~` matches over the whole string), which is
+# why detection above already worked on multi-line commands while
+# extraction below did not.
+#
+# Fix: isolate the SINGLE line that actually contains the merge
+# invocation first — `grep -E` IS line-oriented, so feeding it the same
+# two patterns used for detection correctly selects only that line even
+# though the multi-line string as a whole is what matched above — then
+# run the existing sed strip against that line alone.
+MERGE_LINE="$(grep -E "${GH_MERGE_PATTERN}|${SHELL_C_GH_MERGE_PATTERN}" <<<"$COMMAND" 2>/dev/null | head -n1 || echo "")"
+if [[ -z "$MERGE_LINE" ]]; then
+  # Unreachable in practice — $COMMAND already matched one of the two
+  # patterns above (or we would have exited 0 already). Guard anyway:
+  # fail open rather than operate on an empty line.
+  exit 0
+fi
 # Strip leading wrappers up to and including `gh pr merge`. Use sed
 # with extended regex to find the gh-pr-merge prefix and remove it.
-TAIL="$(sed -E 's/^.*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+//' <<<"$COMMAND" 2>/dev/null || echo "")"
+TAIL="$(sed -E 's/^.*gh[[:space:]]+pr[[:space:]]+merge[[:space:]]+//' <<<"$MERGE_LINE" 2>/dev/null || echo "")"
 if [[ -z "$TAIL" ]]; then
   # No tail after `gh pr merge` — likely the operator is invoking with
   # no args (interactive prompt). Allow; the command will fail at gh
@@ -184,18 +224,147 @@ elif [[ "$COMMAND" =~ (^|[[:space:]])-R[[:space:]]+([^[:space:]]+) ]]; then
   REPO_FLAG="--repo ${BASH_REMATCH[2]}"
 fi
 
-# Query PR author + reviews. Use `gh pr view --json author,reviews`
-# rather than two separate `gh api` calls — single round-trip, gh
-# handles repo detection if --repo was on the original command.
-# Defense-in-depth: any failure (gh missing, network, 404, auth) →
-# fail-open. Same posture as check-gh-token.sh.
+# hook-gh-token.sh is copied alongside this file by every distribution path
+# (copyCanonicalScripts, the marketplace sync), so it should always be
+# right here — but `source`ing a file that isn't there would abort this
+# whole script under `set -e` before any of the logic below runs, which is
+# a worse failure than the one this fix closes. Guard it: if the sibling
+# is somehow missing (a stale or partial distribution), degrade to a
+# plain, non-refreshing gh call instead of crashing — reproducing exactly
+# this hook's behavior from before this fix, not a new failure mode.
+HOOK_GH_TOKEN_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hook-gh-token.sh"
+if [[ -r "$HOOK_GH_TOKEN_LIB" ]]; then
+  # shellcheck source=./hook-gh-token.sh
+  source "$HOOK_GH_TOKEN_LIB"
+else
+  echo "MACF lgtm-gate: the credential-refresh helper library is missing from this workspace's scripts — running without token refresh. Update this workspace to pick up the missing file." >&2
+  macf_hook_gh() {
+    local out err errfile rc=0
+    errfile="$(mktemp 2>/dev/null)" || { printf 'could not allocate a temp file'; return 2; }
+    out="$(gh "$@" 2>"$errfile")" || rc=$?
+    err="$(cat "$errfile" 2>/dev/null || true)"
+    rm -f "$errfile"
+    if [[ "$rc" -eq 0 ]]; then
+      printf '%s' "$out"
+      return 0
+    fi
+    printf '%s' "$err"
+    return 2
+  }
+fi
+
+# Query PR author + reviews + comments. Use one `gh pr view --json
+# author,reviews,comments` call rather than separate `gh api` round-trips
+# — gh handles repo detection if --repo was on the original command.
+# `comments` feeds the (c) operator-login sanction-comment path below
+# (macf#822 Part 2); it's always requested (single round-trip) even when
+# MACF_OPERATOR_LOGIN is unset — the extra field is simply unused in that
+# case.
+#
+# groundnuty/macf#938: the ambient $GH_TOKEN this hook inherits at launch
+# is a 1-hour installation token. Past the first hour of any session, a
+# call here can 401 for a reason that has NOTHING to do with whether an
+# approval exists — the credential died, not the review. Routing the call
+# through macf_hook_gh (hook-gh-token.sh) means a merely-EXPIRED token gets
+# one refresh-and-retry before we give up, so the common case (a long
+# session, a live App key) still gets a real answer instead of a
+# false "could not verify".
+#
+# Posture past that retry (macf#938's actual decision point): the ORIGINAL
+# "any failure (gh missing, network, 404, auth) → fail-open" blanket is now
+# split in three —
+#   - not_found (the extracted PR number does not resolve to a pull
+#     request — groundnuty/macf#1409 defect 1's fallback): fails CLOSED.
+#     Before the line-isolation fix above, EVERY multi-line merge command
+#     could extract the wrong number and land here; even after that fix,
+#     a wrong-line extraction bug or a genuinely stale PR number must not
+#     silently verify nothing — see the dedicated branch below.
+#   - other_failed (gh missing / network down / malformed args / a real
+#     infrastructure 404 that ISN'T the not_found shape above): UNCHANGED
+#     — still fails open. A hook that blocks every merge because GitHub
+#     itself is unreachable would be its own outage, and `gh pr merge`
+#     needs that same connectivity to succeed anyway, so failing open
+#     here doesn't let a merge through GitHub couldn't also perform.
+#   - auth_failed (the credential is expired/invalid AND a refresh attempt
+#     also failed to fix it): fails CLOSED. This is NOT "GitHub is
+#     unreachable" — it is "this workspace's credential is broken", which
+#     is a locally fixable condition, not an outage. A merge gate that
+#     cannot ask GitHub whether an approval exists must not read that
+#     silence as an approval — see silent-fallback-hazards.md Instance 1
+#     (the expiry sub-case this closes for the hook family) and the
+#     amended fail-open paragraph in pr-discipline.md.
 #
 # Strip surrounding quotes from REPO_FLAG's value if quoted.
 PR_JSON=""
+GH_RC=0
 # shellcheck disable=SC2086
-if ! PR_JSON="$(gh pr view "$PR_NUMBER" $REPO_FLAG --json author,reviews 2>/dev/null)"; then
+PR_JSON="$(macf_hook_gh pr view "$PR_NUMBER" $REPO_FLAG --json author,reviews,comments)" || GH_RC=$?
+
+# Signature of gh's own "this number isn't a pull request" response — the
+# GraphQL form (`gh pr view` always queries via GraphQL) reads "Could not
+# resolve to a PullRequest with the number of N. (repository.pullRequest)"
+# (verified live, gh 2.95.0); the REST-shaped "Not Found (HTTP 404)" form
+# is matched too, belt-and-suspenders, in case a future gh version or a
+# different endpoint shape surfaces this differently. Deliberately narrow
+# — must NOT match generic infra text like "network is down" or "Permission
+# denied" (missing-gh-binary), which stay in the unchanged other_failed
+# fail-open path below.
+PR_NOT_FOUND_PATTERN='[Cc]ould not resolve to a [Pp]ull ?[Rr]equest|[Nn]ot Found \(HTTP 404\)'
+
+if [[ "$GH_RC" -eq 1 ]]; then
+  cat >&2 <<ERR
+BLOCKED by MACF lgtm-gate hook: could not verify PR #${PR_NUMBER}'s review
+state — ${PR_JSON}
+
+This is NOT "no approval exists" — it is "the check could not ask GitHub".
+A merge gate that cannot verify must not silently allow the merge through.
+See the diagnostic above for the specific cause (it names the failure —
+a missing launch-env variable, a bad/rotated App key, or GitHub's own auth
+service being down — rather than guessing here).
+
+Fix the credential, then retry the merge:
+  GH_TOKEN=\$("\$MACF_WORKSPACE_DIR/.claude/scripts/macf-gh-token.sh" \\
+    --app-id "\$APP_ID" --install-id "\$INSTALL_ID" --key "\$KEY_PATH") || exit 1
+  export GH_TOKEN
+
+Override (ONLY for a reporter-sanctioned exception, same escape hatch as a
+missing-LGTM block) is launch-time / operator only: MACF_SKIP_LGTM_CHECK=1, set
+before ./claude.sh launches.
+ERR
+  exit 2
+elif [[ "$GH_RC" -eq 2 ]] && [[ "$PR_JSON" =~ $PR_NOT_FOUND_PATTERN ]]; then
+  # groundnuty/macf#1409 defect 1's fallback: the number this hook
+  # extracted from the command does not resolve to a pull request. This
+  # must NOT fall into the generic other_failed fail-open branch below —
+  # that was exactly how the wrong-line-extraction bug went undetected
+  # (a 404 on the wrong number silently verified nothing). Distinct from
+  # both "no approval exists" and "credential failed".
+  cat >&2 <<ERR
+BLOCKED by MACF lgtm-gate hook: could not resolve which PR this command
+merges (extracted #${PR_NUMBER} is not a pull request).
+
+${PR_JSON}
+
+A merge gate that cannot identify which PR a command targets must not
+guess, and must not silently allow the merge through. If PR #${PR_NUMBER}
+is genuinely wrong, this hook misread the PR number out of the command
+(e.g. from a multi-line or otherwise unusual invocation) — please report
+the exact \`gh pr merge\` command as a bug (groundnuty/macf#1409). If
+#${PR_NUMBER} really is the intended PR, confirm it exists and is a pull
+request (not an issue) on the target repo before retrying.
+
+Override (ONLY for a reporter-sanctioned exception, same escape hatch as a
+missing-LGTM block) is launch-time / operator only: MACF_SKIP_LGTM_CHECK=1, set
+before ./claude.sh launches.
+ERR
+  exit 2
+elif [[ "$GH_RC" -ne 0 ]]; then
+  # other_failed — unchanged posture: a genuine infrastructure failure
+  # (network down, gh missing, malformed args) still fails open, exactly
+  # as before this fix.
   exit 0
 fi
+
 if [[ -z "$PR_JSON" ]]; then
   exit 0
 fi
@@ -238,7 +407,61 @@ if [[ "$NON_AUTHOR_APPROVALS" -ge 1 ]]; then
   exit 0
 fi
 
-# No non-author APPROVED review — block.
+# --- (c) operator-login sanction-comment path (groundnuty/macf#822 Part 2) ---
+# Design direction converged operator + science + auditor-advisory
+# (macf#822): the operator's own GitHub login is an UN-FORGEABLE trust
+# anchor — an agent cannot post a comment attributed to it, so a comment
+# authored by that exact login is a structurally-verified artifact, not a
+# self-attestation (unlike a marker file the agent could write itself).
+# Only engages when the workspace has configured MACF_OPERATOR_LOGIN
+# (env.identity, from macf-agent.json `operator_login`); unset (the
+# default) → this whole block is a no-op and the gate behaves exactly as
+# it did before #822 Part 2.
+OPERATOR_LOGIN="${MACF_OPERATOR_LOGIN:-}"
+if [[ -n "$OPERATOR_LOGIN" ]]; then
+  # Normalize the same way PR_AUTHOR / review logins are normalized above
+  # (strip `app/` prefix + `[bot]` suffix) so an operator config value in
+  # any of those shapes still compares correctly.
+  NORM_OPERATOR="${OPERATOR_LOGIN#app/}"
+  NORM_OPERATOR="${NORM_OPERATOR%\[bot\]}"
+
+  # The operator login must ALSO differ from the PR author — mirrors the
+  # non-author condition the review path enforces (groundnuty/macf#822
+  # review). `operator_login` lives in agent-writable macf-agent.json →
+  # env.identity → MACF_OPERATOR_LOGIN, and restart-self is agent-invocable,
+  # so WITHOUT this an agent could set operator_login to its OWN login,
+  # relaunch, post `[macf-sanction-merge]` on its OWN PR, and clear its own
+  # gate — the exact self-attestation (c) exists to eliminate. This kills
+  # the self-sanction shape; poisoning the config toward ANOTHER agent's
+  # login still requires THAT agent to post the marker (cross-agent
+  # collusion, genuinely beyond threat model). Config integrity is this
+  # trust anchor's root assumption; the cleared login is logged below for
+  # the auditor's gate-bypass sweep.
+  if [[ -n "$NORM_OPERATOR" ]] && [[ "$NORM_OPERATOR" != "$PR_AUTHOR" ]]; then
+    # Count comments where: (a) the body contains the exact marker
+    # `[macf-sanction-merge]` (case-insensitive), AND (b) the comment's
+    # author, normalized, equals the configured operator login. Both
+    # conditions must hold on the SAME comment — a marker posted by a
+    # non-operator login does NOT count, regardless of content (the
+    # un-forgeable property this path depends on).
+    SANCTION_HITS="$(
+      jq -r --arg operator "$NORM_OPERATOR" --arg marker '[macf-sanction-merge]' '
+        [.comments[]? |
+          select(((.body // "") | ascii_downcase) | contains($marker | ascii_downcase)) |
+          (.author.login // "" | sub("^app/"; "") | sub("\\[bot\\]$"; "")) |
+          select(. == $operator)
+        ] | length
+      ' <<<"$PR_JSON" 2>/dev/null || echo "0"
+    )"
+
+    if [[ "$SANCTION_HITS" =~ ^[0-9]+$ ]] && [[ "$SANCTION_HITS" -ge 1 ]]; then
+      echo "MACF lgtm-gate: operator-sanction comment ([macf-sanction-merge] authored by ${NORM_OPERATOR}) found on PR #${PR_NUMBER} — clearing gate via the un-forgeable operator-login path (groundnuty/macf#822 Part 2)." >&2
+      exit 0
+    fi
+  fi
+fi
+
+# No non-author APPROVED review, and no operator-sanction comment — block.
 cat >&2 <<ERR
 BLOCKED by MACF lgtm-gate hook: PR #${PR_NUMBER} has no non-author APPROVED
 review on record. Per pr-discipline.md "no LGTM = no merge" (canonical rule
@@ -264,11 +487,28 @@ Then the reviewer @mentions you on the originating issue with the LGTM
 state-change as the wake signal.
 
 Override (ONLY for reporter-sanctioned exceptions per pr-discipline.md
-§"When the reviewer is absent or unreachable"):
-  export MACF_SKIP_LGTM_CHECK=1
+§"When the reviewer is absent or unreachable") is launch-time / operator
+only: MACF_SKIP_LGTM_CHECK is read from THIS session's process env, fixed
+when ./claude.sh launched it. An in-session \`export MACF_SKIP_LGTM_CHECK=1\`
+from a Bash tool call does NOT reach it — Bash-tool commands run in a
+separate subshell that never persists into the session's env. To use it:
+set MACF_SKIP_LGTM_CHECK=1 in the launch env (or the workspace's
+.claude/.macf/env.* files) BEFORE running ./claude.sh, then relaunch.
+Need the reporter-sanctioned exception NOW, mid-session? Don't self-apply
+this flag — ask the operator to set it + relaunch, or route the merge
+through the operator directly with the sanction recorded in the artifact.
+
+Preferred agent-usable exception (groundnuty/macf#822 Part 2): if this
+workspace has MACF_OPERATOR_LOGIN configured, ask the operator to post a
+PR comment containing exactly the marker [macf-sanction-merge] under
+THEIR OWN GitHub login (a formal \`gh pr review --approve\` from them also
+clears the gate via the path above). This is un-forgeable — an agent
+cannot post a comment attributed to the operator's account — so the gate
+verifies a real artifact instead of trusting a self-attestation. See
+pr-discipline.md §"Operator-sanctioned exception (macf#822)".
 
 Refs: groundnuty/macf#270 (this hook); pr-discipline.md (canonical rule);
 DR-023 amendment (bash-form decision rule); macf#262 / PR #263 (rule
-codification origin).
+codification origin); groundnuty/macf#822 (operator-login sanction path).
 ERR
 exit 2
