@@ -33,8 +33,15 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
-  # Don't fight the chart's generated admin credential. Same pattern, and the
-  # same reason, as apps/argocd-app.yaml's block for `argocd-secret`.
+  # Don't fight the chart's generated admin credential.
+  #
+  # NOTE on apps/argocd-app.yaml's similar-looking block for `argocd-secret`:
+  # it is NOT a working precedent for this, and copying its shape is what made
+  # the first attempt fail. That block carries no `RespectIgnoreDifferences`
+  # either — so it is silently ineffective, or it survives for a different
+  # reason (argocd populates `admin.password` at runtime rather than the chart
+  # rendering a value to overwrite). Matching its shape without checking its
+  # mechanism cost a merge-and-regress cycle here.
   #
   # `grafana.adminPassword: ""` makes the chart GENERATE a random password into
   # this Secret on render. `GF_SECURITY_ADMIN_PASSWORD` seeds the Grafana DB
@@ -58,3 +65,15 @@ spec:
     syncOptions:
       - CreateNamespace=true
       - ServerSideApply=true
+      # LOAD-BEARING for the ignoreDifferences block above, and NOT optional.
+      # `ignoreDifferences` alone only affects DIFFING — whether ArgoCD reports
+      # the app OutOfSync. A sync still applies the rendered manifest, so the
+      # chart's freshly-generated admin-password overwrites the live one and
+      # login breaks again. RespectIgnoreDifferences makes the SYNC honour the
+      # ignore rules too.
+      #
+      # Verified empirically (#183, 2026-09-02): with ignoreDifferences and
+      # WITHOUT this flag, a forced sync changed the password hash and login
+      # 401'd. With this flag added, the same forced sync left it byte-identical
+      # and login stayed 200.
+      - RespectIgnoreDifferences=true
