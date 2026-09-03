@@ -41,6 +41,24 @@ Template-origin rules (from `agentic-repo-template`, still applicable):
 - `verification-before-done.md` — done-gate check
 - `writing-quality.md` — prose conventions
 
+## ⚠ After a fresh clone: `macf rules refresh --dir .` BEFORE operating
+
+`.claude/scripts/` and the 16 canonical `.claude/rules/` are **gitignored** (`macf#1412`/`#1416`) —
+git tracking them made it a second writer, so a checkout/reset silently reinstalled stale copies over
+current ones.
+
+**The consequence is sharp and worth stating:** a fresh clone has `.claude/settings.json` — which
+*registers* 9 PreToolUse/SessionStart hooks — and **zero scripts on disk**. That is precisely the
+`registered-but-missing` fail-open: every guard silently absent, with nothing refusing anything.
+
+`check-hooks-present.sh` (SessionStart, `macf#1401`) is the detector and will warn loudly — but it is
+itself one of the ignored scripts, so **on a fresh clone it is not there to warn you either.** Run the
+refresh first; do not rely on being told.
+
+The 4 hand-authored rules (`agent-identity.md`, `autonomous-work.md`, `gh-token-refresh.md`,
+`project-conventions.md`) stay tracked and survive a clone — they are this workspace's own output, not
+canonical copies.
+
 ## Substrate, not macf-consumer
 
 This workspace is one of three **MACF substrate workspaces** (alongside `macf-science-agent` and `macf` / code-agent). Substrate = source of canonical patterns.
