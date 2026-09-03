@@ -79,3 +79,35 @@ k3s/.token
 fleet/locks/
 .macf/maintenance-locks/
 .claude/.macf/maintenance.lock
+
+# --- macf-managed files (groundnuty/macf#1412/#1416) ---
+# These are byte-copies written by `macf rules refresh`. Tracking them makes git
+# a SECOND WRITER: a checkout/reset/fresh-clone silently reinstalls the committed
+# copy over a current one, and the workspace reads as healthy while being stale.
+#
+# Scripts are ignored wholesale — every one is tool-managed.
+.claude/scripts/
+
+# Rules are ignored BY NAME, not by directory. `.claude/rules/` is NOT homogeneous:
+# it holds canonical copies AND this workspace's own hand-authored rules, which are
+# the substrate's actual output. A blanket ignore would make those untrackable —
+# not drift, simply ABSENT on a fresh clone (macf-science-agent's objection on #1416).
+# Managed (ignored):
+.claude/rules/assert-the-wrong-path.md
+.claude/rules/check-before-propose.md
+.claude/rules/codify-at-correction-time.md
+.claude/rules/coordination.md
+.claude/rules/delegation-template.md
+.claude/rules/execute-on-directive.md
+.claude/rules/gh-token-attribution-traps.md
+.claude/rules/mention-routing-hygiene.md
+.claude/rules/model-era-compatibility.md
+.claude/rules/observability-wiring.md
+.claude/rules/peer-dynamic.md
+.claude/rules/pr-discipline.md
+.claude/rules/reflection-staging.md
+.claude/rules/silent-fallback-hazards.md
+.claude/rules/test-timeout-discriminator.md
+.claude/rules/verify-before-claim.md
+
+# Hand-authored and DELIBERATELY still tracked: agent-identity.md, autonomous-work.md, gh-token-refresh.md, project-conventions.md
